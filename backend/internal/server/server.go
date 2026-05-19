@@ -24,6 +24,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -100,9 +101,9 @@ type loginAttempt struct {
 }
 
 const (
-	loginLimitWindow = time.Minute
-	loginBlockFor    = 5 * time.Minute
-	loginMaxFailures = 5
+	loginLimitWindow = 3 * time.Minute
+	loginBlockFor    = 90 * time.Second
+	loginMaxFailures = 10
 )
 
 func New(cfg *config.Config, st *store.Store) *fiber.App {
@@ -204,7 +205,8 @@ func (s *Server) login(c *fiber.Ctx) error {
 	_ = s.store.DeleteExpiredTokens(time.Now())
 	if !s.loginLimiter.allow(ip) {
 		_ = s.store.Audit("login_rate_limited", ip, "")
-		return fiber.NewError(fiber.StatusTooManyRequests, "too many login attempts, please retry later")
+		c.Set("Retry-After", strconv.Itoa(int(s.loginLimiter.retryAfter(ip).Seconds())))
+		return fiber.NewError(fiber.StatusTooManyRequests, "尝试次数较多，请稍候再试。")
 	}
 	var in struct {
 		Code string `json:"code"`
@@ -212,10 +214,14 @@ func (s *Server) login(c *fiber.Ctx) error {
 	if err := c.BodyParser(&in); err != nil {
 		return fiber.ErrBadRequest
 	}
+	in.Code = normalizeLoginCode(in.Code)
+	if len(in.Code) != 6 {
+		return fiber.NewError(fiber.StatusBadRequest, "请输入 6 位动态验证码。")
+	}
 	if !s.validateLoginCode(in.Code) {
 		s.loginLimiter.recordFailure(ip)
 		_ = s.store.Audit("login_failed", ip, "")
-		return fiber.ErrUnauthorized
+		return fiber.NewError(fiber.StatusUnauthorized, "动态验证码无效，请确认设备时间已同步后重试。")
 	}
 	s.loginLimiter.reset(ip)
 	id, _, err := security.NewToken()
@@ -237,7 +243,8 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 	_ = s.store.DeleteExpiredTokens(time.Now())
 	if !s.loginLimiter.allow(ip) {
 		_ = s.store.Audit("login_rate_limited", ip, "管理员登录")
-		return fiber.NewError(fiber.StatusTooManyRequests, "too many login attempts, please retry later")
+		c.Set("Retry-After", strconv.Itoa(int(s.loginLimiter.retryAfter(ip).Seconds())))
+		return fiber.NewError(fiber.StatusTooManyRequests, "尝试次数较多，请稍候再试。")
 	}
 	var in struct {
 		Username string `json:"username"`
@@ -278,10 +285,27 @@ func (s *Server) validateAdminLogin(username, password string) bool {
 }
 
 func (s *Server) validateLoginCode(code string) bool {
+	code = normalizeLoginCode(code)
 	if s.config.Auth.TOTPSecret == "" {
 		return s.config.Auth.DevAllowFixedCode && code == "000000"
 	}
-	return totp.Validate(code, s.config.Auth.TOTPSecret)
+	ok, err := totp.ValidateCustom(code, s.config.Auth.TOTPSecret, time.Now(), totp.ValidateOpts{
+		Period:    30,
+		Skew:      1,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	return err == nil && ok
+}
+
+func normalizeLoginCode(code string) string {
+	var b strings.Builder
+	for _, r := range code {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (s *Server) clientIP(c *fiber.Ctx) string {
@@ -530,6 +554,16 @@ func (l *loginLimiter) allow(key string) bool {
 		delete(l.attempts, key)
 	}
 	return true
+}
+
+func (l *loginLimiter) retryAfter(key string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	remaining := time.Until(l.attempts[key].blockedTil)
+	if remaining <= 0 {
+		return time.Second
+	}
+	return remaining
 }
 
 func (l *loginLimiter) recordFailure(key string) {

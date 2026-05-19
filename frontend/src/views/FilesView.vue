@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError, api, downloadUrl } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
+import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { DirectoryInfo, FileEntry } from '@/types'
 import { formatBytes, formatDate, joinPath, parentPath } from '@/utils'
@@ -27,6 +28,11 @@ const responseCanDownload = ref<boolean | null>(null)
 let uploadCounter = 0
 
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === selectedDirId.value))
+const dirOptions = computed(() => dirs.value.map((dir) => ({
+  label: dir.label || dir.name,
+  value: dir.id,
+  hint: dir.description || dir.root || dir.id,
+})))
 const canUpload = computed(() => responseCanUpload.value ?? Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const canDownload = computed(() => responseCanDownload.value ?? (selectedDir.value ? selectedDir.value.canDownload !== false && selectedDir.value.allowDownload !== false : false))
 const hasPendingUploads = computed(() => uploadQueue.value.some((item) => item.status === 'queued' || item.status === 'error'))
@@ -139,11 +145,7 @@ onMounted(loadDirs)
         <h1>文件浏览</h1>
         <p>选择目录，浏览路径，按权限下载或上传临时文件。</p>
       </div>
-      <div class="select-wrap page-select">
-        <select v-model="selectedDirId" class="select" aria-label="选择目录">
-          <option v-for="dir in dirs" :key="dir.id" :value="dir.id">{{ dir.label || dir.name }}</option>
-        </select>
-      </div>
+      <GlassSelect v-model="selectedDirId" class="page-select" :options="dirOptions" aria-label="选择目录" placeholder="选择目录" />
     </header>
 
     <StateBlock :loading="loading" :error="error" />
@@ -182,7 +184,7 @@ onMounted(loadDirs)
           @dragleave="dragOver = false"
           @drop="onDrop"
         >
-          <div class="dropzone-icon">⤴</div>
+          <div class="dropzone-symbol" aria-hidden="true"><span /></div>
           <div><strong>拖拽文件到此上传</strong><small>或点击按钮选择文件，队列支持失败重试</small></div>
           <label class="upload-btn">
             选择文件
@@ -212,8 +214,14 @@ onMounted(loadDirs)
           <tbody>
             <tr v-for="entry in entries" :key="entry.path || entry.name">
               <td data-label="名称">
-                <button v-if="entryIsDir(entry)" class="link-cell" @click="openDir(entry)">📁 {{ entry.name }}</button>
-                <span v-else>📄 {{ entry.name }}</span>
+                <button v-if="entryIsDir(entry)" class="link-cell file-name" @click="openDir(entry)">
+                  <span class="file-type-ico folder" aria-hidden="true" />
+                  <span>{{ entry.name }}</span>
+                </button>
+                <span v-else class="file-name">
+                  <span class="file-type-ico file" aria-hidden="true" />
+                  <span>{{ entry.name }}</span>
+                </span>
               </td>
               <td data-label="大小">{{ entryIsDir(entry) ? '目录' : formatBytes(entry.size) }}</td>
               <td data-label="修改时间">{{ formatDate(entry.modifiedAt || entry.mtime) }}</td>

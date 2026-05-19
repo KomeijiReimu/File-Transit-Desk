@@ -208,7 +208,7 @@ onMounted(loadInfo)
               @dragleave="dragOver = false"
               @drop="onDrop"
             >
-              <div class="dropzone-icon">⤴</div>
+              <div class="dropzone-symbol" aria-hidden="true"><span /></div>
               <strong>把文件拖到这里</strong>
               <small>或点击此处选择文件，支持多文件</small>
               <input

@@ -11,6 +11,8 @@ import (
 
 	"filetrans-backend/internal/config"
 	"filetrans-backend/internal/store"
+
+	"github.com/pquerna/otp/totp"
 )
 
 func TestAdminOnlyTokenRoutes(t *testing.T) {
@@ -80,6 +82,25 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected blocked extension to be forbidden, got %d", resp.StatusCode)
+	}
+}
+
+func TestValidateLoginCodeAcceptsAdjacentTOTPWindow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	cfg.Auth.Admin.Username = "admin"
+	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	s := &Server{config: cfg}
+
+	code, err := totp.GenerateCode(cfg.Auth.TOTPSecret, time.Now().Add(-30*time.Second))
+	if err != nil {
+		t.Fatalf("generate previous-window totp: %v", err)
+	}
+	if !s.validateLoginCode(code) {
+		t.Fatalf("expected previous-window totp to be accepted")
+	}
+	if !s.validateLoginCode(" " + code[:3] + " " + code[3:] + " ") {
+		t.Fatalf("expected formatted totp to be normalized and accepted")
 	}
 }
 

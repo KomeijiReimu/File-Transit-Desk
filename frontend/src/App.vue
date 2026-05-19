@@ -30,20 +30,20 @@ async function handleLogout() {
 
       <nav class="nav-list" aria-label="主导航">
         <RouterLink to="/files">
-          <span class="nav-ico" aria-hidden="true">📁</span>
+          <span class="nav-ico nav-files" aria-hidden="true" />
           <span>文件浏览</span>
         </RouterLink>
         <template v-if="isAdmin">
           <RouterLink to="/tokens">
-            <span class="nav-ico" aria-hidden="true">🔗</span>
+            <span class="nav-ico nav-tokens" aria-hidden="true" />
             <span>令牌管理</span>
           </RouterLink>
           <RouterLink to="/audit">
-            <span class="nav-ico" aria-hidden="true">📜</span>
+            <span class="nav-ico nav-audit" aria-hidden="true" />
             <span>访问记录</span>
           </RouterLink>
           <RouterLink to="/config">
-            <span class="nav-ico" aria-hidden="true">⚙️</span>
+            <span class="nav-ico nav-config" aria-hidden="true" />
             <span>配置概览</span>
           </RouterLink>
         </template>

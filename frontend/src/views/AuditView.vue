@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
+import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { AuditLog } from '@/types'
 import { formatDate } from '@/utils'
@@ -12,6 +13,11 @@ const error = ref('')
 const limit = ref(100)
 const keyword = ref('')
 const status = ref('all')
+const statusOptions = [
+  { label: '全部记录', value: 'all', hint: '显示所有审计事件' },
+  { label: '正常行为', value: 'ok', hint: '登录、浏览、上传、下载' },
+  { label: '失败 / 拒绝', value: 'failed', hint: '失败、限速、无权限' },
+]
 
 const filteredLogs = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
@@ -42,10 +48,17 @@ function loadMore() {
 }
 
 onMounted(() => load())
+
+function logTone(log: AuditLog) {
+  const text = [log.action, log.actionLabel, log.status, log.detail].filter(Boolean).join(' ').toLowerCase()
+  if (/rate_limited|failed|denied|forbidden|unauthorized|illegal|失败|拒绝|非法|未认证|限速/.test(text)) return 'failed'
+  if (/token|令牌/.test(text)) return 'token'
+  return 'ok'
+}
 </script>
 
 <template>
-  <section class="page-stack">
+  <section class="page-stack audit-page">
     <header class="page-header split">
       <div><p class="eyebrow">Audit</p><h1>访问记录</h1><p>查看最近登录、下载、上传、令牌访问等行为。</p></div>
       <button class="ghost-btn" @click="load()">刷新</button>
@@ -54,20 +67,14 @@ onMounted(() => load())
     <div class="panel filter-bar">
       <label>筛选关键字<input v-model.trim="keyword" placeholder="例如 登录、上传、某个 IP" /></label>
       <label>状态
-        <div class="select-wrap">
-          <select v-model="status" class="select">
-            <option value="all">全部</option>
-            <option value="ok">正常行为</option>
-            <option value="failed">失败 / 拒绝</option>
-          </select>
-        </div>
+        <GlassSelect v-model="status" :options="statusOptions" aria-label="筛选访问记录状态" />
       </label>
       <button class="ghost-btn" type="button" @click="keyword = ''; status = 'all'">清空筛选</button>
     </div>
 
     <StateBlock :loading="loading" :error="error" />
     <div class="timeline" v-if="filteredLogs.length">
-      <article v-for="(log, index) in filteredLogs" :key="log.id || index" class="timeline-item">
+      <article v-for="(log, index) in filteredLogs" :key="log.id || index" class="timeline-item" :data-status="logTone(log)">
         <span class="timeline-dot" />
         <div>
           <strong>{{ log.actionLabel || log.action }}</strong>

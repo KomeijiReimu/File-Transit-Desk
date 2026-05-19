@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
+import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { CreateTokenResponse, DirectoryInfo, TokenInfo } from '@/types'
 import { buildShareUrl, copyToClipboard, extractShareToken, formatDate } from '@/utils'
@@ -18,6 +19,15 @@ const rowCopyId = ref<string | number | null>(null)
 
 const form = reactive({ type: 'download' as 'download' | 'upload', dirId: '', path: '', ttlMinutes: 60, maxUses: 1 })
 const canSubmit = computed(() => form.dirId && form.ttlMinutes > 0 && form.maxUses > 0)
+const typeOptions = [
+  { label: '下载令牌', value: 'download', hint: '外部访客领取文件' },
+  { label: '上传令牌', value: 'upload', hint: '外部访客提交文件' },
+]
+const dirOptions = computed(() => dirs.value.map((dir) => ({
+  label: dir.label || dir.name,
+  value: dir.id,
+  hint: dir.description || dir.root || dir.id,
+})))
 
 function tokenType(token: TokenInfo) {
   return token.type || token.kind || 'download'
@@ -123,19 +133,10 @@ onMounted(load)
       <form class="panel form-grid" @submit.prevent="createToken">
         <h2>创建一次性链接</h2>
         <label>类型
-          <div class="select-wrap">
-            <select v-model="form.type" class="select">
-              <option value="download">下载令牌</option>
-              <option value="upload">上传令牌</option>
-            </select>
-          </div>
+          <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择令牌类型" />
         </label>
         <label>目录
-          <div class="select-wrap">
-            <select v-model="form.dirId" class="select">
-              <option v-for="dir in dirs" :key="dir.id" :value="dir.id">{{ dir.label || dir.name }}</option>
-            </select>
-          </div>
+          <GlassSelect v-model="form.dirId" :options="dirOptions" aria-label="选择目录" placeholder="选择目录" />
         </label>
         <label>路径
           <input v-model.trim="form.path" placeholder="空为目录根路径，或填写 sub/file.zip" />

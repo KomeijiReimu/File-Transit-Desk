@@ -13,8 +13,8 @@ const password = ref('')
 const loading = ref(false)
 const error = ref('')
 
-const normalized = computed(() => code.value.replace(/\D/g, '').slice(0, 8))
-const totpValid = computed(() => normalized.value.length >= 6)
+const normalized = computed(() => code.value.replace(/\D/g, '').slice(0, 6))
+const totpValid = computed(() => normalized.value.length === 6)
 const adminValid = computed(() => username.value.trim().length > 0 && password.value.length > 0)
 const canSubmit = computed(() => (mode.value === 'totp' ? totpValid.value : adminValid.value))
 
@@ -33,7 +33,7 @@ async function submit() {
   if (mode.value === 'totp') {
     code.value = normalized.value
     if (!totpValid.value) {
-      error.value = '请输入至少 6 位动态验证码。'
+      error.value = '请输入 6 位动态验证码。'
       return
     }
   } else if (!adminValid.value) {
@@ -49,7 +49,7 @@ async function submit() {
     }
     router.replace(safeRedirect(route.query.redirect))
   } catch (err) {
-    error.value = err instanceof ApiError ? err.message : '登录失败，请稍后重试。'
+    error.value = err instanceof ApiError ? err.message : '登录失败，请确认输入后重试。'
   } finally {
     loading.value = false
   }
@@ -59,14 +59,8 @@ async function submit() {
 <template>
   <main class="login-page">
     <section class="login-hero">
-      <p class="eyebrow">Personal transfer vault</p>
-      <h1>把临时文件传得干净利落。</h1>
-      <p>动态口令进入用户视图，管理员账号进入完整控制台——下载、上传、令牌与访问记录尽收眼底。</p>
-      <ul class="hero-points">
-        <li><span class="dot" /> 一次性分享链接，过期自动失效</li>
-        <li><span class="dot" /> 全量审计：谁、何时、从哪里访问</li>
-        <li><span class="dot" /> 纯浏览器拖拽上传，零客户端</li>
-      </ul>
+      <p class="eyebrow">文件传输台</p>
+      <h1>安全访问文件传输台</h1>
     </section>
 
     <form class="login-card" @submit.prevent="submit">
@@ -99,7 +93,7 @@ async function submit() {
             v-model="code"
             inputmode="numeric"
             autocomplete="one-time-code"
-            maxlength="8"
+            maxlength="6"
             placeholder="例如 123456"
             autofocus
           />
@@ -129,12 +123,8 @@ async function submit() {
 
       <p v-if="error" class="alert error">{{ error }}</p>
       <button class="primary-btn full" :disabled="loading || !canSubmit" type="submit">
-        {{ loading ? '正在验证…' : mode === 'totp' ? '进入控制台' : '以管理员身份登录' }}
+        {{ loading ? '正在验证…' : '登录' }}
       </button>
-
-      <p class="login-foot">
-        {{ mode === 'totp' ? '需要后台管理？切换到管理员账号。' : '只想下载/上传？回到动态验证码登录。' }}
-      </p>
     </form>
   </main>
 </template>
