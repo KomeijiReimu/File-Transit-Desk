@@ -1,0 +1,46 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  # 仅在可信反向代理后启用；启用后审计和登录限速会读取 X-Forwarded-For / X-Real-IP。
+  trust_proxy_headers: false
+database:
+  path: "./data/filetrans.db"
+auth:
+  # 必须替换为自己的 Base32 TOTP secret。保持占位符会导致服务拒绝启动。
+  totp_secret: "REPLACE_WITH_YOUR_BASE32_SECRET"
+  # 仅本地开发可改为 true；且仅当 totp_secret 为空时允许验证码 000000。
+  dev_allow_fixed_code: false
+  session_ttl_seconds: 86400
+  cookie_secure: false
+  admin:
+    username: "REPLACE_WITH_ADMIN_USERNAME"
+    # 管理员密码的 sha256 hex。生成：printf '%s' 'your-password' | sha256sum | awk '{print $1}'
+    password_sha256: "REPLACE_WITH_ADMIN_PASSWORD_SHA256"
+web:
+  static_dir: "../frontend/dist"
+cors:
+  allow_origins:
+    - "http://localhost:5173"
+storage:
+  # 整个请求体上限；后端 Fiber BodyLimit 也使用该值。
+  upload_max_mb: 512
+  # 单个文件上限，必须小于等于 upload_max_mb。
+  upload_max_file_mb: 512
+  # 单次 multipart 请求最多允许的文件数量。
+  upload_max_files: 20
+  # 白名单非空时，只允许这些扩展名；示例： [".zip", ".txt", ".pdf"]。
+  allowed_extensions: []
+  # 黑名单优先级高于白名单，危险类型建议显式阻断。
+  blocked_extensions: [".exe", ".bat", ".cmd", ".sh", ".ps1", ".msi"]
+  dirs:
+    - id: "default"
+      name: "Default"
+      path: "./uploads"
+      allow_download: true
+      allow_upload: true
+tokens:
+  default_ttl_seconds: 3600
+  # 单个上传令牌的累计上传容量；0 表示不限制。
+  upload_max_mb: 1024
+audit:
+  retain: 1000

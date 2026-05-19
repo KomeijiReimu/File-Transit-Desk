@@ -1,0 +1,22 @@
+services:
+  backend:
+    build:
+      context: .
+    container_name: file-trans-backend
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    expose:
+      - "8080"
+
+  frontend:
+    build:
+      context: ../frontend
+    container_name: file-trans-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"

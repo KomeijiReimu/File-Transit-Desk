@@ -1,0 +1,9 @@
+.git
+bin
+data
+uploads
+config.yaml
+*.db
+*.db-*
+Dockerfile
+README.md

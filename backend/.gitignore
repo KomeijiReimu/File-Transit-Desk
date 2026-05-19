@@ -1,0 +1,9 @@
+bin/
+/server
+data/
+uploads/
+*.db
+*.db-*
+config.yaml
+.env
+.DS_Store
