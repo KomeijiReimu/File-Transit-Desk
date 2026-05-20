@@ -338,6 +338,23 @@ code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; pa
 .insight-card { padding: var(--space-card); display: grid; align-content: center; gap: 12px; min-height: 240px; }
 .big-number { font-size: 72px; font-weight: 800; color: var(--accent); line-height: 1; font-family: "Songti SC", serif; }
 
+/* ---------------- Confirmation dialog ---------------- */
+.dialog-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 24px; background: rgba(4,6,12,.64); backdrop-filter: blur(18px); }
+.confirm-dialog { width: min(100%, 520px); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid rgba(255,255,255,.16); border-radius: 30px; padding: clamp(22px, 3vw, 30px); background: linear-gradient(150deg, rgba(22,27,45,.96), rgba(9,12,24,.94)); box-shadow: 0 30px 90px rgba(0,0,0,.48); display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 18px; outline: none; }
+.confirm-icon { width: 56px; height: 56px; border-radius: 20px; display: grid; place-items: center; font-weight: 900; color: #1d1209; background: linear-gradient(135deg, var(--accent), #ff704d); box-shadow: 0 16px 40px rgba(255,112,77,.25); }
+.confirm-dialog.danger .confirm-icon { color: #24070b; background: linear-gradient(135deg, var(--danger), #ff9b6a); box-shadow: 0 16px 40px rgba(255,107,122,.24); }
+.confirm-copy { display: grid; gap: 8px; min-width: 0; }
+.confirm-copy h2 { margin: 0; font-family: "Songti SC", "Noto Serif CJK SC", serif; font-size: clamp(24px, 4vw, 32px); line-height: 1.12; }
+.confirm-copy p { margin: 0; color: var(--text); line-height: 1.65; }
+.confirm-copy small { overflow-wrap: anywhere; line-height: 1.55; }
+.dialog-error { border-radius: 14px; padding: 11px 13px; color: #ffd5da; background: rgba(255,107,122,.13); border: 1px solid rgba(255,107,122,.35); line-height: 1.55; }
+.confirm-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; padding-top: 4px; }
+.primary-btn.danger { background: linear-gradient(135deg, var(--danger), #ff9b6a); color: #24070b; box-shadow: 0 14px 30px rgba(255,107,122,.24); }
+.dialog-pop-enter-active, .dialog-pop-leave-active { transition: opacity .18s ease; }
+.dialog-pop-enter-active .confirm-dialog, .dialog-pop-leave-active .confirm-dialog { transition: transform .18s ease, opacity .18s ease; }
+.dialog-pop-enter-from, .dialog-pop-leave-to { opacity: 0; }
+.dialog-pop-enter-from .confirm-dialog, .dialog-pop-leave-to .confirm-dialog { opacity: 0; transform: translateY(10px) scale(.96); }
+
 /* ---------------- Audit timeline + filters ---------------- */
 .filter-bar { padding: var(--space-card); display: grid; grid-template-columns: minmax(260px, 1.6fr) minmax(220px, .9fr) auto; gap: 16px; align-items: end; }
 .filter-bar .ghost-btn { align-self: end; height: 48px; }
@@ -435,6 +452,10 @@ code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; pa
   .filter-meta { justify-content: flex-start; }
   .inline-fields { grid-template-columns: 1fr; }
   .share-card { padding: 24px; border-radius: 24px; }
+  .confirm-dialog { grid-template-columns: 1fr; }
+  .confirm-icon { width: 48px; height: 48px; border-radius: 17px; }
+  .confirm-actions { flex-direction: column-reverse; }
+  .confirm-actions .primary-btn, .confirm-actions .ghost-btn { width: 100%; }
 
   /* Table → card list with data-label */
   .data-table, .data-table thead, .data-table tbody, .data-table tr { display: block; }

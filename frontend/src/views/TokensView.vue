@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ApiError, api } from '@/api'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
@@ -16,6 +17,9 @@ const createdLink = ref('')
 const createdToken = ref('')
 const copyState = ref<'idle' | 'ok' | 'err'>('idle')
 const rowCopyId = ref<string | number | null>(null)
+const pendingDelete = ref<TokenInfo | null>(null)
+const deleteError = ref('')
+const deleting = ref(false)
 
 const form = reactive({ type: 'download' as 'download' | 'upload', dirId: '', path: '', ttlMinutes: 60, maxUses: 1 })
 const canSubmit = computed(() => form.dirId && form.ttlMinutes > 0 && form.maxUses > 0)
@@ -63,6 +67,12 @@ function canRevoke(token: TokenInfo) {
 function deleteLabel(token: TokenInfo) {
   return canRevoke(token) ? '删除并失效' : '删除记录'
 }
+
+const deleteDialogTitle = computed(() => pendingDelete.value && canRevoke(pendingDelete.value) ? '删除并立即失效？' : '删除这条令牌记录？')
+const deleteDialogMessage = computed(() => pendingDelete.value && canRevoke(pendingDelete.value)
+  ? '这个令牌当前仍可用。删除后会立即失效，并清理它已经兑换但尚未过期的下载票据。'
+  : '这条令牌已经不可用。删除后只会从管理列表中移除历史记录。')
+const deleteDialogDetail = computed(() => pendingDelete.value ? `${tokenType(pendingDelete.value) === 'upload' ? '上传' : '下载'} · ${pendingDelete.value.dirName || pendingDelete.value.dirId || pendingDelete.value.dir || '未知目录'} · ${pendingDelete.value.path || '/'}` : '')
 
 async function load() {
   loading.value = true
@@ -134,14 +144,25 @@ async function revoke(id: string | number) {
   }
 }
 
-async function remove(token: TokenInfo) {
-  if (!confirm(canRevoke(token) ? '确定删除并立即让这个令牌失效吗？此操作会移除历史记录并清理相关下载票据。' : '确定删除这条令牌记录吗？')) return
+function requestRemove(token: TokenInfo) {
+  pendingDelete.value = token
+  deleteError.value = ''
+}
+
+async function confirmRemove() {
+  const token = pendingDelete.value
+  if (!token || deleting.value) return
   error.value = ''
+  deleteError.value = ''
+  deleting.value = true
   try {
     await api.deleteToken(token.id)
     tokens.value = tokens.value.filter((item) => item.id !== token.id)
+    pendingDelete.value = null
   } catch (err) {
-    error.value = err instanceof ApiError ? err.message : '删除令牌失败。'
+    deleteError.value = err instanceof ApiError ? err.message : '删除令牌失败。'
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -193,7 +214,7 @@ onMounted(load)
       <div class="panel insight-card">
         <span class="big-number">{{ tokens.length }}</span>
         <strong>当前令牌</strong>
-        <p>撤销用于立刻让链接失效并清理已兑换下载票据；删除用于移除历史记录。两者不是重复操作。</p>
+        <p>撤销用于立刻让链接失效并清理已兑换下载票据；删除对已失效令牌只移除记录，对仍可用令牌会一并失效。</p>
       </div>
     </div>
 
@@ -217,7 +238,7 @@ onMounted(load)
                   {{ rowCopyId === token.id ? '✓ 已复制' : canCopyRow(token) ? '复制链接' : '仅创建时可复制' }}
                 </button>
                 <button class="mini-btn" :disabled="!canRevoke(token)" :title="canRevoke(token) ? '立即让链接失效' : '该令牌已经不可用，无需再次撤销'" @click="revoke(token.id)">撤销</button>
-                <button class="mini-btn danger" :title="canRevoke(token) ? '删除记录并让仍可用的令牌失效' : '删除历史记录'" @click="remove(token)">{{ deleteLabel(token) }}</button>
+                <button class="mini-btn danger" :title="canRevoke(token) ? '删除记录并让仍可用的令牌失效' : '删除历史记录'" @click="requestRemove(token)">{{ deleteLabel(token) }}</button>
               </div>
             </td>
           </tr>
@@ -225,5 +246,18 @@ onMounted(load)
       </table>
       <EmptyState v-else-if="!loading" title="还没有令牌" description="创建一个短期链接后，它会显示在这里。" />
     </div>
+
+    <ConfirmDialog
+      :open="Boolean(pendingDelete)"
+      :title="deleteDialogTitle"
+      :message="deleteDialogMessage"
+      :detail="deleteDialogDetail"
+      :error="deleteError"
+      :confirm-label="pendingDelete ? deleteLabel(pendingDelete) : '删除'"
+      :danger="true"
+      :loading="deleting"
+      @cancel="pendingDelete = null"
+      @confirm="confirmRemove"
+    />
   </section>
 </template>
