@@ -10,7 +10,12 @@ auth:
   totp_secret: "REPLACE_WITH_YOUR_BASE32_SECRET"
   # 仅本地开发可改为 true；且仅当 totp_secret 为空时允许验证码 000000。
   dev_allow_fixed_code: false
+  # 会话绝对最长有效期；到期后必须重新登录。
   session_ttl_seconds: 86400
+  # 用户无活动超过该时间后视为空闲过期；前端只在可见且有操作时发送心跳续期。
+  idle_timeout_seconds: 180
+  # 给页面切换、网络抖动等场景预留的宽限配置，当前用于文档化部署策略。
+  idle_grace_seconds: 30
   cookie_secure: false
   admin:
     username: "REPLACE_WITH_ADMIN_USERNAME"
@@ -18,6 +23,11 @@ auth:
     password_sha256: "REPLACE_WITH_ADMIN_PASSWORD_SHA256"
 web:
   static_dir: "../frontend/dist"
+downloads:
+  # 下载票据有效期。点击下载时先兑换票据，长下载和 Range 续传不再依赖页面会话。
+  lease_ttl_seconds: 7200
+  # 下载票据最大有效期上限，防止误配置过长。
+  lease_max_ttl_seconds: 21600
 cors:
   allow_origins:
     - "http://localhost:5173"

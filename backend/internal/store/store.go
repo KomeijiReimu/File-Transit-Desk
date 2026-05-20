@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -35,11 +36,29 @@ type Token struct {
 }
 
 type Session struct {
-	ID        string
-	ExpiresAt time.Time
-	CreatedAt time.Time
-	Role      string
-	Name      string
+	ID            string
+	ExpiresAt     time.Time
+	IdleExpiresAt time.Time
+	LastSeenAt    time.Time
+	CreatedAt     time.Time
+	Role          string
+	Name          string
+}
+
+type DownloadLease struct {
+	ID         int64
+	Hash       string
+	Source     string
+	SessionID  sql.NullString
+	TokenID    sql.NullInt64
+	Role       string
+	DirID      string
+	Path       string
+	FileSize   int64
+	FileMtime  time.Time
+	ExpiresAt  time.Time
+	CreatedAt  time.Time
+	LastUsedAt sql.NullTime
 }
 
 type AuditLog struct {
@@ -76,11 +95,14 @@ func (s *Store) Migrate() error {
 CREATE TABLE IF NOT EXISTS sessions(
   id TEXT PRIMARY KEY,
   expires_at DATETIME NOT NULL,
+  idle_expires_at DATETIME NOT NULL,
+  last_seen_at DATETIME NOT NULL,
   created_at DATETIME NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   name TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at);
 
 CREATE TABLE IF NOT EXISTS tokens(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +128,24 @@ CREATE TABLE IF NOT EXISTS audit_logs(
   created_at DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+
+CREATE TABLE IF NOT EXISTS download_leases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lease_hash TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL,
+  session_id TEXT,
+  token_id INTEGER,
+  role TEXT NOT NULL DEFAULT '',
+  dir_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_mtime DATETIME NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL,
+  last_used_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_download_leases_hash ON download_leases(lease_hash);
+CREATE INDEX IF NOT EXISTS idx_download_leases_expires_at ON download_leases(expires_at);
 `)
 	if err != nil {
 		return err
@@ -114,6 +154,18 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
 		return err
 	}
 	if err := s.addColumnIfMissing("sessions", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("sessions", "last_seen_at", "DATETIME"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("sessions", "idle_expires_at", "DATETIME"); err != nil {
+		return err
+	}
+	if _, err := s.DB.Exec(`UPDATE sessions SET last_seen_at = created_at WHERE last_seen_at IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.DB.Exec(`UPDATE sessions SET idle_expires_at = expires_at WHERE idle_expires_at IS NULL`); err != nil {
 		return err
 	}
 	return s.addColumnIfMissing("tokens", "uploaded_bytes", "INTEGER NOT NULL DEFAULT 0")
@@ -146,15 +198,25 @@ func (s *Store) addColumnIfMissing(table, column, definition string) error {
 }
 
 func (s *Store) CreateSession(id string, expiresAt time.Time, role, name string) error {
+	return s.CreateSessionWithIdle(id, expiresAt, expiresAt, role, name)
+}
+
+func (s *Store) CreateSessionWithIdle(id string, expiresAt, idleExpiresAt time.Time, role, name string) error {
 	if role == "" {
 		role = "user"
 	}
+	now := time.Now()
+	if idleExpiresAt.After(expiresAt) {
+		idleExpiresAt = expiresAt
+	}
 	storedID := hashSessionID(id)
 	_, err := s.DB.Exec(
-		`INSERT INTO sessions(id, expires_at, created_at, role, name) VALUES(?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions(id, expires_at, idle_expires_at, last_seen_at, created_at, role, name) VALUES(?, ?, ?, ?, ?, ?, ?)`,
 		storedID,
 		expiresAt,
-		time.Now(),
+		idleExpiresAt,
+		now,
+		now,
 		role,
 		name,
 	)
@@ -163,15 +225,31 @@ func (s *Store) CreateSession(id string, expiresAt time.Time, role, name string)
 
 func (s *Store) Session(id string) (Session, error) {
 	var sess Session
-	err := s.DB.QueryRow(`SELECT id, expires_at, created_at, role, name FROM sessions WHERE id = ?`, hashSessionID(id)).Scan(
-		&sess.ID, &sess.ExpiresAt, &sess.CreatedAt, &sess.Role, &sess.Name,
+	err := s.DB.QueryRow(`SELECT id, expires_at, idle_expires_at, last_seen_at, created_at, role, name FROM sessions WHERE id = ?`, hashSessionID(id)).Scan(
+		&sess.ID, &sess.ExpiresAt, &sess.IdleExpiresAt, &sess.LastSeenAt, &sess.CreatedAt, &sess.Role, &sess.Name,
 	)
 	return sess, err
 }
 
 func (s *Store) SessionValid(id string) bool {
 	sess, err := s.Session(id)
-	return err == nil && time.Now().Before(sess.ExpiresAt)
+	now := time.Now()
+	return err == nil && now.Before(sess.ExpiresAt) && now.Before(sess.IdleExpiresAt)
+}
+
+func (s *Store) TouchSession(id string, now, idleExpiresAt time.Time) error {
+	res, err := s.DB.Exec(`UPDATE sessions SET last_seen_at = ?, idle_expires_at = ? WHERE id = ?`, now, idleExpiresAt, hashSessionID(id))
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) DeleteSession(id string) error {
@@ -185,7 +263,78 @@ func hashSessionID(id string) string {
 }
 
 func (s *Store) DeleteExpiredSessions(now time.Time) error {
-	_, err := s.DB.Exec(`DELETE FROM sessions WHERE datetime(expires_at) <= datetime(?)`, now)
+	_, err := s.DB.Exec(`DELETE FROM sessions WHERE datetime(expires_at) <= datetime(?) OR datetime(idle_expires_at) <= datetime(?)`, now, now)
+	return err
+}
+
+func (s *Store) DeleteExpiredSessionsWithIdleGrace(now time.Time, grace time.Duration) error {
+	_, err := s.DB.Exec(
+		`DELETE FROM sessions WHERE datetime(expires_at) <= datetime(?) OR datetime(idle_expires_at, ?) <= datetime(?)`,
+		now,
+		fmtSQLiteDuration(grace),
+		now,
+	)
+	return err
+}
+
+func (s *Store) DeleteExpiredDownloadLeases(now time.Time) error {
+	_, err := s.DB.Exec(`DELETE FROM download_leases WHERE datetime(expires_at) <= datetime(?)`, now)
+	return err
+}
+
+func (s *Store) DeleteDownloadLeasesByTokenID(id int64) error {
+	_, err := s.DB.Exec(`DELETE FROM download_leases WHERE token_id = ?`, id)
+	return err
+}
+
+func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
+	now := time.Now()
+	if lease.CreatedAt.IsZero() {
+		lease.CreatedAt = now
+	}
+	res, err := s.DB.Exec(
+		`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		lease.Hash,
+		lease.Source,
+		lease.SessionID,
+		lease.TokenID,
+		lease.Role,
+		lease.DirID,
+		lease.Path,
+		lease.FileSize,
+		lease.FileMtime,
+		lease.ExpiresAt,
+		lease.CreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	lease.ID, err = res.LastInsertId()
+	return err
+}
+
+func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
+	var lease DownloadLease
+	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, expires_at, created_at, last_used_at FROM download_leases WHERE lease_hash = ?`, hash).Scan(
+		&lease.ID,
+		&lease.Hash,
+		&lease.Source,
+		&lease.SessionID,
+		&lease.TokenID,
+		&lease.Role,
+		&lease.DirID,
+		&lease.Path,
+		&lease.FileSize,
+		&lease.FileMtime,
+		&lease.ExpiresAt,
+		&lease.CreatedAt,
+		&lease.LastUsedAt,
+	)
+	return lease, err
+}
+
+func (s *Store) TouchDownloadLease(hash string, now time.Time) error {
+	_, err := s.DB.Exec(`UPDATE download_leases SET last_used_at = ? WHERE lease_hash = ?`, now, hash)
 	return err
 }
 
@@ -304,12 +453,7 @@ func (s *Store) ReleaseTokenUse(id int64, uploadBytes int64) error {
 }
 
 func (s *Store) Revoke(id string) error {
-	_, err := s.DB.Exec(`UPDATE tokens SET revoked = 1 WHERE id = ?`, id)
-	return err
-}
-
-func (s *Store) DeleteToken(id string) error {
-	res, err := s.DB.Exec(`DELETE FROM tokens WHERE id = ?`, id)
+	res, err := s.DB.Exec(`UPDATE tokens SET revoked = 1 WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -321,6 +465,72 @@ func (s *Store) DeleteToken(id string) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (s *Store) RevokeTokenAndLeases(id string) error {
+	numericID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE tokens SET revoked = 1 WHERE id = ?`, numericID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.Exec(`DELETE FROM download_leases WHERE token_id = ?`, numericID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DeleteToken(id string) error {
+	return s.DeleteTokenAndLeases(id)
+}
+
+func (s *Store) DeleteTokenAndLeases(id string) error {
+	numericID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM tokens WHERE id = ?`, numericID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.Exec(`DELETE FROM download_leases WHERE token_id = ?`, numericID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func fmtSQLiteDuration(d time.Duration) string {
+	seconds := int64(d / time.Second)
+	if seconds < 0 {
+		seconds = 0
+	}
+	return "+" + strconv.FormatInt(seconds, 10) + " seconds"
 }
 
 func (s *Store) AuditLogs(limit int) ([]AuditLog, error) {

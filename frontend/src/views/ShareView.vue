@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ApiError, api, publicDownloadUrl } from '@/api'
+import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { TokenInfo } from '@/types'
@@ -20,6 +20,7 @@ const tokenParam = computed(() => String(route.params.token || ''))
 const info = ref<TokenInfo | null>(null)
 const loading = ref(true)
 const error = ref('')
+const downloading = ref(false)
 
 const tokenType = computed(() => info.value?.type || info.value?.kind || 'download')
 const isUpload = computed(() => tokenType.value === 'upload')
@@ -60,7 +61,6 @@ const subline = computed(() => {
     : '点击下方按钮即可开始下载，链接将根据规则自动到期或失效。'
 })
 
-const downloadHref = computed(() => publicDownloadUrl(tokenParam.value))
 const usesLabel = computed(() => {
   if (!info.value) return ''
   const used = info.value.uses ?? info.value.used ?? 0
@@ -79,6 +79,22 @@ async function loadInfo() {
     info.value = null
   } finally {
     loading.value = false
+  }
+}
+
+async function startPublicDownload() {
+  if (!validFlag.value || downloading.value) return
+  downloading.value = true
+  error.value = ''
+  try {
+    const lease = await api.createPublicDownloadLease(tokenParam.value)
+    // 公开下载先兑换票据：只消耗一次使用次数，后续 Range 续传不会重复扣次。
+    window.location.assign(lease.url)
+    try { info.value = await api.publicTokenInfo(tokenParam.value) } catch { /* ignore */ }
+  } catch (err) {
+    error.value = err instanceof ApiError ? err.message : '下载链接创建失败，请稍后重试。'
+  } finally {
+    downloading.value = false
   }
 }
 
@@ -198,8 +214,8 @@ onMounted(loadInfo)
         <!-- Download mode -->
         <template v-if="isDownload">
           <div v-if="validFlag" class="share-actions">
-            <a class="primary-btn big" :href="downloadHref">⇩ 立即下载</a>
-            <small>下载将按链接设置消耗一次使用机会。</small>
+            <button class="primary-btn big" type="button" :disabled="downloading" @click="startPublicDownload">{{ downloading ? '准备下载…' : '⇩ 立即下载' }}</button>
+            <small>下载会先兑换短期票据，断点续传不会重复消耗使用次数。</small>
           </div>
           <div v-else class="alert error">{{ reasonLabel }}</div>
         </template>

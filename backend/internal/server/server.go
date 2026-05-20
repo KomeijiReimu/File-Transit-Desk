@@ -67,6 +67,16 @@ type tokenRequest struct {
 	MaxUsesOld int        `json:"max_uses"`
 }
 
+type downloadLeaseRequest struct {
+	DirID string `json:"dirId"`
+	Path  string `json:"path"`
+}
+
+type downloadLeaseResponse struct {
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
 type tokenDTO struct {
 	ID            int64      `json:"id"`
 	Type          string     `json:"type"`
@@ -122,6 +132,7 @@ func New(cfg *config.Config, st *store.Store) *fiber.App {
 	s := &Server{config: cfg, store: st, loginLimiter: newLoginLimiter()}
 	_ = st.DeleteExpiredSessions(time.Now())
 	_ = st.DeleteExpiredTokens(time.Now())
+	_ = st.DeleteExpiredDownloadLeases(time.Now())
 	app := fiber.New(fiber.Config{
 		BodyLimit:    cfg.Storage.UploadMaxMB * 1024 * 1024,
 		ErrorHandler: jsonErrorHandler,
@@ -151,10 +162,13 @@ func (s *Server) routes(app *fiber.App) {
 	app.Post("/api/auth/login", s.login)
 	app.Post("/api/auth/admin-login", s.adminLogin)
 	app.Get("/api/auth/me", s.auth(s.me))
+	app.Post("/api/auth/heartbeat", s.auth(s.heartbeat))
 	app.Post("/api/auth/logout", s.auth(s.logout))
 	app.Get("/api/dirs", s.auth(s.dirs))
 	app.Get("/api/files/list", s.auth(s.listFiles))
 	app.Get("/api/files/download", s.auth(s.downloadFile))
+	app.Post("/api/files/download-lease", s.auth(s.createDownloadLease))
+	app.Get("/api/files/download-by-lease", s.downloadByLease)
 	app.Post("/api/files/upload", s.auth(s.uploadFiles))
 	app.Get("/api/tokens", s.adminOnly(s.listTokens))
 	app.Post("/api/tokens", s.adminOnly(s.createToken))
@@ -163,6 +177,8 @@ func (s *Server) routes(app *fiber.App) {
 	app.Get("/api/audit/logs", s.adminOnly(s.auditLogs))
 	app.Get("/t/:token/info", s.publicTokenInfo)
 	app.Get("/t/:token/upload", s.publicUploadPage)
+	app.Post("/t/:token/download-lease", s.createPublicDownloadLease)
+	app.Get("/t/download-by-lease", s.downloadByLease)
 	app.Get("/t/:token/download", s.publicDownload)
 	app.Post("/t/:token/upload", s.publicUpload)
 }
@@ -227,11 +243,24 @@ func (s *Server) auth(next fiber.Handler) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		id := c.Cookies("sid")
 		sess, err := s.store.Session(id)
-		if id == "" || err != nil || !time.Now().Before(sess.ExpiresAt) {
-			_ = s.store.DeleteExpiredSessions(time.Now())
+		now := time.Now()
+		grace := time.Duration(s.config.Auth.IdleGraceSeconds) * time.Second
+		idleValid := err == nil && now.Before(sess.IdleExpiresAt)
+		withinIdleGrace := err == nil && !idleValid && grace > 0 && now.Before(sess.IdleExpiresAt.Add(grace))
+		if withinIdleGrace && c.Path() == "/api/auth/heartbeat" {
+			idleValid = true
+		}
+		if id == "" || err != nil || !now.Before(sess.ExpiresAt) || !idleValid {
+			_ = s.store.DeleteExpiredSessionsWithIdleGrace(time.Now(), grace)
+			if id != "" && !withinIdleGrace {
+				s.clearSessionCookie(c)
+			}
 			_ = s.store.Audit("unauthorized", s.clientIP(c), c.Path())
 			return fiber.ErrUnauthorized
 		}
+		c.Locals("sessionID", sess.ID)
+		c.Locals("sessionExpiresAt", sess.ExpiresAt)
+		c.Locals("sessionIdleExpiresAt", sess.IdleExpiresAt)
 		c.Locals("role", sess.Role)
 		c.Locals("name", sess.Name)
 		return next(c)
@@ -281,13 +310,15 @@ func (s *Server) login(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	expiresAt := time.Now().Add(time.Duration(s.config.Auth.SessionTTLSeconds) * time.Second)
-	if err := s.store.CreateSession(id, expiresAt, "user", ""); err != nil {
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(s.config.Auth.SessionTTLSeconds) * time.Second)
+	idleExpiresAt := s.sessionIdleExpiresAt(now, expiresAt)
+	if err := s.store.CreateSessionWithIdle(id, expiresAt, idleExpiresAt, "user", ""); err != nil {
 		return err
 	}
 	s.setSessionCookie(c, id, expiresAt)
 	_ = s.store.Audit("login_success", ip, "")
-	return c.JSON(fiber.Map{"ok": true, "expiresAt": expiresAt})
+	return c.JSON(fiber.Map{"authenticated": true, "role": "user", "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt})
 }
 
 func (s *Server) adminLogin(c *fiber.Ctx) error {
@@ -316,13 +347,15 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	expiresAt := time.Now().Add(time.Duration(s.config.Auth.SessionTTLSeconds) * time.Second)
-	if err := s.store.CreateSession(id, expiresAt, "admin", in.Username); err != nil {
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(s.config.Auth.SessionTTLSeconds) * time.Second)
+	idleExpiresAt := s.sessionIdleExpiresAt(now, expiresAt)
+	if err := s.store.CreateSessionWithIdle(id, expiresAt, idleExpiresAt, "admin", in.Username); err != nil {
 		return err
 	}
 	s.setSessionCookie(c, id, expiresAt)
 	_ = s.store.Audit("login_success", ip, "管理员登录")
-	return c.JSON(fiber.Map{"ok": true, "expiresAt": expiresAt})
+	return c.JSON(fiber.Map{"authenticated": true, "role": "admin", "name": in.Username, "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt})
 }
 
 func (s *Server) validateAdminLogin(username, password string) bool {
@@ -402,10 +435,33 @@ func (s *Server) clearSessionCookie(c *fiber.Ctx) {
 
 func (s *Server) me(c *fiber.Ctx) error {
 	out := fiber.Map{"authenticated": true, "role": c.Locals("role")}
+	if expiresAt, ok := c.Locals("sessionExpiresAt").(time.Time); ok {
+		out["expiresAt"] = expiresAt
+	}
+	if idleExpiresAt, ok := c.Locals("sessionIdleExpiresAt").(time.Time); ok {
+		out["idleExpiresAt"] = idleExpiresAt
+	}
 	if name, ok := c.Locals("name").(string); ok && name != "" {
 		out["name"] = name
 	}
 	return c.JSON(out)
+}
+
+func (s *Server) heartbeat(c *fiber.Ctx) error {
+	now := time.Now()
+	expiresAt, ok := c.Locals("sessionExpiresAt").(time.Time)
+	if !ok {
+		return fiber.ErrUnauthorized
+	}
+	idleExpiresAt := s.sessionIdleExpiresAt(now, expiresAt)
+	// 心跳只在前端确认用户活跃时发送，用来延长空闲登录态；已开始的下载不依赖这个状态。
+	if err := s.store.TouchSession(c.Cookies("sid"), now, idleExpiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fiber.ErrUnauthorized
+		}
+		return err
+	}
+	return c.JSON(fiber.Map{"ok": true, "idleExpiresAt": idleExpiresAt})
 }
 
 func (s *Server) logout(c *fiber.Ctx) error {
@@ -415,6 +471,14 @@ func (s *Server) logout(c *fiber.Ctx) error {
 	s.clearSessionCookie(c)
 	_ = s.store.Audit("logout", s.clientIP(c), "退出登录")
 	return c.JSON(fiber.Map{"ok": true})
+}
+
+func (s *Server) sessionIdleExpiresAt(now, absoluteExpiresAt time.Time) time.Time {
+	idleExpiresAt := now.Add(time.Duration(s.config.Auth.IdleTimeoutSeconds) * time.Second)
+	if idleExpiresAt.After(absoluteExpiresAt) {
+		return absoluteExpiresAt
+	}
+	return idleExpiresAt
 }
 
 func (s *Server) dirs(c *fiber.Ctx) error {
@@ -471,6 +535,126 @@ func (s *Server) downloadFile(c *fiber.Ctx) error {
 	}
 	_ = s.store.Audit("download", s.clientIP(c), fmt.Sprintf("目录 %s，文件 %s", dir.ID, displayPath(safePath)))
 	return c.Download(full)
+}
+
+func (s *Server) createDownloadLease(c *fiber.Ctx) error {
+	var in downloadLeaseRequest
+	if err := c.BodyParser(&in); err != nil {
+		return fiber.ErrBadRequest
+	}
+	dir, err := s.dirByID(in.DirID)
+	if err != nil {
+		return err
+	}
+	if !dir.AllowDownload {
+		return fiber.ErrForbidden
+	}
+	_, safePath, info, err := s.resolveDownloadFile(dir, in.Path)
+	if err != nil {
+		return err
+	}
+	lease, plain, err := s.createLeaseRecord(store.DownloadLease{
+		Source:    "session",
+		SessionID: sql.NullString{String: fmt.Sprint(c.Locals("sessionID")), Valid: true},
+		Role:      fmt.Sprint(c.Locals("role")),
+		DirID:     dir.ID,
+		Path:      safePath,
+		FileSize:  info.Size(),
+		FileMtime: normalizedFileMtime(info),
+	})
+	if err != nil {
+		return err
+	}
+	_ = s.store.Audit("download_lease_create", s.clientIP(c), fmt.Sprintf("目录 %s，文件 %s", dir.ID, displayPath(safePath)))
+	return c.JSON(downloadLeaseResponse{URL: s.downloadLeaseURL(plain, false), ExpiresAt: lease.ExpiresAt})
+}
+
+func (s *Server) createPublicDownloadLease(c *fiber.Ctx) error {
+	lease, plain, err := s.createPublicDownloadLeaseRecord(c)
+	if err != nil {
+		return err
+	}
+	return c.JSON(downloadLeaseResponse{URL: s.downloadLeaseURL(plain, true), ExpiresAt: lease.ExpiresAt})
+}
+
+func (s *Server) downloadByLease(c *fiber.Ctx) error {
+	plain := strings.TrimSpace(c.Query("lease"))
+	if plain == "" {
+		return fiber.ErrUnauthorized
+	}
+	hash := security.HashToken(plain)
+	lease, err := s.store.DownloadLeaseByHash(hash)
+	if err != nil || !time.Now().Before(lease.ExpiresAt) {
+		_ = s.store.DeleteExpiredDownloadLeases(time.Now())
+		return fiber.ErrUnauthorized
+	}
+	dir, ok := s.config.Dir(lease.DirID)
+	if !ok || !dir.AllowDownload {
+		return fiber.ErrForbidden
+	}
+	full, _, info, err := s.resolveDownloadFile(dir, lease.Path)
+	if err != nil {
+		return err
+	}
+	// 下载票据绑定文件大小和修改时间，避免同一路径文件被替换后继续复用旧授权。
+	if info.Size() != lease.FileSize || !normalizedFileMtime(info).Equal(lease.FileMtime.UTC()) {
+		_ = s.store.Audit("download_lease_file_changed", s.clientIP(c), fmt.Sprintf("目录 %s，文件 %s", lease.DirID, displayPath(lease.Path)))
+		return fiber.NewError(fiber.StatusConflict, "文件已变化，请重新获取下载链接。")
+	}
+	if !lease.LastUsedAt.Valid {
+		_ = s.store.Audit("download_lease_use", s.clientIP(c), fmt.Sprintf("首次使用%s下载票据，目录 %s，文件 %s", lease.Source, lease.DirID, displayPath(lease.Path)))
+	}
+	_ = s.store.TouchDownloadLease(hash, time.Now())
+	return c.Download(full)
+}
+
+func (s *Server) createLeaseRecord(lease store.DownloadLease) (store.DownloadLease, string, error) {
+	_ = s.store.DeleteExpiredDownloadLeases(time.Now())
+	plain, hash, err := security.NewToken()
+	if err != nil {
+		return lease, "", err
+	}
+	now := time.Now()
+	lease.Hash = hash
+	lease.ExpiresAt = now.Add(s.downloadLeaseTTL())
+	lease.CreatedAt = now
+	if err := s.store.CreateDownloadLease(&lease); err != nil {
+		return lease, "", err
+	}
+	return lease, plain, nil
+}
+
+func (s *Server) downloadLeaseTTL() time.Duration {
+	ttl := time.Duration(s.config.Downloads.LeaseTTLSeconds) * time.Second
+	maxTTL := time.Duration(s.config.Downloads.LeaseMaxTTLSeconds) * time.Second
+	if maxTTL > 0 && ttl > maxTTL {
+		return maxTTL
+	}
+	return ttl
+}
+
+func (s *Server) downloadLeaseURL(plain string, public bool) string {
+	path := "/api/files/download-by-lease"
+	if public {
+		path = "/t/download-by-lease"
+	}
+	return path + "?lease=" + url.QueryEscape(plain)
+}
+
+func (s *Server) resolveDownloadFile(dir config.Dir, rel string) (string, string, os.FileInfo, error) {
+	full, safePath, err := fsutil.Resolve(dir.Path, rel)
+	if err != nil {
+		return "", "", nil, fiber.ErrBadRequest
+	}
+	info, err := os.Stat(full)
+	if err != nil || info.IsDir() {
+		return "", "", nil, fiber.ErrNotFound
+	}
+	return full, safePath, info, nil
+}
+
+func normalizedFileMtime(info os.FileInfo) time.Time {
+	return info.ModTime().UTC()
 }
 
 func (s *Server) uploadFiles(c *fiber.Ctx) error {
@@ -749,7 +933,10 @@ func tokenExpiry(cfg *config.Config, in tokenRequest) sql.NullTime {
 }
 
 func (s *Server) revokeToken(c *fiber.Ctx) error {
-	if err := s.store.Revoke(c.Params("id")); err != nil {
+	if err := s.store.RevokeTokenAndLeases(c.Params("id")); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fiber.ErrNotFound
+		}
 		return err
 	}
 	_ = s.store.Audit("token_revoke", s.clientIP(c), "撤销令牌 #"+c.Params("id"))
@@ -757,7 +944,7 @@ func (s *Server) revokeToken(c *fiber.Ctx) error {
 }
 
 func (s *Server) deleteToken(c *fiber.Ctx) error {
-	if err := s.store.DeleteToken(c.Params("id")); err != nil {
+	if err := s.store.DeleteTokenAndLeases(c.Params("id")); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.ErrNotFound
 		}
@@ -847,33 +1034,81 @@ func (s *Server) publicUploadPage(c *fiber.Ctx) error {
 }
 
 func (s *Server) publicDownload(c *fiber.Ctx) error {
-	hash := security.HashToken(c.Params("token"))
-	_, dir, err := s.lookupPublicToken(c, "download")
-	if err != nil {
+	if _, _, err := s.lookupPublicToken(c, "download"); err != nil {
 		return err
 	}
-	initialToken, err := s.store.TokenByHash(hash)
+	endpoint := "/t/" + url.PathEscape(c.Params("token")) + "/download-lease"
+	c.Type("html", "utf-8")
+	return c.SendString(fmt.Sprintf(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>确认下载</title>
+  <style>
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f7fb;color:#1f2937}
+    main{max-width:520px;margin:8vh auto;padding:28px;background:#fff;border-radius:20px;box-shadow:0 20px 60px rgba(15,23,42,.12)}
+    h1{margin:0 0 10px;font-size:28px} p{color:#64748b;line-height:1.6} button{width:100%%;border:0;border-radius:12px;padding:14px 18px;background:#2563eb;color:white;font-weight:700;cursor:pointer}
+    small{display:block;margin-top:14px;color:#94a3b8;word-break:break-all}
+  </style>
+</head>
+<body>
+<main>
+  <h1>确认下载</h1>
+  <p>点击按钮后会兑换短期下载票据并开始下载。这样可以避免链接预览或安全扫描提前消耗一次性下载次数。</p>
+  <button id="download" type="button">开始下载</button>
+  <small id="message">如果你看到此兼容页面，也可以改用前端分享页完成下载。</small>
+</main>
+<script>
+document.getElementById('download').addEventListener('click', async () => {
+  const button = document.getElementById('download');
+  const message = document.getElementById('message');
+  button.disabled = true;
+  button.textContent = '准备下载…';
+  try {
+    const response = await fetch(%s, { method: 'POST' });
+    const payload = await response.json();
+    if (!response.ok || !payload.url) throw new Error(payload.error || '下载链接创建失败');
+    window.location.href = payload.url;
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = '重试下载';
+    message.textContent = err instanceof Error ? err.message : '下载链接创建失败';
+  }
+});
+</script>
+</body>
+</html>`, strconv.Quote(endpoint)))
+}
+
+func (s *Server) createPublicDownloadLeaseRecord(c *fiber.Ctx) (store.DownloadLease, string, error) {
+	t, dir, err := s.lookupPublicToken(c, "download")
 	if err != nil {
-		return fiber.ErrNotFound
+		return store.DownloadLease{}, "", err
 	}
-	full, _, err := fsutil.Resolve(dir.Path, initialToken.Path)
+	_, safePath, info, err := s.resolveDownloadFile(dir, t.Path)
 	if err != nil {
-		return fiber.ErrBadRequest
+		return store.DownloadLease{}, "", err
 	}
-	if info, err := os.Stat(full); err != nil || info.IsDir() {
-		return fiber.ErrNotFound
-	}
-	t, _, err := s.reservePublicToken(c, "download", 0)
+	reserved, _, err := s.reservePublicToken(c, "download", 0)
 	if err != nil {
-		return err
+		return store.DownloadLease{}, "", err
 	}
-	if err := c.Download(full); err != nil {
-		_ = s.store.ReleaseTokenUse(t.ID, 0)
-		_ = s.store.Audit("token_download_failed", s.clientIP(c), fmt.Sprint(t.ID))
-		return err
+	lease, plain, err := s.createLeaseRecord(store.DownloadLease{
+		Source:    "public_token",
+		TokenID:   sql.NullInt64{Int64: reserved.ID, Valid: true},
+		DirID:     dir.ID,
+		Path:      safePath,
+		FileSize:  info.Size(),
+		FileMtime: normalizedFileMtime(info),
+	})
+	if err != nil {
+		_ = s.store.ReleaseTokenUse(reserved.ID, 0)
+		return lease, "", err
 	}
-	_ = s.store.Audit("token_use", s.clientIP(c), fmt.Sprint(t.ID))
-	return nil
+	// 公开下载令牌在兑换下载票据时消耗一次次数；后续 Range 续传只校验票据，不重复扣次数。
+	_ = s.store.Audit("public_download_lease_create", s.clientIP(c), fmt.Sprintf("令牌 #%d，文件 %s", reserved.ID, displayPath(safePath)))
+	return lease, plain, nil
 }
 
 func (s *Server) publicUpload(c *fiber.Ctx) error {
@@ -1009,25 +1244,29 @@ func tokenValidity(t store.Token, now time.Time) (bool, string) {
 
 func actionLabel(action string) string {
 	labels := map[string]string{
-		"file_list":             "文件列表",
-		"dirs":                  "查看目录",
-		"download":              "文件下载",
-		"upload":                "文件上传",
-		"login_success":         "登录成功",
-		"login_failed":          "登录失败",
-		"login_rate_limited":    "登录限速",
-		"logout":                "退出登录",
-		"unauthorized":          "未认证访问",
-		"forbidden":             "权限不足",
-		"illegal_access":        "非法访问",
-		"token_create":          "创建令牌",
-		"token_revoke":          "撤销令牌",
-		"token_delete":          "删除令牌",
-		"token_use":             "使用令牌",
-		"token_denied":          "令牌拒绝",
-		"csrf_denied":           "跨站请求拦截",
-		"token_download_failed": "令牌下载失败",
-		"token_upload_failed":   "令牌上传失败",
+		"file_list":                    "文件列表",
+		"dirs":                         "查看目录",
+		"download":                     "文件下载",
+		"upload":                       "文件上传",
+		"login_success":                "登录成功",
+		"login_failed":                 "登录失败",
+		"login_rate_limited":           "登录限速",
+		"logout":                       "退出登录",
+		"unauthorized":                 "未认证访问",
+		"forbidden":                    "权限不足",
+		"illegal_access":               "非法访问",
+		"token_create":                 "创建令牌",
+		"token_revoke":                 "撤销令牌",
+		"token_delete":                 "删除令牌",
+		"token_use":                    "使用令牌",
+		"token_denied":                 "令牌拒绝",
+		"csrf_denied":                  "跨站请求拦截",
+		"token_download_failed":        "令牌下载失败",
+		"token_upload_failed":          "令牌上传失败",
+		"download_lease_create":        "创建下载票据",
+		"public_download_lease_create": "创建公开下载票据",
+		"download_lease_use":           "使用下载票据",
+		"download_lease_file_changed":  "下载票据文件变化",
 	}
 	if label, ok := labels[action]; ok {
 		return label

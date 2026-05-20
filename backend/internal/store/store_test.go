@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,72 @@ func TestSessionRoleAndExpiryCleanup(t *testing.T) {
 	}
 	if !st.SessionValid("sid-admin") {
 		t.Fatalf("expected unexpired session to remain valid")
+	}
+}
+
+func TestSessionIdleAndDownloadLeaseLifecycle(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+
+	now := time.Now().UTC()
+	if err := st.CreateSessionWithIdle("sid-idle", now.Add(time.Hour), now.Add(-time.Minute), "user", ""); err != nil {
+		t.Fatalf("create idle session: %v", err)
+	}
+	if st.SessionValid("sid-idle") {
+		t.Fatalf("expected idle-expired session to be invalid")
+	}
+	if err := st.TouchSession("sid-idle", now, now.Add(time.Minute)); err != nil {
+		t.Fatalf("touch session: %v", err)
+	}
+	if !st.SessionValid("sid-idle") {
+		t.Fatalf("expected touched session to become valid")
+	}
+	if err := st.DeleteExpiredSessions(now.Add(2 * time.Minute)); err != nil {
+		t.Fatalf("delete idle expired sessions: %v", err)
+	}
+	if st.SessionValid("sid-idle") {
+		t.Fatalf("expected idle-expired session to be removed")
+	}
+
+	lease := &DownloadLease{
+		Hash:      "lease-hash",
+		Source:    "session",
+		SessionID: sql.NullString{String: "hashed-session", Valid: true},
+		Role:      "user",
+		DirID:     "default",
+		Path:      "a.txt",
+		FileSize:  10,
+		FileMtime: now,
+		ExpiresAt: now.Add(time.Hour),
+	}
+	if err := st.CreateDownloadLease(lease); err != nil {
+		t.Fatalf("create download lease: %v", err)
+	}
+	loaded, err := st.DownloadLeaseByHash("lease-hash")
+	if err != nil {
+		t.Fatalf("load download lease: %v", err)
+	}
+	if loaded.ID == 0 || loaded.Path != "a.txt" || loaded.FileSize != 10 || !loaded.SessionID.Valid {
+		t.Fatalf("unexpected loaded lease: %+v", loaded)
+	}
+	if err := st.TouchDownloadLease("lease-hash", now.Add(time.Minute)); err != nil {
+		t.Fatalf("touch download lease: %v", err)
+	}
+	touched, err := st.DownloadLeaseByHash("lease-hash")
+	if err != nil {
+		t.Fatalf("reload touched lease: %v", err)
+	}
+	if !touched.LastUsedAt.Valid {
+		t.Fatalf("expected last_used_at to be set")
+	}
+	if err := st.DeleteExpiredDownloadLeases(now.Add(2 * time.Hour)); err != nil {
+		t.Fatalf("delete expired leases: %v", err)
+	}
+	if _, err := st.DownloadLeaseByHash("lease-hash"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected lease to be deleted, got %v", err)
 	}
 }
 

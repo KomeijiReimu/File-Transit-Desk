@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authState, isAdmin, logout } from '@/auth'
+import { useSessionActivity } from '@/useSessionActivity'
 
 const route = useRoute()
 const router = useRouter()
@@ -9,6 +10,8 @@ const router = useRouter()
 const chromeless = computed(() => route.name === 'login' || route.name === 'share')
 const displayName = computed(() => authState.name || (isAdmin.value ? '管理员' : '访客'))
 const roleLabel = computed(() => (isAdmin.value ? '管理员会话' : '受信用户会话'))
+
+useSessionActivity()
 
 async function handleLogout() {
   await logout()

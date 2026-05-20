@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ApiError, api, downloadUrl } from '@/api'
+import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
@@ -22,6 +22,7 @@ const loading = ref(true)
 const dragOver = ref(false)
 const error = ref('')
 const notice = ref('')
+const downloadingPath = ref('')
 const uploadQueue = ref<UploadItem[]>([])
 const responseCanUpload = ref<boolean | null>(null)
 const responseCanDownload = ref<boolean | null>(null)
@@ -78,6 +79,22 @@ async function loadFiles(clearNotice = true) {
 
 function openDir(entry: FileEntry) {
   currentPath.value = joinPath(currentPath.value, entry.name)
+}
+
+async function startDownload(entry: FileEntry) {
+  if (!selectedDirId.value || entryIsDir(entry) || downloadingPath.value) return
+  const path = entry.path || joinPath(currentPath.value, entry.name)
+  downloadingPath.value = path
+  error.value = ''
+  try {
+    const lease = await api.createDownloadLease(selectedDirId.value, path)
+    // 下载使用独立票据地址，页面会话随后空闲过期也不会中断已授权文件传输。
+    window.location.assign(lease.url)
+  } catch (err) {
+    error.value = err instanceof ApiError ? err.message : '下载链接创建失败，请稍后重试。'
+  } finally {
+    downloadingPath.value = ''
+  }
 }
 
 function addUploadFiles(files: FileList | File[]) {
@@ -237,7 +254,9 @@ onMounted(loadDirs)
               <td data-label="大小">{{ entryIsDir(entry) ? '目录' : formatBytes(entry.size) }}</td>
               <td data-label="修改时间">{{ formatDate(entry.modifiedAt || entry.mtime) }}</td>
               <td data-label="操作">
-                <a v-if="!entryIsDir(entry) && canDownload" class="mini-btn" :href="downloadUrl(selectedDirId, entry.path || joinPath(currentPath, entry.name))">下载</a>
+                <button v-if="!entryIsDir(entry) && canDownload" class="mini-btn" type="button" :disabled="Boolean(downloadingPath)" @click="startDownload(entry)">
+                  {{ downloadingPath === (entry.path || joinPath(currentPath, entry.name)) ? '准备中…' : '下载' }}
+                </button>
                 <span v-else class="muted-text">—</span>
               </td>
             </tr>

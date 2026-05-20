@@ -5,6 +5,7 @@ import type {
   CreateTokenPayload,
   CreateTokenResponse,
   DirectoryInfo,
+  DownloadLeaseResponse,
   ListFilesResponse,
   TokenInfo,
   UserInfo,
@@ -87,6 +88,11 @@ export const api = {
   adminLogin: (payload: AdminLoginPayload) =>
     request<UserInfo>('/api/auth/admin-login', { method: 'POST', body: JSON.stringify(payload) }),
   me: () => request<UserInfo>('/api/auth/me', { suppressAuthRedirect: true }),
+  heartbeat: () =>
+    request<{ ok: boolean; idleExpiresAt?: string }>('/api/auth/heartbeat', {
+      method: 'POST',
+      suppressAuthRedirect: true,
+    }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   dirs: () => request<DirectoryInfo[]>('/api/dirs'),
   listFiles: (dirId: string, path = '') => request<ListFilesResponse>(`/api/files/list${query({ dirId, path })}`),
@@ -104,6 +110,11 @@ export const api = {
     form.append('files', file)
     return request<{ ok: boolean; uploaded?: number }>('/api/files/upload', { method: 'POST', body: form })
   },
+  createDownloadLease: (dirId: string, path: string) =>
+    request<DownloadLeaseResponse>('/api/files/download-lease', {
+      method: 'POST',
+      body: JSON.stringify({ dirId, path }),
+    }),
   tokens: () => request<TokenInfo[]>('/api/tokens'),
   createToken: (payload: CreateTokenPayload) =>
     request<CreateTokenResponse>('/api/tokens', { method: 'POST', body: JSON.stringify(payload) }),
@@ -124,6 +135,8 @@ export const api = {
       body: form,
     })
   },
+  createPublicDownloadLease: (token: string) =>
+    request<DownloadLeaseResponse>(`/t/${encodeURIComponent(token)}/download-lease`, { method: 'POST' }),
 }
 
 export const downloadUrl = (dirId: string, path: string) => `/api/files/download${query({ dirId, path })}`

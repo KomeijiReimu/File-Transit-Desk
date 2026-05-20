@@ -9,6 +9,8 @@
 - 支持受控目录浏览、子目录进入、文件大小和修改时间展示。
 - 支持登录用户拖拽上传、队列上传、失败重试和下载文件。
 - 支持创建临时下载/上传令牌，并按有效期、使用次数和上传累计容量自动失效。
+- 支持空闲会话过期：页面离开或长时间无操作后需要重新登录，同时已开始的长下载不会被页面会话失效打断。
+- 下载使用短期下载票据，支持 HTTP Range 断点续传；公开下载令牌只在兑换票据时消耗一次使用次数，续传不重复扣次。
 - 外部访客可打开前端 `/share/{token}` 分享页完成下载或拖拽上传，不再依赖后端原生 HTML 页面。
 - 审计日志记录登录、目录访问、文件列表、上传、下载、令牌创建/撤销/使用等事件，并返回中文 `actionLabel`。
 - 支持可信反向代理后的真实 IP 识别，避免访问记录长期显示 `127.0.0.1`。
@@ -51,6 +53,8 @@ cp config.example.yaml config.yaml
 ```yaml
 auth:
   totp_secret: "你的 Base32 TOTP Secret"
+  session_ttl_seconds: 86400
+  idle_timeout_seconds: 180
   admin:
     username: "admin"
     password_sha256: "管理员密码的 SHA-256 十六进制摘要"
@@ -62,7 +66,13 @@ storage:
       path: "./uploads"
       allow_download: true
       allow_upload: true
+
+downloads:
+  lease_ttl_seconds: 7200
+  lease_max_ttl_seconds: 21600
 ```
+
+`session_ttl_seconds` 是登录态绝对最长有效期，`idle_timeout_seconds` 是用户无活动后的空闲过期时间。前端只在页面可见且检测到点击、键盘、滚动、触摸等操作时发送心跳，因此用户离开页面后会在较短时间内变成未登录。下载不直接依赖长期页面会话；点击下载会先创建短期 `download lease`，已开始的下载和同一文件的 Range 续传在票据有效期内继续可用。
 
 生成 TOTP Secret：
 

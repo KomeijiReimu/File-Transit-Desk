@@ -10,10 +10,12 @@
 - **文件浏览页**：调用 `/api/dirs` 与 `/api/files/list`，支持目录切换、面包屑、返回上级、权限提示、下载。上传支持**拖拽区域**与**文件队列**，每个文件都有“待上传 / 上传中 / 已完成 / 失败”状态以及失败后的**重试**按钮。
 - **令牌管理页（管理员）**：调用 `/api/tokens`，支持创建下载/上传令牌、设置目录/路径/有效期/最大使用次数。生成后的链接统一转换成 `/share/{token}` 形式，并仅在创建成功时提供一键**复制链接**按钮与复制成功提示；历史令牌列表不会再次显示明文链接。
 - **公开分享页 `/share/:token`**（无需登录）：调用 `/t/:token/info` 后，根据令牌类型展示
-  - 下载令牌：漂亮的下载页与“立即下载”按钮，按钮跳转 `/t/:token/download`。
+  - 下载令牌：漂亮的下载页与“立即下载”按钮，先调用 `/t/:token/download-lease` 兑换短期下载票据，再跳转票据地址。
   - 上传令牌：拖拽 / 多选 / 上传队列，提交到 `/t/:token/upload`，每个文件有状态显示。
 - **访问记录页（管理员）**：调用 `/api/audit/logs`，优先展示 `actionLabel`，支持按关键字（动作 / 路径 / 目录 / IP）模糊搜索、按状态（全部 / 成功 / 失败 / 拒绝）筛选、以及“加载更多”（自动递增 `limit`）。
 - **配置 / 目录概览页（管理员）**：展示后端开放目录、根路径与上传/下载权限。
+
+前端在登录态页面会监听点击、键盘、滚动、触摸和页面重新可见等事件，只在用户活跃时调用 `/api/auth/heartbeat` 刷新空闲会话；页面隐藏或离开后不会持续保活。文件下载不再直接使用长期会话 URL，而是先兑换下载票据，因此页面会话随后空闲过期也不会中断已授权的长下载或断点续传。
 
 ## 本地开发
 
@@ -101,6 +103,8 @@ docker run --rm -p 8081:80 file-trans-frontend
 
 - 前端对常见字段做了兼容：目录权限兼容 `canUpload/allowUpload`、`canDownload/allowDownload`；文件列表兼容 `entries/files`；文件类型兼容 `isDir`、`type: "dir"`、`type: "directory"`。
 - `/api/auth/me` 支持返回 `role`，前端据此决定是否展示管理入口。`/api/auth/admin-login` 接收 `{ username, password }`。
+- `/api/auth/heartbeat` 用于刷新空闲会话，前端只在非公开路由、已登录、页面可见且用户有活动时调用。
+- `/api/files/download-lease` 与 `/t/:token/download-lease` 会返回短期下载票据 URL；前端下载按钮跳转该 URL，让浏览器和下载器可以使用 HTTP Range 续传。
 - `TokenInfo` 支持可选的 `valid`、`reason`、`actionLabel`、`dirName`、`infoUrl`、`uploadedBytes`、`uploadMaxBytes` 字段，前端用它们渲染状态文案；上传令牌达到累计容量上限时会显示友好的失效原因。
 - `/api/audit/logs` 支持 `?limit=` 查询参数，访问记录页会逐步增大 `limit` 来实现“加载更多”。
 - 接口返回非 2xx 时会统一读取 JSON 中的 `message` 或 `error`，401 会自动跳转登录页（公开页除外）。

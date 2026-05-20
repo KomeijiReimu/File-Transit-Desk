@@ -5,6 +5,7 @@ export interface UserInfo {
   name?: string
   role?: UserRole
   expiresAt?: string
+  idleExpiresAt?: string
 }
 
 export interface AdminLoginPayload {
@@ -81,6 +82,11 @@ export interface CreateTokenPayload {
 export interface CreateTokenResponse extends TokenInfo {
   token: string
   url: string
+}
+
+export interface DownloadLeaseResponse {
+  url: string
+  expiresAt: string
 }
 
 export interface AuditLog {

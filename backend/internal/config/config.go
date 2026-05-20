@@ -11,14 +11,15 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Auth     AuthConfig     `yaml:"auth"`
-	Web      WebConfig      `yaml:"web"`
-	CORS     CORSConfig     `yaml:"cors"`
-	Storage  StorageConfig  `yaml:"storage"`
-	Tokens   TokensConfig   `yaml:"tokens"`
-	Audit    AuditConfig    `yaml:"audit"`
+	Server    ServerConfig    `yaml:"server"`
+	Database  DatabaseConfig  `yaml:"database"`
+	Auth      AuthConfig      `yaml:"auth"`
+	Downloads DownloadsConfig `yaml:"downloads"`
+	Web       WebConfig       `yaml:"web"`
+	CORS      CORSConfig      `yaml:"cors"`
+	Storage   StorageConfig   `yaml:"storage"`
+	Tokens    TokensConfig    `yaml:"tokens"`
+	Audit     AuditConfig     `yaml:"audit"`
 }
 
 type ServerConfig struct {
@@ -32,11 +33,18 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	TOTPSecret        string      `yaml:"totp_secret"`
-	DevAllowFixedCode bool        `yaml:"dev_allow_fixed_code"`
-	SessionTTLSeconds int64       `yaml:"session_ttl_seconds"`
-	CookieSecure      bool        `yaml:"cookie_secure"`
-	Admin             AdminConfig `yaml:"admin"`
+	TOTPSecret         string      `yaml:"totp_secret"`
+	DevAllowFixedCode  bool        `yaml:"dev_allow_fixed_code"`
+	SessionTTLSeconds  int64       `yaml:"session_ttl_seconds"`
+	IdleTimeoutSeconds int64       `yaml:"idle_timeout_seconds"`
+	IdleGraceSeconds   int64       `yaml:"idle_grace_seconds"`
+	CookieSecure       bool        `yaml:"cookie_secure"`
+	Admin              AdminConfig `yaml:"admin"`
+}
+
+type DownloadsConfig struct {
+	LeaseTTLSeconds    int64 `yaml:"lease_ttl_seconds"`
+	LeaseMaxTTLSeconds int64 `yaml:"lease_max_ttl_seconds"`
 }
 
 type AdminConfig struct {
@@ -100,6 +108,10 @@ func Default() *Config {
 	c.Server.Port = 8080
 	c.Database.Path = "./data/filetrans.db"
 	c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
+	c.Auth.IdleTimeoutSeconds = int64((3 * time.Minute) / time.Second)
+	c.Auth.IdleGraceSeconds = 30
+	c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
+	c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
 	c.Storage.UploadMaxMB = 512
 	c.Storage.UploadMaxFileMB = 512
 	c.Storage.UploadMaxFiles = 20
@@ -126,6 +138,21 @@ func (c *Config) normalize() {
 	if c.Auth.SessionTTLSeconds <= 0 {
 		c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
 	}
+	if c.Auth.IdleTimeoutSeconds <= 0 {
+		c.Auth.IdleTimeoutSeconds = int64((3 * time.Minute) / time.Second)
+	}
+	if c.Auth.IdleGraceSeconds < 0 {
+		c.Auth.IdleGraceSeconds = 0
+	}
+	if c.Downloads.LeaseTTLSeconds <= 0 {
+		c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
+	}
+	if c.Downloads.LeaseMaxTTLSeconds <= 0 {
+		c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
+	}
+	if c.Downloads.LeaseTTLSeconds > c.Downloads.LeaseMaxTTLSeconds {
+		c.Downloads.LeaseTTLSeconds = c.Downloads.LeaseMaxTTLSeconds
+	}
 	if c.Storage.UploadMaxMB <= 0 {
 		c.Storage.UploadMaxMB = 512
 	}
@@ -148,6 +175,21 @@ func (c *Config) normalize() {
 func (c *Config) validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535")
+	}
+	if c.Auth.IdleTimeoutSeconds < 30 {
+		return fmt.Errorf("auth.idle_timeout_seconds must be at least 30")
+	}
+	if c.Auth.IdleTimeoutSeconds > c.Auth.SessionTTLSeconds {
+		return fmt.Errorf("auth.idle_timeout_seconds must not exceed auth.session_ttl_seconds")
+	}
+	if c.Auth.IdleGraceSeconds > c.Auth.IdleTimeoutSeconds {
+		return fmt.Errorf("auth.idle_grace_seconds must not exceed auth.idle_timeout_seconds")
+	}
+	if c.Downloads.LeaseTTLSeconds < 60 {
+		return fmt.Errorf("downloads.lease_ttl_seconds must be at least 60")
+	}
+	if c.Downloads.LeaseMaxTTLSeconds < c.Downloads.LeaseTTLSeconds {
+		return fmt.Errorf("downloads.lease_max_ttl_seconds must be greater than or equal to downloads.lease_ttl_seconds")
 	}
 	if c.Storage.UploadMaxMB < 1 || c.Storage.UploadMaxMB > 10240 {
 		return fmt.Errorf("storage.upload_max_mb must be between 1 and 10240")
