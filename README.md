@@ -70,9 +70,10 @@ storage:
 downloads:
   lease_ttl_seconds: 7200
   lease_max_ttl_seconds: 21600
+  content_hash_max_mb: 64
 ```
 
-`session_ttl_seconds` 是登录态绝对最长有效期，`idle_timeout_seconds` 是用户无活动后的空闲过期时间。前端只在页面可见且检测到点击、键盘、滚动、触摸等操作时发送心跳，因此用户离开页面后会在较短时间内变成未登录。下载不直接依赖长期页面会话；点击下载会先创建短期 `download lease`，已开始的下载和同一文件的 Range 续传在票据有效期内继续可用。
+`session_ttl_seconds` 是登录态绝对最长有效期，`idle_timeout_seconds` 是用户无活动后的空闲过期时间。前端只在页面可见且检测到点击、键盘、滚动、触摸等操作时发送心跳，因此用户离开页面后会在较短时间内变成未登录。下载不直接依赖长期页面会话；点击下载会先创建短期 `download lease`，已开始的下载和同一文件的 Range 续传在票据有效期内继续可用。`content_hash_max_mb` 默认让 64 MiB 及以下文件做 SHA-256 内容绑定；如需所有文件都做内容级校验，可设为 `0`，但大文件下载和续传前会增加完整读盘成本。
 
 生成 TOTP Secret：
 

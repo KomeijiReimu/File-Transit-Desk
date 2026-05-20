@@ -82,15 +82,16 @@ func TestSessionIdleAndDownloadLeaseLifecycle(t *testing.T) {
 	}
 
 	lease := &DownloadLease{
-		Hash:      "lease-hash",
-		Source:    "session",
-		SessionID: sql.NullString{String: "hashed-session", Valid: true},
-		Role:      "user",
-		DirID:     "default",
-		Path:      "a.txt",
-		FileSize:  10,
-		FileMtime: now,
-		ExpiresAt: now.Add(time.Hour),
+		Hash:       "lease-hash",
+		Source:     "session",
+		SessionID:  sql.NullString{String: "hashed-session", Valid: true},
+		Role:       "user",
+		DirID:      "default",
+		Path:       "a.txt",
+		FileSize:   10,
+		FileMtime:  now,
+		FileSHA256: sql.NullString{String: "abc123", Valid: true},
+		ExpiresAt:  now.Add(time.Hour),
 	}
 	if err := st.CreateDownloadLease(lease); err != nil {
 		t.Fatalf("create download lease: %v", err)
@@ -99,7 +100,7 @@ func TestSessionIdleAndDownloadLeaseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load download lease: %v", err)
 	}
-	if loaded.ID == 0 || loaded.Path != "a.txt" || loaded.FileSize != 10 || !loaded.SessionID.Valid {
+	if loaded.ID == 0 || loaded.Path != "a.txt" || loaded.FileSize != 10 || !loaded.SessionID.Valid || loaded.FileSHA256.String != "abc123" {
 		t.Fatalf("unexpected loaded lease: %+v", loaded)
 	}
 	if err := st.TouchDownloadLease("lease-hash", now.Add(time.Minute)); err != nil {

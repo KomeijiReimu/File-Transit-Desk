@@ -45,6 +45,7 @@ type AuthConfig struct {
 type DownloadsConfig struct {
 	LeaseTTLSeconds    int64 `yaml:"lease_ttl_seconds"`
 	LeaseMaxTTLSeconds int64 `yaml:"lease_max_ttl_seconds"`
+	ContentHashMaxMB   int   `yaml:"content_hash_max_mb"`
 }
 
 type AdminConfig struct {
@@ -112,6 +113,7 @@ func Default() *Config {
 	c.Auth.IdleGraceSeconds = 30
 	c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
 	c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
+	c.Downloads.ContentHashMaxMB = 64
 	c.Storage.UploadMaxMB = 512
 	c.Storage.UploadMaxFileMB = 512
 	c.Storage.UploadMaxFiles = 20
@@ -190,6 +192,9 @@ func (c *Config) validate() error {
 	}
 	if c.Downloads.LeaseMaxTTLSeconds < c.Downloads.LeaseTTLSeconds {
 		return fmt.Errorf("downloads.lease_max_ttl_seconds must be greater than or equal to downloads.lease_ttl_seconds")
+	}
+	if c.Downloads.ContentHashMaxMB < 0 || c.Downloads.ContentHashMaxMB > 102400 {
+		return fmt.Errorf("downloads.content_hash_max_mb must be between 0 and 102400")
 	}
 	if c.Storage.UploadMaxMB < 1 || c.Storage.UploadMaxMB > 10240 {
 		return fmt.Errorf("storage.upload_max_mb must be between 1 and 10240")

@@ -549,18 +549,23 @@ func (s *Server) createDownloadLease(c *fiber.Ctx) error {
 	if !dir.AllowDownload {
 		return fiber.ErrForbidden
 	}
-	_, safePath, info, err := s.resolveDownloadFile(dir, in.Path)
+	full, safePath, info, err := s.resolveDownloadFile(dir, in.Path)
+	if err != nil {
+		return err
+	}
+	fileSHA256, err := s.downloadLeaseFileHash(full, info)
 	if err != nil {
 		return err
 	}
 	lease, plain, err := s.createLeaseRecord(store.DownloadLease{
-		Source:    "session",
-		SessionID: sql.NullString{String: fmt.Sprint(c.Locals("sessionID")), Valid: true},
-		Role:      fmt.Sprint(c.Locals("role")),
-		DirID:     dir.ID,
-		Path:      safePath,
-		FileSize:  info.Size(),
-		FileMtime: normalizedFileMtime(info),
+		Source:     "session",
+		SessionID:  sql.NullString{String: fmt.Sprint(c.Locals("sessionID")), Valid: true},
+		Role:       fmt.Sprint(c.Locals("role")),
+		DirID:      dir.ID,
+		Path:       safePath,
+		FileSize:   info.Size(),
+		FileMtime:  normalizedFileMtime(info),
+		FileSHA256: fileSHA256,
 	})
 	if err != nil {
 		return err
@@ -596,10 +601,20 @@ func (s *Server) downloadByLease(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	// 下载票据绑定文件大小和修改时间，避免同一路径文件被替换后继续复用旧授权。
+	// 下载票据绑定文件大小、修改时间和可选内容哈希，避免同一路径文件被替换后继续复用旧授权。
 	if info.Size() != lease.FileSize || !normalizedFileMtime(info).Equal(lease.FileMtime.UTC()) {
 		_ = s.store.Audit("download_lease_file_changed", s.clientIP(c), fmt.Sprintf("目录 %s，文件 %s", lease.DirID, displayPath(lease.Path)))
 		return fiber.NewError(fiber.StatusConflict, "文件已变化，请重新获取下载链接。")
+	}
+	if lease.FileSHA256.Valid && strings.TrimSpace(lease.FileSHA256.String) != "" {
+		currentHash, err := fileSHA256Hex(full)
+		if err != nil {
+			return err
+		}
+		if currentHash != lease.FileSHA256.String {
+			_ = s.store.Audit("download_lease_file_changed", s.clientIP(c), fmt.Sprintf("目录 %s，文件 %s，内容哈希不匹配", lease.DirID, displayPath(lease.Path)))
+			return fiber.NewError(fiber.StatusConflict, "文件内容已变化，请重新获取下载链接。")
+		}
 	}
 	if !lease.LastUsedAt.Valid {
 		_ = s.store.Audit("download_lease_use", s.clientIP(c), fmt.Sprintf("首次使用%s下载票据，目录 %s，文件 %s", lease.Source, lease.DirID, displayPath(lease.Path)))
@@ -639,6 +654,39 @@ func (s *Server) downloadLeaseURL(plain string, public bool) string {
 		path = "/t/download-by-lease"
 	}
 	return path + "?lease=" + url.QueryEscape(plain)
+}
+
+func (s *Server) downloadLeaseFileHash(full string, info os.FileInfo) (sql.NullString, error) {
+	maxBytes := s.downloadLeaseHashMaxBytes()
+	if maxBytes > 0 && info.Size() > maxBytes {
+		return sql.NullString{String: "", Valid: true}, nil
+	}
+	// 内容哈希让小文件票据具备内容级绑定；大文件可通过配置选择是否启用，避免 Range 续传反复扫完整文件。
+	hash, err := fileSHA256Hex(full)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: hash, Valid: true}, nil
+}
+
+func (s *Server) downloadLeaseHashMaxBytes() int64 {
+	if s.config.Downloads.ContentHashMaxMB <= 0 {
+		return 0
+	}
+	return int64(s.config.Downloads.ContentHashMaxMB) * 1024 * 1024
+}
+
+func fileSHA256Hex(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (s *Server) resolveDownloadFile(dir config.Dir, rel string) (string, string, os.FileInfo, error) {
@@ -1086,7 +1134,11 @@ func (s *Server) createPublicDownloadLeaseRecord(c *fiber.Ctx) (store.DownloadLe
 	if err != nil {
 		return store.DownloadLease{}, "", err
 	}
-	_, safePath, info, err := s.resolveDownloadFile(dir, t.Path)
+	full, safePath, info, err := s.resolveDownloadFile(dir, t.Path)
+	if err != nil {
+		return store.DownloadLease{}, "", err
+	}
+	fileSHA256, err := s.downloadLeaseFileHash(full, info)
 	if err != nil {
 		return store.DownloadLease{}, "", err
 	}
@@ -1095,12 +1147,13 @@ func (s *Server) createPublicDownloadLeaseRecord(c *fiber.Ctx) (store.DownloadLe
 		return store.DownloadLease{}, "", err
 	}
 	lease, plain, err := s.createLeaseRecord(store.DownloadLease{
-		Source:    "public_token",
-		TokenID:   sql.NullInt64{Int64: reserved.ID, Valid: true},
-		DirID:     dir.ID,
-		Path:      safePath,
-		FileSize:  info.Size(),
-		FileMtime: normalizedFileMtime(info),
+		Source:     "public_token",
+		TokenID:    sql.NullInt64{Int64: reserved.ID, Valid: true},
+		DirID:      dir.ID,
+		Path:       safePath,
+		FileSize:   info.Size(),
+		FileMtime:  normalizedFileMtime(info),
+		FileSHA256: fileSHA256,
 	})
 	if err != nil {
 		_ = s.store.ReleaseTokenUse(reserved.ID, 0)

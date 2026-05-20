@@ -56,6 +56,7 @@ type DownloadLease struct {
 	Path       string
 	FileSize   int64
 	FileMtime  time.Time
+	FileSHA256 sql.NullString
 	ExpiresAt  time.Time
 	CreatedAt  time.Time
 	LastUsedAt sql.NullTime
@@ -140,6 +141,7 @@ CREATE TABLE IF NOT EXISTS download_leases(
   path TEXT NOT NULL,
   file_size INTEGER NOT NULL,
   file_mtime DATETIME NOT NULL,
+  file_sha256 TEXT NOT NULL DEFAULT '',
   expires_at DATETIME NOT NULL,
   created_at DATETIME NOT NULL,
   last_used_at DATETIME
@@ -160,6 +162,9 @@ CREATE INDEX IF NOT EXISTS idx_download_leases_expires_at ON download_leases(exp
 		return err
 	}
 	if err := s.addColumnIfMissing("sessions", "idle_expires_at", "DATETIME"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("download_leases", "file_sha256", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if _, err := s.DB.Exec(`UPDATE sessions SET last_seen_at = created_at WHERE last_seen_at IS NULL`); err != nil {
@@ -293,7 +298,7 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 		lease.CreatedAt = now
 	}
 	res, err := s.DB.Exec(
-		`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, file_sha256, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		lease.Hash,
 		lease.Source,
 		lease.SessionID,
@@ -303,6 +308,7 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 		lease.Path,
 		lease.FileSize,
 		lease.FileMtime,
+		lease.FileSHA256,
 		lease.ExpiresAt,
 		lease.CreatedAt,
 	)
@@ -315,7 +321,7 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 
 func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
 	var lease DownloadLease
-	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, expires_at, created_at, last_used_at FROM download_leases WHERE lease_hash = ?`, hash).Scan(
+	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, file_sha256, expires_at, created_at, last_used_at FROM download_leases WHERE lease_hash = ?`, hash).Scan(
 		&lease.ID,
 		&lease.Hash,
 		&lease.Source,
@@ -326,6 +332,7 @@ func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
 		&lease.Path,
 		&lease.FileSize,
 		&lease.FileMtime,
+		&lease.FileSHA256,
 		&lease.ExpiresAt,
 		&lease.CreatedAt,
 		&lease.LastUsedAt,

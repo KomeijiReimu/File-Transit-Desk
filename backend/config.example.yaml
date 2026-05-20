@@ -28,6 +28,8 @@ downloads:
   lease_ttl_seconds: 7200
   # 下载票据最大有效期上限，防止误配置过长。
   lease_max_ttl_seconds: 21600
+  # 对不超过该大小的文件写入 SHA-256 内容哈希并在每次票据下载前复核；0 表示所有文件都做内容哈希。
+  content_hash_max_mb: 64
 cors:
   allow_origins:
     - "http://localhost:5173"

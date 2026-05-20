@@ -39,7 +39,7 @@ go run ./cmd/server -config config.yaml
 - 管理员通过独立接口登录，配置中只保存管理员密码的 SHA-256 十六进制摘要，后端使用常量时间比较校验。
 - Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，`Secure` 由 `auth.cookie_secure` 控制；HTTPS 部署时应启用。服务端数据库只保存会话 ID 哈希，避免数据库只读泄露时直接复用 Cookie 原值。
 - 登录会话同时受绝对有效期和空闲有效期约束。前端只在用户活跃时调用心跳接口刷新空闲时间，页面隐藏或离开后不会持续保活。
-- 文件下载使用短期下载票据。票据绑定具体目录、路径、文件大小和修改时间；页面会话空闲过期后，已兑换票据的长下载和 HTTP Range 续传仍可继续，但文件被替换后旧票据会失效。
+- 文件下载使用短期下载票据。票据绑定具体目录、路径、文件大小、修改时间，并会按 `downloads.content_hash_max_mb` 对文件内容写入 SHA-256 哈希；页面会话空闲过期后，已兑换票据的长下载和 HTTP Range 续传仍可继续，但文件被替换后旧票据会失效。
 - 管理员撤销或删除公开下载令牌时，会同步清理该令牌已兑换但尚未过期的下载票据，用于应急止血。
 - 对 `/api` 下会改变状态的请求，后端会校验非空 `Origin` 必须出现在 `cors.allow_origins` 中，降低 Cookie 凭据接口的跨站请求风险。
 - 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
@@ -61,6 +61,7 @@ go run ./cmd/server -config config.yaml
 - `auth.cookie_secure`：HTTPS 下启用安全 Cookie。
 - `downloads.lease_ttl_seconds`：下载票据默认有效期，点击下载或公开分享下载时兑换。
 - `downloads.lease_max_ttl_seconds`：下载票据最大有效期上限，防止误配置过长。
+- `downloads.content_hash_max_mb`：下载票据内容哈希阈值。小于等于该大小的文件会记录 SHA-256 并在每次票据下载前复核；`0` 表示所有文件都做内容哈希。阈值越大，替换检测越强，但创建票据和 Range 续传前需要读取完整文件。
 - `auth.admin.username`：管理员用户名。
 - `auth.admin.password_sha256`：管理员密码的 SHA-256 十六进制摘要。
 - `web.static_dir`：前端构建产物目录，存在时自动托管并回退到 `index.html`；不会吞掉 `/api` 与 `/t` 路由。
@@ -149,7 +150,7 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 ```
 
 - `POST /api/files/download-lease`：登录态下载前兑换短期票据，请求 `{ "dirId": "default", "path": "a.txt" }`，返回 `{ "url": "/api/files/download-by-lease?lease=...", "expiresAt": "..." }`。
-- `GET /api/files/download-by-lease?lease=...`：使用下载票据下载文件，支持 HTTP Range 断点续传；不要求页面会话仍然有效，但会校验票据未过期、目录仍允许下载、文件大小和修改时间未变化。
+- `GET /api/files/download-by-lease?lease=...`：使用下载票据下载文件，支持 HTTP Range 断点续传；不要求页面会话仍然有效，但会校验票据未过期、目录仍允许下载、文件大小、修改时间和可用内容哈希未变化。
 - `GET /api/files/download?dirId=default&path=a.txt`：兼容保留的直接下载接口，仍要求请求开始时有有效会话。
 - `POST /api/files/upload`：`multipart/form-data` 字段 `dirId`、`path`、`file` 或 `files`，兼容多文件。该接口会执行上传数量、单文件大小、请求总量、扩展名策略校验。返回：
 

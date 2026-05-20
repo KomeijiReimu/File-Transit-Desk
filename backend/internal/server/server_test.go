@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -313,6 +314,10 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 	if err := osWriteFile(filepath.Join(root, "test.txt"), []byte("0123456789abcdef")); err != nil {
 		t.Fatalf("write test file: %v", err)
 	}
+	fixedMtime := time.Unix(1700000000, 123456789)
+	if err := os.Chtimes(filepath.Join(root, "test.txt"), fixedMtime, fixedMtime); err != nil {
+		t.Fatalf("set fixed mtime: %v", err)
+	}
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -345,6 +350,13 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 	if leaseResp.StatusCode != http.StatusOK || lease.URL == "" {
 		t.Fatalf("expected lease url, status=%d lease=%+v", leaseResp.StatusCode, lease)
 	}
+	loadedLease, err := st.DownloadLeaseByHash(leaseHashFromURL(t, lease.URL))
+	if err != nil {
+		t.Fatalf("load created lease: %v", err)
+	}
+	if !loadedLease.FileSHA256.Valid || loadedLease.FileSHA256.String == "" {
+		t.Fatalf("expected small download lease to include content hash: %+v", loadedLease)
+	}
 	if err := st.DeleteSession("sid"); err != nil {
 		t.Fatalf("delete session: %v", err)
 	}
@@ -355,6 +367,34 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 		t.Fatalf("lease range request: %v", err)
 	}
 	assertPartialBody(t, leaseRangeResp, "abcdef")
+	if err := osWriteFile(filepath.Join(root, "test.txt"), []byte("fedcba9876543210")); err != nil {
+		t.Fatalf("replace test file: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(root, "test.txt"), fixedMtime, fixedMtime); err != nil {
+		t.Fatalf("restore replaced file mtime: %v", err)
+	}
+	changedContentReq := httptest.NewRequest(http.MethodGet, lease.URL, nil)
+	changedContentResp, err := app.Test(changedContentReq)
+	if err != nil {
+		t.Fatalf("changed content lease request: %v", err)
+	}
+	changedContentResp.Body.Close()
+	if changedContentResp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected same-size same-mtime content replacement to be rejected, got %d", changedContentResp.StatusCode)
+	}
+	logs, err := st.AuditLogs(20)
+	if err != nil {
+		t.Fatalf("audit logs after content mismatch: %v", err)
+	}
+	foundHashMismatch := false
+	for _, log := range logs {
+		if log.Action == "download_lease_file_changed" && strings.Contains(log.Detail, "内容哈希不匹配") {
+			foundHashMismatch = true
+		}
+	}
+	if !foundHashMismatch {
+		t.Fatalf("expected content hash mismatch audit log, got %+v", logs)
+	}
 
 	staleReq := httptest.NewRequest(http.MethodGet, "/api/files/download?dirId=default&path=test.txt", nil)
 	staleReq.Header.Set("Range", "bytes=10-15")
@@ -365,6 +405,74 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 	}
 	if staleResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected stale session range to be unauthorized, got %d", staleResp.StatusCode)
+	}
+}
+
+func TestDownloadLeaseSkipsHashAboveConfiguredThreshold(t *testing.T) {
+	root := t.TempDir()
+	large := bytes.Repeat([]byte("a"), 1024*1024+1)
+	if err := osWriteFile(filepath.Join(root, "large.bin"), large); err != nil {
+		t.Fatalf("write large file: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+
+	cfg := testConfig(root)
+	cfg.Downloads.ContentHashMaxMB = 1
+	app := New(cfg, st)
+	if err := st.CreateSessionWithIdle("sid-large", time.Now().Add(time.Hour), time.Now().Add(time.Minute), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"default","path":"large.bin"}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "sid-large"})
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("create large lease request: %v", err)
+	}
+	var lease downloadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.URL == "" {
+		t.Fatalf("expected large lease url, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+	loadedLease, err := st.DownloadLeaseByHash(leaseHashFromURL(t, lease.URL))
+	if err != nil {
+		t.Fatalf("load large lease: %v", err)
+	}
+	if !loadedLease.FileSHA256.Valid || loadedLease.FileSHA256.String != "" {
+		t.Fatalf("expected large lease to store an empty hash marker, got %+v", loadedLease.FileSHA256)
+	}
+	largeReq := httptest.NewRequest(http.MethodGet, lease.URL, nil)
+	largeReq.Header.Set("Range", "bytes=0-3")
+	largeResp, err := app.Test(largeReq)
+	if err != nil {
+		t.Fatalf("large lease range request: %v", err)
+	}
+	assertPartialBody(t, largeResp, "aaaa")
+
+	tok := &store.Token{Hash: security.HashToken("large-token"), Type: "download", DirID: "default", Path: "large.bin", MaxUses: 1, ExpiresAt: sqlNullTime(time.Now().Add(time.Hour))}
+	if err := st.CreateToken(tok); err != nil {
+		t.Fatalf("create large public token: %v", err)
+	}
+	publicLeaseReq := httptest.NewRequest(http.MethodPost, "/t/large-token/download-lease", nil)
+	publicLeaseResp, err := app.Test(publicLeaseReq)
+	if err != nil {
+		t.Fatalf("create public large lease request: %v", err)
+	}
+	var publicLease downloadLeaseResponse
+	decodeJSON(t, publicLeaseResp, &publicLease)
+	if publicLeaseResp.StatusCode != http.StatusOK || publicLease.URL == "" {
+		t.Fatalf("expected public large lease url, status=%d lease=%+v", publicLeaseResp.StatusCode, publicLease)
+	}
+	loadedPublicLease, err := st.DownloadLeaseByHash(leaseHashFromURL(t, publicLease.URL))
+	if err != nil {
+		t.Fatalf("load public large lease: %v", err)
+	}
+	if !loadedPublicLease.FileSHA256.Valid || loadedPublicLease.FileSHA256.String != "" {
+		t.Fatalf("expected public large lease to skip content hash, got %+v", loadedPublicLease.FileSHA256)
 	}
 }
 
@@ -585,6 +693,19 @@ func assertPartialBody(t *testing.T, resp *http.Response, expected string) {
 
 func osWriteFile(path string, content []byte) error {
 	return os.WriteFile(path, content, 0644)
+}
+
+func leaseHashFromURL(t *testing.T, raw string) string {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse lease url: %v", err)
+	}
+	plain := parsed.Query().Get("lease")
+	if plain == "" {
+		t.Fatalf("lease url missing token: %q", raw)
+	}
+	return security.HashToken(plain)
 }
 
 func sqlNullTime(t time.Time) sql.NullTime {
