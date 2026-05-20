@@ -4,6 +4,16 @@
 
 ## 快速运行
 
+从仓库根目录一键启动前后端：
+
+```bash
+./scripts/dev.sh
+```
+
+脚本默认读取 `backend/config.yaml`，后端端口仍以该配置文件中的 `server.port` 为准。
+
+如只运行后端：
+
 ```bash
 cp config.example.yaml config.yaml
 # 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs 等配置
@@ -49,6 +59,23 @@ go run ./cmd/server -config config.yaml
 - `tokens.default_ttl_seconds`：令牌默认有效期。
 - `tokens.upload_max_mb`：单个上传令牌的累计上传容量；`0` 表示不限制。
 - `audit.retain`：审计日志保留条数。
+
+### 修改端口
+
+后端监听地址由 `config.yaml` 控制：
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8080
+```
+
+把 `port` 改成目标端口后重启服务即可。如果同时使用前端开发服务器，需要让前端代理指向相同端口，例如：
+
+```bash
+cd ../frontend
+VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 bun run dev
+```
 
 ## 生成 TOTP Secret
 

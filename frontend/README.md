@@ -17,6 +17,16 @@
 
 ## 本地开发
 
+推荐从仓库根目录一键启动前后端：
+
+```bash
+./scripts/dev.sh
+```
+
+该脚本会读取 `backend/config.yaml` 启动后端，并启动 Vite 前端开发服务器。
+
+如只运行前端：
+
 ```bash
 bun install
 bun run dev
@@ -37,6 +47,26 @@ Vite 已配置开发代理：
 - `/t` → `http://localhost:8080`
 
 因此开发时后端服务需要运行在本机 `8080` 端口。
+
+如果后端端口不是 `8080`，通过环境变量修改代理目标：
+
+```bash
+VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 bun run dev
+```
+
+如果前端开发端口不是 `5173`，通过 Vite 参数修改：
+
+```bash
+bun run dev -- --port 5174
+```
+
+使用根目录一键脚本时，对应写法为：
+
+```bash
+BACKEND_PORT=9000 FRONTEND_PORT=5174 ./scripts/dev.sh
+```
+
+前端端口变化后，需要同步更新后端 `cors.allow_origins`，例如加入 `http://localhost:5174`。
 
 ## 构建与部署
 

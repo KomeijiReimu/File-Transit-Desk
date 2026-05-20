@@ -30,6 +30,7 @@
 .
 ├── backend/          # Go 后端
 ├── frontend/         # Vue 前端（Bun）
+├── scripts/          # 本地开发辅助脚本
 ├── README.md         # 项目总说明
 └── 部署说明.md       # 简要部署说明
 ```
@@ -38,7 +39,7 @@
 
 ## 快速开始
 
-### 1. 后端
+### 1. 准备后端配置
 
 ```bash
 cd backend
@@ -78,14 +79,42 @@ PY
 printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 ```
 
-启动后端：
+### 2. 一键启动前后端
+
+回到仓库根目录后运行：
 
 ```bash
+./scripts/dev.sh
+```
+
+脚本会：
+
+- 检查 `go` 与 `bun` 是否可用；
+- 如果 `frontend/node_modules/` 不存在，自动执行 `bun install`；
+- 以 `backend/config.yaml` 启动 Go 后端；
+- 启动 Vite 前端开发服务器；
+- 将前端开发代理 `/api` 和 `/t` 指向后端。
+
+默认访问地址：
+
+```text
+前端：http://localhost:5173
+后端：http://localhost:8080
+```
+
+首次运行如果发现 `backend/config.yaml` 不存在，脚本会从示例配置复制一份并退出。请先替换 TOTP Secret、管理员账号和目录配置后再运行。
+
+### 3. 手动分别启动
+
+后端：
+
+```bash
+cd backend
 go mod tidy
 go run ./cmd/server -config config.yaml
 ```
 
-### 2. 前端
+前端：
 
 ```bash
 cd frontend
@@ -94,6 +123,88 @@ bun run dev
 ```
 
 Vite 会把 `/api` 和 `/t` 代理到 `http://localhost:8080`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。
+
+## 修改绑定端口
+
+本地开发涉及两个端口：后端监听端口和前端 Vite 开发服务器端口。
+
+### 后端端口
+
+后端端口由 `backend/config.yaml` 中的 `server.port` 控制：
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8080
+```
+
+例如要把后端改到 `9000`：
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 9000
+```
+
+同时需要让前端代理也指向新端口。使用一键脚本时：
+
+```bash
+BACKEND_PORT=9000 ./scripts/dev.sh
+```
+
+也可以直接传完整后端地址：
+
+```bash
+BACKEND_ORIGIN=http://127.0.0.1:9000 ./scripts/dev.sh
+```
+
+手动启动前端时：
+
+```bash
+cd frontend
+VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 bun run dev
+```
+
+### 前端开发端口
+
+一键脚本默认让 Vite 监听 `5173`。如需改为 `5174`：
+
+```bash
+FRONTEND_PORT=5174 ./scripts/dev.sh
+```
+
+手动启动前端时：
+
+```bash
+cd frontend
+bun run dev -- --port 5174
+```
+
+如果前端端口不是 `5173`，请同步修改 `backend/config.yaml` 的 `cors.allow_origins`，否则 Cookie 登录请求会被浏览器 CORS 策略拦截：
+
+```yaml
+cors:
+  allow_origins:
+    - "http://localhost:5174"
+```
+
+### Docker 映射端口
+
+Docker Compose 中浏览器访问端口由 `backend/docker-compose.example.yml` 的 `ports` 控制：
+
+```yaml
+ports:
+  - "8080:80"
+```
+
+例如要让宿主机用 `9000` 访问前端容器：
+
+```yaml
+ports:
+  - "9000:80"
+```
+
+容器内部后端仍默认监听 `8080`，前端 nginx 通过服务名 `backend:8080` 访问后端；仅改变宿主机访问端口时不需要修改后端 `server.port`。
 
 ## 关键配置
 
@@ -165,6 +276,14 @@ go test ./...
 go vet ./...
 go build ./cmd/server
 go run ./cmd/server -config config.yaml
+```
+
+一键开发：
+
+```bash
+./scripts/dev.sh
+BACKEND_PORT=9000 FRONTEND_PORT=5174 ./scripts/dev.sh
+BACKEND_CONFIG=backend/config.local.yaml ./scripts/dev.sh
 ```
 
 前端：
