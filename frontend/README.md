@@ -23,6 +23,12 @@
 ./scripts/dev.sh
 ```
 
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1
+```
+
 该脚本会读取 `backend/config.yaml` 启动后端，并启动 Vite 前端开发服务器。
 
 如只运行前端：
@@ -64,6 +70,12 @@ bun run dev -- --port 5174
 
 ```bash
 BACKEND_PORT=9000 FRONTEND_PORT=5174 ./scripts/dev.sh
+```
+
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1 -BackendPort 9000 -FrontendPort 5174
 ```
 
 前端端口变化后，需要同步更新后端 `cors.allow_origins`，例如加入 `http://localhost:5174`。

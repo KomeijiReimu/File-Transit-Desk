@@ -10,6 +10,12 @@
 ./scripts/dev.sh
 ```
 
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1
+```
+
 脚本默认读取 `backend/config.yaml`，后端端口仍以该配置文件中的 `server.port` 为准。
 
 如只运行后端：
@@ -75,6 +81,12 @@ server:
 ```bash
 cd ../frontend
 VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 bun run dev
+```
+
+Windows 一键脚本可直接指定端口：
+
+```powershell
+pwsh -File scripts/dev.ps1 -BackendPort 9000
 ```
 
 ## 生成 TOTP Secret

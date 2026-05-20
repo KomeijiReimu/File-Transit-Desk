@@ -26,9 +26,9 @@ fi
 
 if [[ ! -f "${BACKEND_CONFIG_PATH}" ]]; then
   cp "${ROOT_DIR}/backend/config.example.yaml" "${BACKEND_CONFIG_PATH}"
-  cat >&2 <<'MSG'
+  cat >&2 <<MSG
 已复制 backend/config.example.yaml 到 ${BACKEND_CONFIG}。
-请先编辑 backend/config.yaml，至少替换：
+请先编辑配置文件，至少替换：
   - auth.totp_secret
   - auth.admin.username
   - auth.admin.password_sha256

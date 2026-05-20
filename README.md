@@ -87,6 +87,18 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 ./scripts/dev.sh
 ```
 
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1
+```
+
+如果系统只有 Windows PowerShell，也可以使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
+```
+
 脚本会：
 
 - 检查 `go` 与 `bun` 是否可用；
@@ -152,10 +164,22 @@ server:
 BACKEND_PORT=9000 ./scripts/dev.sh
 ```
 
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1 -BackendPort 9000
+```
+
 也可以直接传完整后端地址：
 
 ```bash
 BACKEND_ORIGIN=http://127.0.0.1:9000 ./scripts/dev.sh
+```
+
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1 -BackendOrigin http://127.0.0.1:9000
 ```
 
 手动启动前端时：
@@ -171,6 +195,12 @@ VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 bun run dev
 
 ```bash
 FRONTEND_PORT=5174 ./scripts/dev.sh
+```
+
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1 -FrontendPort 5174
 ```
 
 手动启动前端时：
@@ -284,6 +314,14 @@ go run ./cmd/server -config config.yaml
 ./scripts/dev.sh
 BACKEND_PORT=9000 FRONTEND_PORT=5174 ./scripts/dev.sh
 BACKEND_CONFIG=backend/config.local.yaml ./scripts/dev.sh
+```
+
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1
+pwsh -File scripts/dev.ps1 -BackendPort 9000 -FrontendPort 5174
+pwsh -File scripts/dev.ps1 -BackendConfig backend/config.local.yaml
 ```
 
 前端：
