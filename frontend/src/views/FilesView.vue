@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
@@ -7,26 +8,17 @@ import StateBlock from '@/components/StateBlock.vue'
 import type { DirectoryInfo, FileEntry } from '@/types'
 import { formatBytes, formatDate, joinPath, parentPath } from '@/utils'
 
-interface UploadItem {
-  id: string
-  file: File
-  status: 'queued' | 'uploading' | 'success' | 'error'
-  error?: string
-}
-
 const dirs = ref<DirectoryInfo[]>([])
+const route = useRoute()
 const selectedDirId = ref('')
 const currentPath = ref('')
 const entries = ref<FileEntry[]>([])
 const loading = ref(true)
-const dragOver = ref(false)
 const error = ref('')
-const notice = ref('')
 const downloadingPath = ref('')
-const uploadQueue = ref<UploadItem[]>([])
 const responseCanUpload = ref<boolean | null>(null)
 const responseCanDownload = ref<boolean | null>(null)
-let uploadCounter = 0
+let restoringQuery = false
 
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === selectedDirId.value))
 const dirOptions = computed(() => dirs.value.map((dir) => ({
@@ -36,8 +28,6 @@ const dirOptions = computed(() => dirs.value.map((dir) => ({
 })))
 const canUpload = computed(() => responseCanUpload.value ?? Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const canDownload = computed(() => responseCanDownload.value ?? (selectedDir.value ? selectedDir.value.canDownload !== false && selectedDir.value.allowDownload !== false : false))
-const hasPendingUploads = computed(() => uploadQueue.value.some((item) => item.status === 'queued' || item.status === 'error'))
-const uploading = computed(() => uploadQueue.value.some((item) => item.status === 'uploading'))
 const crumbs = computed(() => [{ name: selectedDir.value?.name || '目录', path: '' }, ...currentPath.value.split('/').filter(Boolean).map((part, index, arr) => ({ name: part, path: arr.slice(0, index + 1).join('/') }))])
 
 function entryIsDir(entry: FileEntry) {
@@ -49,7 +39,12 @@ async function loadDirs() {
   error.value = ''
   try {
     dirs.value = await api.dirs()
-    selectedDirId.value = dirs.value[0]?.id || ''
+    const queryDir = String(route.query.dirId || '')
+    restoringQuery = true
+    selectedDirId.value = dirs.value.some((dir) => dir.id === queryDir) ? queryDir : dirs.value[0]?.id || ''
+    currentPath.value = String(route.query.path || '')
+    if (selectedDirId.value) await loadFiles()
+    restoringQuery = false
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '目录加载失败。'
   } finally {
@@ -57,11 +52,10 @@ async function loadDirs() {
   }
 }
 
-async function loadFiles(clearNotice = true) {
+async function loadFiles() {
   if (!selectedDirId.value) return
   loading.value = true
   error.value = ''
-  if (clearNotice) notice.value = ''
   try {
     const result = await api.listFiles(selectedDirId.value, currentPath.value)
     entries.value = result.entries || result.files || []
@@ -97,69 +91,15 @@ async function startDownload(entry: FileEntry) {
   }
 }
 
-function addUploadFiles(files: FileList | File[]) {
-  if (!canUpload.value) {
-    notice.value = '当前目录不允许上传。'
-    return
-  }
-  if (uploading.value) {
-    notice.value = '正在上传，请等待当前队列完成后再追加文件。'
-    return
-  }
-  Array.from(files).forEach((file) => {
-    uploadQueue.value.push({ id: `local-${Date.now()}-${++uploadCounter}`, file, status: 'queued' })
-  })
-}
-
-function onFileChange(event: Event) {
-  const input = event.target as HTMLInputElement
-  if (input.files?.length) addUploadFiles(input.files)
-  input.value = ''
-}
-
-function onDrop(event: DragEvent) {
-  event.preventDefault()
-  dragOver.value = false
-  if (!canUpload.value || uploading.value) return
-  if (event.dataTransfer?.files?.length) addUploadFiles(event.dataTransfer.files)
-}
-
-async function uploadItem(item: UploadItem) {
-  if (!selectedDirId.value) return
-  if (item.status === 'uploading' || item.status === 'success' || uploading.value) return
-  item.status = 'uploading'
-  item.error = undefined
-  try {
-    await api.uploadOne(selectedDirId.value, currentPath.value, item.file)
-    item.status = 'success'
-    await loadFiles(false)
-    notice.value = `已上传 ${item.file.name}`
-  } catch (err) {
-    item.status = 'error'
-    item.error = err instanceof ApiError ? err.message : '上传失败，可稍后重试。'
-  }
-}
-
-async function uploadAll() {
-  if (uploading.value) return
-  for (const item of uploadQueue.value.filter((item) => item.status === 'queued' || item.status === 'error')) {
-    await uploadItem(item)
-  }
-}
-
-function removeUpload(id: string) {
-  uploadQueue.value = uploadQueue.value.filter((item) => item.id !== id)
-}
-
 watch(selectedDirId, async () => {
+  if (restoringQuery) return
   currentPath.value = ''
-  uploadQueue.value = []
   responseCanUpload.value = null
   responseCanDownload.value = null
   if (selectedDirId.value) await loadFiles()
 })
 watch(currentPath, () => {
-  uploadQueue.value = []
+  if (restoringQuery) return
   loadFiles()
 })
 onMounted(loadDirs)
@@ -171,13 +111,12 @@ onMounted(loadDirs)
       <div>
         <p class="eyebrow">Files</p>
         <h1>文件浏览</h1>
-        <p>选择目录，浏览路径，按权限下载或上传临时文件。</p>
+        <p>选择目录并浏览路径，文件列表会直接显示在当前目录下方。</p>
       </div>
       <GlassSelect v-model="selectedDirId" class="page-select" :options="dirOptions" aria-label="选择目录" placeholder="选择目录" />
     </header>
 
     <StateBlock :loading="loading" :error="error" />
-    <div v-if="notice" class="alert success">{{ notice }}</div>
 
     <EmptyState v-if="!loading && !dirs.length" title="还没有可用目录" description="请先在后端配置可访问目录。" />
 
@@ -200,40 +139,9 @@ onMounted(loadDirs)
           </button>
         </nav>
         <div class="toolbar-actions">
+          <RouterLink v-if="canUpload" class="ghost-btn" :to="{ name: 'upload', query: { dirId: selectedDirId, path: currentPath } }">上传到此处</RouterLink>
           <button class="ghost-btn" :disabled="!currentPath" @click="currentPath = parentPath(currentPath)">返回上级</button>
         </div>
-      </div>
-
-      <div v-if="canUpload" class="panel upload-panel">
-        <div
-          class="dropzone compact"
-          :class="{ over: dragOver }"
-          @dragover.prevent="dragOver = !uploading"
-          @dragleave="dragOver = false"
-          @drop="onDrop"
-        >
-          <div class="dropzone-symbol" aria-hidden="true"><span /></div>
-          <div><strong>拖拽文件到此上传</strong><small>或点击按钮选择文件，队列支持失败重试</small></div>
-          <label class="upload-btn">
-            选择文件
-            <input type="file" multiple :disabled="uploading" @change="onFileChange" />
-          </label>
-        </div>
-        <ul v-if="uploadQueue.length" class="upload-queue">
-          <li v-for="item in uploadQueue" :key="item.id" :data-status="item.status">
-            <div class="q-file">
-              <strong>{{ item.file.name }}</strong>
-              <small>{{ formatBytes(item.file.size) }} · {{ item.status === 'queued' ? '待上传' : item.status === 'uploading' ? '上传中…' : item.status === 'success' ? '已完成' : item.error }}</small>
-            </div>
-            <div class="q-actions">
-              <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="uploadItem(item)">重试</button>
-              <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" @click="removeUpload(item.id)">移除</button>
-            </div>
-          </li>
-        </ul>
-        <button v-if="uploadQueue.length" class="primary-btn" type="button" :disabled="!hasPendingUploads || uploading" @click="uploadAll">
-          {{ uploading ? '上传中…' : '上传队列' }}
-        </button>
       </div>
 
       <div class="table-card">

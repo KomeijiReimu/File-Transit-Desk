@@ -510,7 +510,7 @@ func (s *Server) listFiles(c *fiber.Ctx) error {
 	entries, err := fsutil.List(dir.Path, c.Query("path"))
 	if err != nil {
 		_ = s.store.Audit("illegal_access", s.clientIP(c), err.Error())
-		return fiber.ErrBadRequest
+		return friendlyPathError(err, "路径不存在，请检查路径或返回上级目录。")
 	}
 	_, safePath, _ := fsutil.Resolve(dir.Path, c.Query("path"))
 	_ = s.store.Audit("file_list", s.clientIP(c), fmt.Sprintf("目录 %s，路径 %s", dir.ID, displayPath(safePath)))
@@ -528,7 +528,7 @@ func (s *Server) downloadFile(c *fiber.Ctx) error {
 	full, safePath, err := fsutil.Resolve(dir.Path, c.Query("path"))
 	if err != nil {
 		_ = s.store.Audit("illegal_access", s.clientIP(c), err.Error())
-		return fiber.ErrBadRequest
+		return friendlyPathError(err, "文件路径不存在，请刷新文件列表后重试。")
 	}
 	if info, err := os.Stat(full); err != nil || info.IsDir() {
 		return fiber.ErrNotFound
@@ -692,13 +692,23 @@ func fileSHA256Hex(path string) (string, error) {
 func (s *Server) resolveDownloadFile(dir config.Dir, rel string) (string, string, os.FileInfo, error) {
 	full, safePath, err := fsutil.Resolve(dir.Path, rel)
 	if err != nil {
-		return "", "", nil, fiber.ErrBadRequest
+		return "", "", nil, friendlyPathError(err, "文件路径不存在，请刷新文件列表后重试。")
 	}
 	info, err := os.Stat(full)
 	if err != nil || info.IsDir() {
 		return "", "", nil, fiber.ErrNotFound
 	}
 	return full, safePath, info, nil
+}
+
+func friendlyPathError(err error, missingMessage string) error {
+	if errors.Is(err, fsutil.ErrUnsafePath) {
+		return fiber.NewError(fiber.StatusBadRequest, "路径不合法，请不要使用绝对路径或 ..。")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return fiber.NewError(fiber.StatusNotFound, missingMessage)
+	}
+	return err
 }
 
 func normalizedFileMtime(info os.FileInfo) time.Time {
@@ -936,14 +946,27 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 		return fiber.ErrForbidden
 	}
 	var safePath string
+	var fullPath string
 	var err error
 	if in.Type == "download" {
-		_, safePath, err = fsutil.Resolve(dir.Path, in.Path)
+		fullPath, safePath, err = fsutil.Resolve(dir.Path, in.Path)
 	} else {
 		_, safePath, err = fsutil.ResolveForCreate(dir.Path, in.Path)
 	}
 	if err != nil {
-		return fiber.ErrBadRequest
+		if in.Type == "download" {
+			return friendlyPathError(err, "下载文件不存在，请先在文件浏览页确认文件路径。")
+		}
+		return friendlyPathError(err, "路径不存在，请先在文件浏览页确认后再创建令牌。")
+	}
+	if in.Type == "download" {
+		info, statErr := os.Stat(fullPath)
+		if statErr != nil {
+			return friendlyPathError(statErr, "下载文件不存在，请先在文件浏览页确认文件路径。")
+		}
+		if info.IsDir() {
+			return fiber.NewError(fiber.StatusBadRequest, "下载令牌需要指向具体文件，不能指向目录。")
+		}
 	}
 	plain, hash, err := security.NewToken()
 	if err != nil {

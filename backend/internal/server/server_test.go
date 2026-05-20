@@ -233,6 +233,40 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 	}
 }
 
+func TestFriendlyMissingPathErrors(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+
+	cfg := testConfig(root)
+	app := New(cfg, st)
+	if err := st.CreateSessionWithIdle("user-sid", time.Now().Add(time.Hour), time.Now().Add(time.Minute), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	listReq := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=default&path=missing", nil)
+	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	listResp, err := app.Test(listReq)
+	if err != nil {
+		t.Fatalf("missing list request: %v", err)
+	}
+	assertErrorContains(t, listResp, http.StatusNotFound, "路径不存在")
+
+	if err := st.CreateSessionWithIdle("admin-sid", time.Now().Add(time.Hour), time.Now().Add(time.Minute), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	tokenReq := httptest.NewRequest(http.MethodPost, "/api/tokens", strings.NewReader(`{"type":"download","dirId":"default","path":"missing.zip","ttlMinutes":30,"maxUses":1}`))
+	tokenReq.Header.Set("Content-Type", "application/json")
+	tokenReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	tokenResp, err := app.Test(tokenReq)
+	if err != nil {
+		t.Fatalf("missing token path request: %v", err)
+	}
+	assertErrorContains(t, tokenResp, http.StatusNotFound, "下载文件不存在")
+}
+
 func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
@@ -688,6 +722,21 @@ func assertPartialBody(t *testing.T, resp *http.Response, expected string) {
 	}
 	if string(body) != expected {
 		t.Fatalf("expected body %q, got %q", expected, string(body))
+	}
+}
+
+func assertErrorContains(t *testing.T, resp *http.Response, status int, text string) {
+	t.Helper()
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read error body: %v", err)
+	}
+	if resp.StatusCode != status {
+		t.Fatalf("expected status %d, got %d body=%q", status, resp.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), text) {
+		t.Fatalf("expected body to contain %q, got %q", text, string(body))
 	}
 }
 

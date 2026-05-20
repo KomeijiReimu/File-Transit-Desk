@@ -23,6 +23,8 @@ const typeOptions = [
   { label: '下载令牌', value: 'download', hint: '外部访客领取文件' },
   { label: '上传令牌', value: 'upload', hint: '外部访客提交文件' },
 ]
+const pathPlaceholder = computed(() => form.type === 'download' ? '必填，填写已存在文件路径，例如 sub/file.zip' : '可选，填写接收目录，例如 inbox/，留空为根目录')
+const pathHelp = computed(() => form.type === 'download' ? '下载令牌必须指向已存在的具体文件。' : '上传令牌会把文件保存到此目录，留空则保存到目录根路径。')
 const dirOptions = computed(() => dirs.value.map((dir) => ({
   label: dir.label || dir.name,
   value: dir.id,
@@ -54,6 +56,14 @@ function canCopyRow(token: TokenInfo) {
   return Boolean(shareUrlFor(token))
 }
 
+function canRevoke(token: TokenInfo) {
+  return token.revoked !== true && token.valid !== false
+}
+
+function deleteLabel(token: TokenInfo) {
+  return canRevoke(token) ? '删除并失效' : '删除记录'
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -76,6 +86,10 @@ async function createToken() {
   copyState.value = 'idle'
   if (!canSubmit.value) {
     error.value = '请填写目录、有效期和最大使用次数。'
+    return
+  }
+  if (form.type === 'download' && !form.path) {
+    error.value = '下载令牌需要填写具体文件路径，例如 sub/file.zip。'
     return
   }
   saving.value = true
@@ -120,12 +134,12 @@ async function revoke(id: string | number) {
   }
 }
 
-async function remove(id: string | number) {
-  if (!confirm('确定删除这个令牌吗？')) return
+async function remove(token: TokenInfo) {
+  if (!confirm(canRevoke(token) ? '确定删除并立即让这个令牌失效吗？此操作会移除历史记录并清理相关下载票据。' : '确定删除这条令牌记录吗？')) return
   error.value = ''
   try {
-    await api.deleteToken(id)
-    tokens.value = tokens.value.filter((token) => token.id !== id)
+    await api.deleteToken(token.id)
+    tokens.value = tokens.value.filter((item) => item.id !== token.id)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '删除令牌失败。'
   }
@@ -147,6 +161,7 @@ onMounted(load)
     <div class="grid two">
       <form class="panel form-grid" @submit.prevent="createToken">
         <h2>创建一次性链接</h2>
+        <p class="muted-text">下载令牌的路径必须是已存在的具体文件；上传令牌的路径表示接收目录。</p>
         <label>类型
           <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择令牌类型" />
         </label>
@@ -154,7 +169,8 @@ onMounted(load)
           <GlassSelect v-model="form.dirId" :options="dirOptions" aria-label="选择目录" placeholder="选择目录" />
         </label>
         <label>路径
-          <input v-model.trim="form.path" placeholder="空为目录根路径，或填写 sub/file.zip" />
+          <input v-model.trim="form.path" :placeholder="pathPlaceholder" />
+          <small>{{ pathHelp }}</small>
         </label>
         <div class="inline-fields">
           <label>有效期（分钟）<input v-model.number="form.ttlMinutes" min="1" type="number" /></label>
@@ -177,7 +193,7 @@ onMounted(load)
       <div class="panel insight-card">
         <span class="big-number">{{ tokens.length }}</span>
         <strong>当前令牌</strong>
-        <p>建议给外部人员使用短有效期、低次数链接；完成传输后可立即撤销。</p>
+        <p>撤销用于立刻让链接失效并清理已兑换下载票据；删除用于移除历史记录。两者不是重复操作。</p>
       </div>
     </div>
 
@@ -196,11 +212,13 @@ onMounted(load)
               </span>
             </td>
             <td data-label="操作" class="actions">
-              <button class="mini-btn" type="button" :disabled="!canCopyRow(token)" :title="canCopyRow(token) ? '复制分享链接' : '明文链接只在创建时显示一次'" @click="copyRow(token)">
-                {{ rowCopyId === token.id ? '✓ 已复制' : canCopyRow(token) ? '复制链接' : '仅创建时可复制' }}
-              </button>
-              <button class="mini-btn" :disabled="token.revoked" @click="revoke(token.id)">撤销</button>
-              <button class="mini-btn danger" @click="remove(token.id)">删除</button>
+              <div class="row-actions">
+                <button class="mini-btn" type="button" :disabled="!canCopyRow(token)" :title="canCopyRow(token) ? '复制分享链接' : '明文链接只在创建时显示一次'" @click="copyRow(token)">
+                  {{ rowCopyId === token.id ? '✓ 已复制' : canCopyRow(token) ? '复制链接' : '仅创建时可复制' }}
+                </button>
+                <button class="mini-btn" :disabled="!canRevoke(token)" :title="canRevoke(token) ? '立即让链接失效' : '该令牌已经不可用，无需再次撤销'" @click="revoke(token.id)">撤销</button>
+                <button class="mini-btn danger" :title="canRevoke(token) ? '删除记录并让仍可用的令牌失效' : '删除历史记录'" @click="remove(token)">{{ deleteLabel(token) }}</button>
+              </div>
             </td>
           </tr>
         </tbody>

@@ -36,6 +36,10 @@ async function handleLogout() {
           <span class="nav-ico nav-files" aria-hidden="true" />
           <span>文件浏览</span>
         </RouterLink>
+        <RouterLink to="/upload">
+          <span class="nav-ico nav-upload" aria-hidden="true" />
+          <span>文件上传</span>
+        </RouterLink>
         <template v-if="isAdmin">
           <RouterLink to="/tokens">
             <span class="nav-ico nav-tokens" aria-hidden="true" />

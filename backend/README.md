@@ -149,6 +149,8 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 }
 ```
 
+  如果 `path` 不存在会返回 `404` 和中文提示，例如 `{"error":"路径不存在，请检查路径或返回上级目录。"}`；如果路径包含绝对路径或 `..` 等非法片段，会返回 `400` 和 `路径不合法` 提示。
+
 - `POST /api/files/download-lease`：登录态下载前兑换短期票据，请求 `{ "dirId": "default", "path": "a.txt" }`，返回 `{ "url": "/api/files/download-by-lease?lease=...", "expiresAt": "..." }`。
 - `GET /api/files/download-by-lease?lease=...`：使用下载票据下载文件，支持 HTTP Range 断点续传；不要求页面会话仍然有效，但会校验票据未过期、目录仍允许下载、文件大小、修改时间和可用内容哈希未变化。
 - `GET /api/files/download?dirId=default&path=a.txt`：兼容保留的直接下载接口，仍要求请求开始时有有效会话。
@@ -175,6 +177,8 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 }
 ```
 
+下载令牌的 `path` 必须指向已存在的具体文件，不能指向不存在的路径或目录；上传令牌的 `path` 表示接收目录，允许后续创建不存在的子目录。若下载路径不存在，会返回 `404` 和 `下载文件不存在，请先在文件浏览页确认文件路径。`，便于前端直接提示管理员修正。
+
 也兼容 `dir_id`、`ttl_seconds`、`expires_at`、`max_uses`。响应中的明文 token 只出现一次：
 
 ```json
@@ -183,8 +187,8 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 
 上传令牌的 `url` 为 `/t/{token}/upload`。
 
-- `POST /api/tokens/:id/revoke`
-- `DELETE /api/tokens/:id`
+- `POST /api/tokens/:id/revoke`：撤销令牌，让尚未过期且未用尽的链接立即失效，并同步清理该令牌已兑换的下载票据。用于应急止血或提前结束分享。
+- `DELETE /api/tokens/:id`：删除令牌记录。删除也会让令牌失效并清理相关下载票据，但主要语义是移除管理列表中的历史记录。
 - `GET /t/:token/info`：公开令牌信息。无效时返回 `{ "valid": false, "reason": "expired|revoked|exhausted|upload_quota_exhausted|not_found" }`；有效时返回 `{ "valid": true, "type": "download", "path": "a.txt", "expiresAt": "...", "maxUses": 1, "uses": 0, "uploadedBytes": 0, "uploadMaxBytes": 1073741824 }`，不会暴露目录 ID。
 - `POST /t/:token/download-lease`：公开下载令牌兑换短期下载票据，兑换时原子消耗一次使用次数。
 - `GET /t/download-by-lease?lease=...`：公开票据下载，支持 Range 续传且不重复消耗令牌次数。
@@ -230,6 +234,40 @@ docker compose -f docker-compose.example.yml up -d --build
 ## 前端 dist 放置
 
 前端构建后，将产物放在配置的 `web.static_dir`（例如 `../frontend/dist`）。后端会托管静态文件，并对非 `/api`、非 `/t` 路径回退到 `index.html`，适配单页应用路由。
+
+## 清除数据库和运行记录
+
+后端会在启动时自动迁移 SQLite 表结构，因此可以通过删除或清理数据库来重置运行记录。执行前请先停止后端服务，并根据需要备份数据库和上传目录。
+
+- **清空全部数据库记录**：删除 `database.path` 指向的 SQLite 文件后重启服务，默认配置示例：
+
+  ```bash
+  cd backend
+  rm -f data/filetrans.db
+  go run ./cmd/server -config config.yaml
+  ```
+
+- **只清空访问记录**：保留会话、令牌和下载票据，只删除审计日志：
+
+  ```bash
+  cd backend
+  sqlite3 data/filetrans.db "DELETE FROM audit_logs; VACUUM;"
+  ```
+
+- **让所有登录态和分享链接立即失效**：保留审计日志，清除会话、下载票据和令牌：
+
+  ```bash
+  cd backend
+  sqlite3 data/filetrans.db "DELETE FROM sessions; DELETE FROM download_leases; DELETE FROM tokens; VACUUM;"
+  ```
+
+- **清除上传文件**：上传目录以 `storage.dirs[].path` 为准；默认示例目录可这样清理：
+
+  ```bash
+  rm -rf backend/uploads/*
+  ```
+
+如果修改过 `database.path` 或开放目录路径，请以实际配置为准，不要直接套用默认路径。
 
 ## 测试
 

@@ -7,7 +7,7 @@
 - 普通用户使用 TOTP 动态验证码登录，只能浏览、上传、下载已开放目录。
 - 管理员使用独立账号密码登录，可管理临时令牌、查看访问记录和配置概览。
 - 支持受控目录浏览、子目录进入、文件大小和修改时间展示。
-- 支持登录用户拖拽上传、队列上传、失败重试和下载文件。
+- 文件浏览与文件上传分为独立页面：浏览页专注目录和文件列表，上传页支持登录用户拖拽上传、队列上传和失败重试。
 - 支持创建临时下载/上传令牌，并按有效期、使用次数和上传累计容量自动失效。
 - 支持空闲会话过期：页面离开或长时间无操作后需要重新登录，同时已开始的长下载不会被页面会话失效打断。
 - 下载使用短期下载票据，支持 HTTP Range 断点续传；公开下载令牌只在兑换票据时消耗一次使用次数，续传不重复扣次。
@@ -246,6 +246,50 @@ ports:
 ```
 
 容器内部后端仍默认监听 `8080`，前端 nginx 通过服务名 `backend:8080` 访问后端；仅改变宿主机访问端口时不需要修改后端 `server.port`。
+
+## 日常维护：清除数据库和记录
+
+后端运行数据默认保存在 `backend/data/`，上传文件默认按 `storage.dirs` 指向的目录保存。清理前请先停止后端服务，并确认已经备份需要保留的文件。
+
+### 清空全部数据库记录
+
+如果只想清除登录会话、令牌、下载票据和审计日志等数据库记录，保留已上传文件，可删除 SQLite 数据库文件后重启服务，后端会自动重新建表：
+
+```bash
+cd backend
+rm -f data/filetrans.db
+go run ./cmd/server -config config.yaml
+```
+
+如果 `backend/config.yaml` 中 `database.path` 改过，请删除实际配置的数据库文件，而不是上面的默认路径。
+
+### 只清除访问记录
+
+审计日志在 `audit.retain` 中配置保留条数。若需要立即清空访问记录，可在停止后端后直接操作 SQLite：
+
+```bash
+cd backend
+sqlite3 data/filetrans.db "DELETE FROM audit_logs; VACUUM;"
+```
+
+### 清除会话、令牌和下载票据
+
+如果希望让所有登录态、分享链接和已兑换下载票据立即失效，但保留审计日志：
+
+```bash
+cd backend
+sqlite3 data/filetrans.db "DELETE FROM sessions; DELETE FROM download_leases; DELETE FROM tokens; VACUUM;"
+```
+
+### 清除上传文件
+
+上传文件不一定都在 `backend/uploads/`，以 `storage.dirs[].path` 为准。确认目录后再删除，例如默认配置：
+
+```bash
+rm -rf backend/uploads/*
+```
+
+不要删除 `backend/config.yaml`，除非你希望重新配置服务。
 
 ## 关键配置
 
