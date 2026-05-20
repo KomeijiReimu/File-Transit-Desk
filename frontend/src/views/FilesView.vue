@@ -81,6 +81,14 @@ function openDir(entry: FileEntry) {
 }
 
 function addUploadFiles(files: FileList | File[]) {
+  if (!canUpload.value) {
+    notice.value = '当前目录不允许上传。'
+    return
+  }
+  if (uploading.value) {
+    notice.value = '正在上传，请等待当前队列完成后再追加文件。'
+    return
+  }
   Array.from(files).forEach((file) => {
     uploadQueue.value.push({ id: `local-${Date.now()}-${++uploadCounter}`, file, status: 'queued' })
   })
@@ -95,11 +103,13 @@ function onFileChange(event: Event) {
 function onDrop(event: DragEvent) {
   event.preventDefault()
   dragOver.value = false
+  if (!canUpload.value || uploading.value) return
   if (event.dataTransfer?.files?.length) addUploadFiles(event.dataTransfer.files)
 }
 
 async function uploadItem(item: UploadItem) {
   if (!selectedDirId.value) return
+  if (item.status === 'uploading' || item.status === 'success' || uploading.value) return
   item.status = 'uploading'
   item.error = undefined
   try {
@@ -114,6 +124,7 @@ async function uploadItem(item: UploadItem) {
 }
 
 async function uploadAll() {
+  if (uploading.value) return
   for (const item of uploadQueue.value.filter((item) => item.status === 'queued' || item.status === 'error')) {
     await uploadItem(item)
   }
@@ -180,7 +191,7 @@ onMounted(loadDirs)
         <div
           class="dropzone compact"
           :class="{ over: dragOver }"
-          @dragover.prevent="dragOver = true"
+          @dragover.prevent="dragOver = !uploading"
           @dragleave="dragOver = false"
           @drop="onDrop"
         >
@@ -198,7 +209,7 @@ onMounted(loadDirs)
               <small>{{ formatBytes(item.file.size) }} · {{ item.status === 'queued' ? '待上传' : item.status === 'uploading' ? '上传中…' : item.status === 'success' ? '已完成' : item.error }}</small>
             </div>
             <div class="q-actions">
-              <button v-if="item.status === 'error'" class="mini-btn" type="button" @click="uploadItem(item)">重试</button>
+              <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="uploadItem(item)">重试</button>
               <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" @click="removeUpload(item.id)">移除</button>
             </div>
           </li>

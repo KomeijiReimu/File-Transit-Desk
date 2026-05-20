@@ -20,6 +20,7 @@ const emit = defineEmits<{
 
 const open = ref(false)
 const root = ref<HTMLElement | null>(null)
+const trigger = ref<HTMLButtonElement | null>(null)
 const activeIndex = ref(-1)
 const listId = `glass-select-${Math.random().toString(36).slice(2)}`
 
@@ -35,7 +36,16 @@ watch(open, async (value) => {
 
 function choose(value: string | number) {
   emit('update:modelValue', value)
+  close(true)
+}
+
+function optionId(index: number) {
+  return `${listId}-option-${index}`
+}
+
+function close(restoreFocus = false) {
   open.value = false
+  if (restoreFocus) nextTick(() => trigger.value?.focus())
 }
 
 function toggle() {
@@ -60,11 +70,19 @@ function chooseActive() {
 
 function closeOnOutside(event: MouseEvent) {
   const target = event.target as Node | null
-  if (root.value && target && !root.value.contains(target)) open.value = false
+  if (root.value && target && !root.value.contains(target)) close()
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') open.value = false
+  if (event.key === 'Escape' && open.value) {
+    event.preventDefault()
+    close(true)
+  }
+}
+
+function handleFocusout(event: FocusEvent) {
+  const next = event.relatedTarget as Node | null
+  if (root.value && (!next || !root.value.contains(next))) close()
 }
 
 onMounted(() => {
@@ -79,13 +97,15 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="glass-select" :class="{ open }">
+  <div ref="root" class="glass-select" :class="{ open }" @focusout="handleFocusout">
     <button
+      ref="trigger"
       class="glass-select-trigger"
       type="button"
       :aria-label="ariaLabel || placeholder || '选择'"
       :aria-expanded="open"
       :aria-controls="listId"
+      :aria-activedescendant="open && activeIndex >= 0 ? optionId(activeIndex) : undefined"
       aria-haspopup="listbox"
       @click="toggle"
       @keydown.down.prevent="move(1)"
@@ -105,6 +125,7 @@ onBeforeUnmount(() => {
         <button
           v-for="(option, index) in options"
           :key="String(option.value)"
+          :id="optionId(index)"
           class="glass-select-option"
           :class="{ selected: String(option.value) === String(modelValue) }"
           type="button"

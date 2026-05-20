@@ -22,7 +22,7 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
-  if (!to.meta.public && !authState.ready) await restoreSession()
+  if ((to.name === 'login' || !to.meta.public) && !authState.ready) await restoreSession()
   if (!to.meta.public && !authState.authenticated) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }

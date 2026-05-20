@@ -39,6 +39,21 @@ function shareUrlFor(token: TokenInfo | CreateTokenResponse): string {
   return t ? buildShareUrl(t) : ''
 }
 
+function tokenStatusLabel(token: TokenInfo) {
+  if (token.revoked) return '已撤销'
+  if (token.valid === false) {
+    if (token.reason === 'expired') return '已过期'
+    if (token.reason === 'exhausted') return '已用尽'
+    if (token.reason === 'upload_quota_exhausted') return '容量已满'
+    return '不可用'
+  }
+  return '可用'
+}
+
+function canCopyRow(token: TokenInfo) {
+  return Boolean(shareUrlFor(token))
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -177,12 +192,12 @@ onMounted(load)
             <td data-label="到期">{{ formatDate(token.expiresAt) }}</td>
             <td data-label="状态">
               <span class="pill" :class="token.revoked ? 'danger' : (token.valid === false ? 'muted' : 'ok')">
-                {{ token.revoked ? '已撤销' : token.valid === false ? (token.reason === 'expired' ? '已过期' : token.reason === 'exhausted' ? '已用尽' : '不可用') : '可用' }}
+                {{ tokenStatusLabel(token) }}
               </span>
             </td>
             <td data-label="操作" class="actions">
-              <button class="mini-btn" type="button" @click="copyRow(token)">
-                {{ rowCopyId === token.id ? '✓ 已复制' : '复制链接' }}
+              <button class="mini-btn" type="button" :disabled="!canCopyRow(token)" :title="canCopyRow(token) ? '复制分享链接' : '明文链接只在创建时显示一次'" @click="copyRow(token)">
+                {{ rowCopyId === token.id ? '✓ 已复制' : canCopyRow(token) ? '复制链接' : '仅创建时可复制' }}
               </button>
               <button class="mini-btn" :disabled="token.revoked" @click="revoke(token.id)">撤销</button>
               <button class="mini-btn danger" @click="remove(token.id)">删除</button>

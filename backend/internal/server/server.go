@@ -77,7 +77,19 @@ type tokenDTO struct {
 	Uses          int        `json:"uses"`
 	UploadedBytes int64      `json:"uploadedBytes"`
 	Revoked       bool       `json:"revoked"`
+	Valid         bool       `json:"valid"`
+	Reason        string     `json:"reason,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
+}
+
+type dirDTO struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Root          string `json:"root,omitempty"`
+	AllowDownload bool   `json:"allowDownload"`
+	AllowUpload   bool   `json:"allowUpload"`
+	CanDownload   bool   `json:"canDownload"`
+	CanUpload     bool   `json:"canUpload"`
 }
 
 type auditDTO struct {
@@ -120,6 +132,7 @@ func New(cfg *config.Config, st *store.Store) *fiber.App {
 			AllowCredentials: true,
 		}))
 	}
+	app.Use(s.csrfOriginGuard)
 	s.routes(app)
 	s.static(app)
 	return app
@@ -152,6 +165,46 @@ func (s *Server) routes(app *fiber.App) {
 	app.Get("/t/:token/upload", s.publicUploadPage)
 	app.Get("/t/:token/download", s.publicDownload)
 	app.Post("/t/:token/upload", s.publicUpload)
+}
+
+func (s *Server) csrfOriginGuard(c *fiber.Ctx) error {
+	if !isUnsafeMethod(c.Method()) || !strings.HasPrefix(c.Path(), "/api/") {
+		return c.Next()
+	}
+	origin := strings.TrimSpace(c.Get("Origin"))
+	if origin == "" {
+		return c.Next()
+	}
+	if origin == requestOrigin(c) {
+		return c.Next()
+	}
+	for _, allowed := range s.config.CORS.AllowOrigins {
+		if origin == strings.TrimSpace(allowed) {
+			return c.Next()
+		}
+	}
+	_ = s.store.Audit("csrf_denied", s.clientIP(c), origin+" -> "+c.Path())
+	return fiber.ErrForbidden
+}
+
+func requestOrigin(c *fiber.Ctx) string {
+	host := strings.TrimSpace(c.Get("Host"))
+	if host == "" {
+		host = strings.TrimSpace(c.Hostname())
+	}
+	if host == "" {
+		return ""
+	}
+	return c.Protocol() + "://" + host
+}
+
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case fiber.MethodPost, fiber.MethodPut, fiber.MethodPatch, fiber.MethodDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) static(app *fiber.App) {
@@ -366,7 +419,23 @@ func (s *Server) logout(c *fiber.Ctx) error {
 
 func (s *Server) dirs(c *fiber.Ctx) error {
 	_ = s.store.Audit("dirs", s.clientIP(c), "查看目录配置")
-	return c.JSON(s.config.Storage.Dirs)
+	includeRoot := c.Locals("role") == "admin"
+	out := make([]dirDTO, 0, len(s.config.Storage.Dirs))
+	for _, dir := range s.config.Storage.Dirs {
+		item := dirDTO{
+			ID:            dir.ID,
+			Name:          dir.Name,
+			AllowDownload: dir.AllowDownload,
+			AllowUpload:   dir.AllowUpload,
+			CanDownload:   dir.AllowDownload,
+			CanUpload:     dir.AllowUpload,
+		}
+		if includeRoot {
+			item.Root = dir.Path
+		}
+		out = append(out, item)
+	}
+	return c.JSON(out)
 }
 
 func (s *Server) listFiles(c *fiber.Ctx) error {
@@ -607,8 +676,10 @@ func (s *Server) listTokens(c *fiber.Ctx) error {
 		return err
 	}
 	out := make([]tokenDTO, 0, len(tokens))
+	now := time.Now()
+	uploadMaxBytes := s.tokenUploadMaxBytes()
 	for _, t := range tokens {
-		out = append(out, tokenToDTO(t))
+		out = append(out, tokenToDTO(t, now, uploadMaxBytes))
 	}
 	return c.JSON(out)
 }
@@ -687,8 +758,12 @@ func (s *Server) revokeToken(c *fiber.Ctx) error {
 
 func (s *Server) deleteToken(c *fiber.Ctx) error {
 	if err := s.store.DeleteToken(c.Params("id")); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fiber.ErrNotFound
+		}
 		return err
 	}
+	_ = s.store.Audit("token_delete", s.clientIP(c), "删除令牌 #"+c.Params("id"))
 	return c.JSON(fiber.Map{"ok": true})
 }
 
@@ -895,12 +970,17 @@ func (s *Server) dirByID(dirID string) (config.Dir, error) {
 	return dir, nil
 }
 
-func tokenToDTO(t store.Token) tokenDTO {
+func tokenToDTO(t store.Token, now time.Time, uploadMaxBytes int64) tokenDTO {
 	var expiresAt *time.Time
 	if t.ExpiresAt.Valid {
 		expiresAt = &t.ExpiresAt.Time
 	}
-	return tokenDTO{ID: t.ID, Type: t.Type, DirID: t.DirID, Path: t.Path, ExpiresAt: expiresAt, MaxUses: t.MaxUses, Uses: t.Uses, UploadedBytes: t.UploadedBytes, Revoked: t.Revoked, CreatedAt: t.CreatedAt}
+	valid, reason := tokenValidity(t, now)
+	if valid && t.Type == "upload" && uploadMaxBytes > 0 && t.UploadedBytes >= uploadMaxBytes {
+		valid = false
+		reason = "upload_quota_exhausted"
+	}
+	return tokenDTO{ID: t.ID, Type: t.Type, DirID: t.DirID, Path: t.Path, ExpiresAt: expiresAt, MaxUses: t.MaxUses, Uses: t.Uses, UploadedBytes: t.UploadedBytes, Revoked: t.Revoked, Valid: valid, Reason: reason, CreatedAt: t.CreatedAt}
 }
 
 func (s *Server) tokenUploadMaxBytes() int64 {
@@ -942,8 +1022,10 @@ func actionLabel(action string) string {
 		"illegal_access":        "非法访问",
 		"token_create":          "创建令牌",
 		"token_revoke":          "撤销令牌",
+		"token_delete":          "删除令牌",
 		"token_use":             "使用令牌",
 		"token_denied":          "令牌拒绝",
+		"csrf_denied":           "跨站请求拦截",
 		"token_download_failed": "令牌下载失败",
 		"token_upload_failed":   "令牌上传失败",
 	}

@@ -17,7 +17,7 @@ export default defineConfig({
         target: backendOrigin,
         changeOrigin: true,
       },
-      '/t': {
+      '^/t/': {
         target: backendOrigin,
         changeOrigin: true,
       },

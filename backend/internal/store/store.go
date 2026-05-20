@@ -1,7 +1,9 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -147,9 +149,10 @@ func (s *Store) CreateSession(id string, expiresAt time.Time, role, name string)
 	if role == "" {
 		role = "user"
 	}
+	storedID := hashSessionID(id)
 	_, err := s.DB.Exec(
 		`INSERT INTO sessions(id, expires_at, created_at, role, name) VALUES(?, ?, ?, ?, ?)`,
-		id,
+		storedID,
 		expiresAt,
 		time.Now(),
 		role,
@@ -160,7 +163,7 @@ func (s *Store) CreateSession(id string, expiresAt time.Time, role, name string)
 
 func (s *Store) Session(id string) (Session, error) {
 	var sess Session
-	err := s.DB.QueryRow(`SELECT id, expires_at, created_at, role, name FROM sessions WHERE id = ?`, id).Scan(
+	err := s.DB.QueryRow(`SELECT id, expires_at, created_at, role, name FROM sessions WHERE id = ?`, hashSessionID(id)).Scan(
 		&sess.ID, &sess.ExpiresAt, &sess.CreatedAt, &sess.Role, &sess.Name,
 	)
 	return sess, err
@@ -172,8 +175,13 @@ func (s *Store) SessionValid(id string) bool {
 }
 
 func (s *Store) DeleteSession(id string) error {
-	_, err := s.DB.Exec(`DELETE FROM sessions WHERE id = ?`, id)
+	_, err := s.DB.Exec(`DELETE FROM sessions WHERE id = ?`, hashSessionID(id))
 	return err
+}
+
+func hashSessionID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) DeleteExpiredSessions(now time.Time) error {
@@ -301,8 +309,18 @@ func (s *Store) Revoke(id string) error {
 }
 
 func (s *Store) DeleteToken(id string) error {
-	_, err := s.DB.Exec(`DELETE FROM tokens WHERE id = ?`, id)
-	return err
+	res, err := s.DB.Exec(`DELETE FROM tokens WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) AuditLogs(limit int) ([]AuditLog, error) {

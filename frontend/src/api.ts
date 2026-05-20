@@ -22,7 +22,9 @@ export class ApiError extends Error {
   }
 }
 
-async function parseResponse<T>(response: Response): Promise<T> {
+type ApiRequestInit = RequestInit & { suppressAuthRedirect?: boolean }
+
+async function parseResponse<T>(response: Response, suppressAuthRedirect = false): Promise<T> {
   const contentType = response.headers.get('content-type') || ''
   const isJson = contentType.includes('application/json')
   const payload = isJson ? await response.json().catch(() => null) : await response.text().catch(() => '')
@@ -32,7 +34,8 @@ async function parseResponse<T>(response: Response): Promise<T> {
       (payload && typeof payload === 'object' && ('message' in payload || 'error' in payload)
         ? String((payload as { message?: string; error?: string }).message || (payload as { error?: string }).error)
         : '') || `请求失败（${response.status}）`
-    if (response.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
+    if (!suppressAuthRedirect && response.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
+      window.dispatchEvent(new Event('ft:auth-expired'))
       router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
     }
     throw new ApiError(message, response.status, payload)
@@ -41,19 +44,26 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return (payload ?? {}) as T
 }
 
-async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T> {
+  const { suppressAuthRedirect = false, ...fetchOptions } = options
   const headers = new Headers(options.headers)
   const isFormData = options.body instanceof FormData
   if (!isFormData && options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  return parseResponse<T>(
-    await fetch(url, {
-      credentials: 'include',
-      ...options,
-      headers,
-    }),
-  )
+  try {
+    return await parseResponse<T>(
+      await fetch(url, {
+        credentials: 'include',
+        ...fetchOptions,
+        headers,
+      }),
+      suppressAuthRedirect,
+    )
+  } catch (err) {
+    if (err instanceof ApiError) throw err
+    throw new ApiError('无法连接服务器，请检查后端服务或网络连接。', 0, err)
+  }
 }
 
 const query = (params: Record<string, string | number | undefined>) => {
@@ -76,7 +86,7 @@ export const api = {
     request<UserInfo>('/api/auth/login', { method: 'POST', body: JSON.stringify({ totp, code: totp }) }),
   adminLogin: (payload: AdminLoginPayload) =>
     request<UserInfo>('/api/auth/admin-login', { method: 'POST', body: JSON.stringify(payload) }),
-  me: () => request<UserInfo>('/api/auth/me'),
+  me: () => request<UserInfo>('/api/auth/me', { suppressAuthRedirect: true }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   dirs: () => request<DirectoryInfo[]>('/api/dirs'),
   listFiles: (dirId: string, path = '') => request<ListFilesResponse>(`/api/files/list${query({ dirId, path })}`),

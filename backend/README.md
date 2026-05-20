@@ -37,7 +37,8 @@ go run ./cmd/server -config config.yaml
 - 登录接口带有内存级失败限速：同一来源短时间内多次失败会被临时拒绝，降低 TOTP 在线猜测风险。
 - 普通 TOTP 登录用户角色为 `user`，只能浏览目录/文件、上传下载、退出和查看自身登录状态；临时令牌管理与审计日志只允许 `admin` 角色访问。
 - 管理员通过独立接口登录，配置中只保存管理员密码的 SHA-256 十六进制摘要，后端使用常量时间比较校验。
-- Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，`Secure` 由 `auth.cookie_secure` 控制；HTTPS 部署时应启用。
+- Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，`Secure` 由 `auth.cookie_secure` 控制；HTTPS 部署时应启用。服务端数据库只保存会话 ID 哈希，避免数据库只读泄露时直接复用 Cookie 原值。
+- 对 `/api` 下会改变状态的请求，后端会校验非空 `Origin` 必须出现在 `cors.allow_origins` 中，降低 Cookie 凭据接口的跨站请求风险。
 - 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
 - 临时令牌数据库只保存 SHA-256 哈希，明文只在创建响应中返回一次。
 - 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
@@ -124,7 +125,7 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 
 ### 目录与文件
 
-- `GET /api/dirs`：返回目录数组，字段为 `id/name/path/allowDownload/allowUpload`。
+- `GET /api/dirs`：返回目录数组，普通用户字段为 `id/name/allowDownload/allowUpload/canDownload/canUpload`；管理员响应额外包含 `root` 便于配置概览展示。普通用户不会收到服务端真实目录路径。
 - `GET /api/files/list?dirId=default&path=subdir`：返回：
 
 ```json
@@ -150,7 +151,7 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 
 以下 `/api/tokens` 管理接口仅管理员可访问。
 
-- `GET /api/tokens`：返回数组，字段为 `id/type/dirId/path/expiresAt/maxUses/uses/uploadedBytes/revoked/createdAt`，不会泄露哈希。
+- `GET /api/tokens`：返回数组，字段为 `id/type/dirId/path/expiresAt/maxUses/uses/uploadedBytes/revoked/valid/reason/createdAt`，不会泄露哈希，也不会再次返回明文 token。前端仅在创建响应中显示一次可复制链接。
 - `POST /api/tokens`：创建令牌。请求兼容驼峰与旧蛇形字段：
 
 ```json
@@ -175,7 +176,7 @@ printf '%s' 'your-password' | sha256sum | awk '{print $1}'
 - `DELETE /api/tokens/:id`
 - `GET /t/:token/info`：公开令牌信息。无效时返回 `{ "valid": false, "reason": "expired|revoked|exhausted|upload_quota_exhausted|not_found" }`；有效时返回 `{ "valid": true, "type": "download", "path": "a.txt", "expiresAt": "...", "maxUses": 1, "uses": 0, "uploadedBytes": 0, "uploadMaxBytes": 1073741824 }`，不会暴露目录 ID。
 - `GET /t/:token/download`
-- `GET /t/:token/upload`：公开临时上传页面，适合把链接发给未登录用户直接在浏览器中选择文件上传。
+- `GET /t/:token/upload`：后端兼容保留的简易上传页；推荐对外分享前端 `/share/:token` 页面。
 - `POST /t/:token/upload`：`multipart/form-data` 字段 `file` 或 `files`，除普通上传策略外，还会按 `tokens.upload_max_mb` 记录并限制该令牌的累计上传容量。
 
 令牌使用次数与上传累计容量通过 SQLite 条件更新原子预占，避免并发绕过 `maxUses` 或累计容量限制。下载令牌会先确认目标文件存在后再预占次数；上传令牌在保存失败时会释放预占次数和预占容量。

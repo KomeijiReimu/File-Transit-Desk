@@ -25,6 +25,7 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 
 if [[ ! -f "${BACKEND_CONFIG_PATH}" ]]; then
+  mkdir -p "$(dirname "${BACKEND_CONFIG_PATH}")"
   cp "${ROOT_DIR}/backend/config.example.yaml" "${BACKEND_CONFIG_PATH}"
   cat >&2 <<MSG
 已复制 backend/config.example.yaml 到 ${BACKEND_CONFIG}。

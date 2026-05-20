@@ -88,12 +88,16 @@ const dragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 let counter = 0
 const nextId = () => `up-${Date.now()}-${++counter}`
+const uploading = computed(() => queue.value.some((item) => item.status === 'uploading'))
+const hasPendingUploads = computed(() => queue.value.some((item) => item.status === 'queued' || item.status === 'error'))
 
 function pickFiles() {
+  if (uploading.value) return
   fileInput.value?.click()
 }
 
 function addFiles(files: FileList | File[]) {
+  if (!validFlag.value || uploading.value) return
   const list = Array.from(files || [])
   for (const file of list) {
     queue.value.push({ id: nextId(), file, status: 'queued' })
@@ -114,6 +118,7 @@ function onDrop(event: DragEvent) {
 
 function onDragOver(event: DragEvent) {
   event.preventDefault()
+  if (uploading.value) return
   dragOver.value = true
 }
 
@@ -122,6 +127,7 @@ function removeItem(id: string) {
 }
 
 async function uploadItem(item: UploadItem) {
+  if (item.status === 'uploading' || item.status === 'success') return
   item.status = 'uploading'
   item.error = undefined
   try {
@@ -134,7 +140,8 @@ async function uploadItem(item: UploadItem) {
 }
 
 async function uploadAll() {
-  const pending = queue.value.filter((item) => item.status !== 'success')
+  if (uploading.value) return
+  const pending = queue.value.filter((item) => item.status === 'queued' || item.status === 'error')
   for (const item of pending) {
     await uploadItem(item)
     if (item.status === 'success') {
@@ -232,17 +239,17 @@ onMounted(loadInfo)
                   }}</span></small>
                 </div>
                 <div class="q-actions">
-                  <button v-if="item.status === 'error'" class="mini-btn" type="button" @click="retryItem(item)">重试</button>
+                  <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="retryItem(item)">重试</button>
                   <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" @click="removeItem(item.id)">移除</button>
                 </div>
               </li>
             </ul>
 
             <div class="share-actions">
-              <button class="primary-btn big" type="button" :disabled="!queue.some((i) => i.status !== 'success')" @click="uploadAll">
-                开始上传
+              <button class="primary-btn big" type="button" :disabled="!hasPendingUploads || uploading" @click="uploadAll">
+                {{ uploading ? '上传中…' : '开始上传' }}
               </button>
-              <button class="ghost-btn" type="button" @click="pickFiles">追加文件</button>
+              <button class="ghost-btn" type="button" :disabled="uploading" @click="pickFiles">追加文件</button>
             </div>
           </template>
           <div v-else class="alert error">{{ reasonLabel }}</div>

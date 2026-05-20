@@ -52,12 +52,16 @@ function applyUser(user: UserInfo, fallbackRole?: UserRole, fallbackName?: strin
   if (authState.authenticated) writeRoleHint(role, authState.name)
 }
 
-function clearUser() {
-  authState.user = null
-  authState.authenticated = false
-  authState.role = undefined
-  authState.name = undefined
-  writeRoleHint(undefined)
+export function clearUser() {
+	authState.user = null
+	authState.authenticated = false
+	authState.role = undefined
+	authState.name = undefined
+	writeRoleHint(undefined)
+}
+
+if (typeof window !== 'undefined') {
+	window.addEventListener('ft:auth-expired', () => clearUser())
 }
 
 export async function restoreSession() {

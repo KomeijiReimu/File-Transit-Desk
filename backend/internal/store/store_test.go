@@ -25,6 +25,16 @@ func TestSessionRoleAndExpiryCleanup(t *testing.T) {
 	if sess.Role != "admin" || sess.Name != "root" {
 		t.Fatalf("unexpected session role/name: %q/%q", sess.Role, sess.Name)
 	}
+	if sess.ID == "sid-admin" {
+		t.Fatalf("expected stored session id to be hashed, got plaintext id")
+	}
+	var rawCount int
+	if err := st.DB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, "sid-admin").Scan(&rawCount); err != nil {
+		t.Fatalf("query raw session id: %v", err)
+	}
+	if rawCount != 0 {
+		t.Fatalf("expected no plaintext session id in database")
+	}
 	if !st.SessionValid("sid-admin") {
 		t.Fatalf("expected session to be valid")
 	}
