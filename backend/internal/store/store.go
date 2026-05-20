@@ -103,7 +103,6 @@ CREATE TABLE IF NOT EXISTS sessions(
   name TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
-CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at);
 
 CREATE TABLE IF NOT EXISTS tokens(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,6 +170,9 @@ CREATE INDEX IF NOT EXISTS idx_download_leases_expires_at ON download_leases(exp
 		return err
 	}
 	if _, err := s.DB.Exec(`UPDATE sessions SET idle_expires_at = expires_at WHERE idle_expires_at IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at)`); err != nil {
 		return err
 	}
 	return s.addColumnIfMissing("tokens", "uploaded_bytes", "INTEGER NOT NULL DEFAULT 0")

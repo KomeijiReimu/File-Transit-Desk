@@ -121,6 +121,62 @@ func TestSessionIdleAndDownloadLeaseLifecycle(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyDatabaseAddsSessionAndLeaseColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE sessions(
+  id TEXT PRIMARY KEY,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  name TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE download_leases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lease_hash TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL,
+  session_id TEXT,
+  token_id INTEGER,
+  role TEXT NOT NULL DEFAULT '',
+  dir_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_mtime DATETIME NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL,
+  last_used_at DATETIME
+);
+`)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("close legacy db: %v", closeErr)
+	}
+	if err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+
+	st, err := Open(dbPath, 100)
+	if err != nil {
+		t.Fatalf("migrate legacy store: %v", err)
+	}
+	defer st.DB.Close()
+
+	for _, column := range []string{"idle_expires_at", "last_seen_at"} {
+		if !columnExists(t, st.DB, "sessions", column) {
+			t.Fatalf("expected sessions.%s to be added", column)
+		}
+	}
+	if !columnExists(t, st.DB, "download_leases", "file_sha256") {
+		t.Fatalf("expected download_leases.file_sha256 to be added")
+	}
+	if _, err := st.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at)`); err != nil {
+		t.Fatalf("expected idle expiry index to be creatable after migration: %v", err)
+	}
+}
+
 func TestTokenUploadByteQuota(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
@@ -155,4 +211,30 @@ func TestTokenUploadByteQuota(t *testing.T) {
 	if released.UploadedBytes != 0 || released.Uses != 0 {
 		t.Fatalf("expected rollback to zero, got bytes=%d uses=%d", released.UploadedBytes, released.Uses)
 	}
+}
+
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatalf("table info %s: %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table info %s: %v", table, err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table info %s: %v", table, err)
+	}
+	return false
 }
