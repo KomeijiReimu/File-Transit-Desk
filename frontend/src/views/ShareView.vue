@@ -27,6 +27,7 @@ const isUpload = computed(() => tokenType.value === 'upload')
 const isDownload = computed(() => tokenType.value === 'download')
 
 const validFlag = computed(() => {
+  // 公开信息接口会返回 valid；这里保留本地兜底判断，兼容旧后端或缓存响应。
   if (!info.value) return false
   if (typeof info.value.valid === 'boolean') return info.value.valid
   if (info.value.revoked) return false
@@ -98,7 +99,7 @@ async function startPublicDownload() {
   }
 }
 
-// ---------- Upload queue ----------
+// 上传队列只存在于当前页面内，刷新或关闭页面不会保留待上传文件，避免持久化本地文件引用。
 const queue = ref<UploadItem[]>([])
 const dragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -116,6 +117,7 @@ function addFiles(files: FileList | File[]) {
   if (!validFlag.value || uploading.value) return
   const list = Array.from(files || [])
   for (const file of list) {
+    // 使用本地唯一 ID 跟踪状态，避免同名文件在队列中互相覆盖。
     queue.value.push({ id: nextId(), file, status: 'queued' })
   }
 }
@@ -161,7 +163,7 @@ async function uploadAll() {
   for (const item of pending) {
     await uploadItem(item)
     if (item.status === 'success') {
-      // refresh info to update use counter
+      // 上传成功后刷新公开信息，更新使用次数和累计容量展示；失败不打断后续重试。
       try { info.value = await api.publicTokenInfo(tokenParam.value) } catch { /* ignore */ }
     }
   }

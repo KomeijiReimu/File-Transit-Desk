@@ -11,6 +11,7 @@ import (
 func TestResolveBlocksTraversal(t *testing.T) {
 	dir := t.TempDir()
 
+	// 同时覆盖 Unix 和 Windows 风格路径，保证跨平台都拒绝目录穿越。
 	bad := []string{"../x", "a/../x", "..", `/etc/passwd`, `a\..\x`}
 	for _, rel := range bad {
 		if _, _, err := Resolve(dir, rel); !errors.Is(err, ErrUnsafePath) {
@@ -39,6 +40,7 @@ func TestResolveBlocksSymlinkEscape(t *testing.T) {
 	}
 	base := t.TempDir()
 	outside := t.TempDir()
+	// 目标本身是符号链接时，Resolve 必须看真实路径是否仍在 base 内。
 	link := filepath.Join(base, "outside")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
@@ -54,6 +56,7 @@ func TestResolveForCreateBlocksSymlinkParentEscape(t *testing.T) {
 	}
 	base := t.TempDir()
 	outside := t.TempDir()
+	// 新文件尚不存在时也要检查最近存在父目录，防止写入符号链接指向的外部目录。
 	link := filepath.Join(base, "outside")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("cannot create symlink: %v", err)

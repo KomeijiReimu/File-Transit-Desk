@@ -22,6 +22,7 @@ const statusOptions = [
 const filteredLogs = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   return logs.value.filter((log) => {
+    // 后端只存 action/detail，前端把标签、IP 和状态拼成全文，支持轻量本地搜索。
     const text = [log.actionLabel, log.action, log.detail, log.ip, log.status].filter(Boolean).join(' ').toLowerCase()
     const matchKeyword = !kw || text.includes(kw)
     const failed = /failed|denied|forbidden|unauthorized|illegal|失败|拒绝|非法|未认证/.test(text)
@@ -44,12 +45,14 @@ async function load(nextLimit = limit.value) {
 }
 
 function loadMore() {
+  // 后端最多返回 500 条，前端逐步增大 limit，避免首次进入加载过多历史记录。
   load(Math.min(limit.value + 100, 500))
 }
 
 onMounted(() => load())
 
 function logTone(log: AuditLog) {
+  // 根据动作关键词给时间线着色；未知动作默认按正常事件展示。
   const text = [log.action, log.actionLabel, log.status, log.detail].filter(Boolean).join(' ').toLowerCase()
   if (/rate_limited|failed|denied|forbidden|unauthorized|illegal|失败|拒绝|非法|未认证|限速/.test(text)) return 'failed'
   if (/token|令牌/.test(text)) return 'token'

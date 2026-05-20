@@ -23,6 +23,7 @@ export class ApiError extends Error {
   }
 }
 
+// suppressAuthRedirect 用于心跳、会话恢复和公开页，避免后台探测接口把用户强制跳走。
 type ApiRequestInit = RequestInit & { suppressAuthRedirect?: boolean }
 
 async function parseResponse<T>(response: Response, suppressAuthRedirect = false): Promise<T> {
@@ -31,11 +32,13 @@ async function parseResponse<T>(response: Response, suppressAuthRedirect = false
   const payload = isJson ? await response.json().catch(() => null) : await response.text().catch(() => '')
 
   if (!response.ok) {
+    // 后端统一返回 {error}；兼容 {message} 是为了方便未来接入其他服务端错误格式。
     const message =
       (payload && typeof payload === 'object' && ('message' in payload || 'error' in payload)
         ? String((payload as { message?: string; error?: string }).message || (payload as { error?: string }).error)
         : '') || `请求失败（${response.status}）`
     if (!suppressAuthRedirect && response.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
+      // 统一广播会话过期，auth.ts 负责清理本地状态，路由负责回到登录页。
       window.dispatchEvent(new Event('ft:auth-expired'))
       router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
     }
@@ -50,6 +53,7 @@ async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T>
   const headers = new Headers(options.headers)
   const isFormData = options.body instanceof FormData
   if (!isFormData && options.body && !headers.has('Content-Type')) {
+    // multipart 让浏览器自动补 boundary；其他有 body 的请求默认按 JSON 发送。
     headers.set('Content-Type', 'application/json')
   }
   try {
@@ -68,6 +72,7 @@ async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T>
 }
 
 const query = (params: Record<string, string | number | undefined>) => {
+  // 忽略空值，避免 path='' 这类根路径被序列化成多余查询参数。
   const search = new URLSearchParams()
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== '') search.set(key, String(value))
@@ -104,6 +109,7 @@ export const api = {
     return request<{ ok: boolean; uploaded?: number }>('/api/files/upload', { method: 'POST', body: form })
   },
   uploadOne: (dirId: string, path: string, file: File) => {
+    // 单文件上传用于队列逐项重试，失败时不会影响队列中其他文件的状态。
     const form = new FormData()
     form.set('dirId', dirId)
     form.set('path', path)
@@ -124,7 +130,7 @@ export const api = {
     request<{ ok: boolean }>(`/api/tokens/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
   auditLogs: (filter: AuditFilter = {}) =>
     request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status })}`),
-  // Public share endpoints (no auth)
+  // 公开分享接口不带登录态要求，全部依赖 token 或下载票据授权。
   publicTokenInfo: (token: string) =>
     request<TokenInfo>(`/t/${encodeURIComponent(token)}/info`),
   publicUpload: (token: string, file: File) => {

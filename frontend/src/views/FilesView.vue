@@ -18,6 +18,7 @@ const error = ref('')
 const downloadingPath = ref('')
 const responseCanUpload = ref<boolean | null>(null)
 const responseCanDownload = ref<boolean | null>(null)
+// 从上传页返回时会携带 dirId/path；恢复阶段暂停 watch，避免重复请求和路径被重置。
 let restoringQuery = false
 
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === selectedDirId.value))
@@ -93,6 +94,7 @@ async function startDownload(entry: FileEntry) {
 
 watch(selectedDirId, async () => {
   if (restoringQuery) return
+  // 用户主动切换目录时回到根路径；从 query 恢复时不走这里，保留原路径上下文。
   currentPath.value = ''
   responseCanUpload.value = null
   responseCanDownload.value = null

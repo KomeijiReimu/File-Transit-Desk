@@ -28,6 +28,7 @@ const emit = defineEmits<{
 const dialogRef = ref<HTMLElement | null>(null)
 const cancelRef = ref<HTMLButtonElement | null>(null)
 let returnFocusEl: HTMLElement | null = null
+// titleId 让 aria-labelledby 指向稳定标题，辅助技术能读出弹窗主语。
 const titleId = computed(() => `confirm-title-${props.title.replace(/\W+/g, '-').toLowerCase()}`)
 
 function cancel() {
@@ -46,6 +47,7 @@ function onKeydown(event: KeyboardEvent) {
     return
   }
   if (event.key !== 'Tab') return
+  // 弹窗打开时把 Tab 焦点限制在内部，避免键盘用户误操作背景页面。
   const focusable = dialogRef.value?.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])')
   if (!focusable?.length) {
     event.preventDefault()
@@ -72,6 +74,7 @@ watch(() => props.open, async (open) => {
   }
   returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
   await nextTick()
+  // 危险确认默认聚焦取消按钮，降低误按 Enter 直接删除的风险。
   cancelRef.value?.focus()
 })
 

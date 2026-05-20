@@ -22,6 +22,7 @@ const open = ref(false)
 const root = ref<HTMLElement | null>(null)
 const trigger = ref<HTMLButtonElement | null>(null)
 const activeIndex = ref(-1)
+// 每个实例生成独立 listbox id，保证同页多个下拉框的 aria-controls 不冲突。
 const listId = `glass-select-${Math.random().toString(36).slice(2)}`
 
 const selected = computed(() => props.options.find((option) => String(option.value) === String(props.modelValue)))
@@ -31,6 +32,7 @@ watch(open, async (value) => {
   if (!value) return
   activeIndex.value = selectedIndex.value >= 0 ? selectedIndex.value : 0
   await nextTick()
+  // 打开后把焦点移到当前选项，键盘用户可直接上下移动或回车确认。
   root.value?.querySelector<HTMLButtonElement>('[data-active="true"]')?.focus()
 })
 
@@ -69,6 +71,7 @@ function chooseActive() {
 }
 
 function closeOnOutside(event: MouseEvent) {
+  // 点击组件外部收起菜单，避免浮层残留挡住后续操作。
   const target = event.target as Node | null
   if (root.value && target && !root.value.contains(target)) close()
 }
@@ -81,6 +84,7 @@ function handleKeydown(event: KeyboardEvent) {
 }
 
 function handleFocusout(event: FocusEvent) {
+  // 键盘 Tab 离开整个组件时也收起，保持原生 select 的交互预期。
   const next = event.relatedTarget as Node | null
   if (root.value && (!next || !root.value.contains(next))) close()
 }

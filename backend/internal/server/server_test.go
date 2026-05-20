@@ -24,6 +24,7 @@ import (
 )
 
 func TestAdminOnlyTokenRoutes(t *testing.T) {
+	// 管理接口必须走 adminOnly，中途不能被普通 TOTP 用户访问。
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -65,6 +66,7 @@ func TestAdminOnlyTokenRoutes(t *testing.T) {
 }
 
 func TestDirsHidePathForUserAndShowRootForAdmin(t *testing.T) {
+	// 普通用户不能看到服务端真实路径；管理员配置页需要 root 做排障展示。
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -122,6 +124,7 @@ func TestDirsHidePathForUserAndShowRootForAdmin(t *testing.T) {
 }
 
 func TestTokenListReturnsValidityAndDeleteAudit(t *testing.T) {
+	// 令牌列表需要返回失效原因，删除操作也必须留下审计记录。
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -204,6 +207,7 @@ func TestTokenListReturnsValidityAndDeleteAudit(t *testing.T) {
 }
 
 func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
+	// 上传扩展名策略必须在文件落盘前拒绝危险类型。
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -234,6 +238,7 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 }
 
 func TestFriendlyMissingPathErrors(t *testing.T) {
+	// 不存在路径应返回前端可展示的中文提示，而不是笼统 Bad Request。
 	root := t.TempDir()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
@@ -268,6 +273,7 @@ func TestFriendlyMissingPathErrors(t *testing.T) {
 }
 
 func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
+	// 空闲过期、心跳续期和宽限期共同决定页面会话是否仍可访问 API。
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -344,6 +350,7 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 }
 
 func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
+	// 下载票据应独立于页面会话，保证长下载和 Range 续传不被空闲过期打断。
 	root := t.TempDir()
 	if err := osWriteFile(filepath.Join(root, "test.txt"), []byte("0123456789abcdef")); err != nil {
 		t.Fatalf("write test file: %v", err)
@@ -443,6 +450,7 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 }
 
 func TestDownloadLeaseSkipsHashAboveConfiguredThreshold(t *testing.T) {
+	// 大文件默认跳过内容哈希，避免创建票据和续传校验时反复读取完整文件。
 	root := t.TempDir()
 	large := bytes.Repeat([]byte("a"), 1024*1024+1)
 	if err := osWriteFile(filepath.Join(root, "large.bin"), large); err != nil {
@@ -511,6 +519,7 @@ func TestDownloadLeaseSkipsHashAboveConfiguredThreshold(t *testing.T) {
 }
 
 func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
+	// 公开下载只在兑换票据时扣一次 uses，同一票据的 Range 请求不重复扣次。
 	root := t.TempDir()
 	if err := osWriteFile(filepath.Join(root, "public.txt"), []byte("0123456789abcdef")); err != nil {
 		t.Fatalf("write public file: %v", err)
@@ -656,6 +665,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 }
 
 func TestValidateLoginCodeAcceptsAdjacentTOTPWindow(t *testing.T) {
+	// TOTP 允许相邻窗口，降低客户端和服务器时间轻微偏移导致的登录失败。
 	cfg := config.Default()
 	cfg.Auth.TOTPSecret = "JBSWY3DPEHPK3PXP"
 	cfg.Auth.Admin.Username = "admin"

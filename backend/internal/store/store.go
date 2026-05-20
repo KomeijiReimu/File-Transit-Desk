@@ -71,6 +71,7 @@ type AuditLog struct {
 }
 
 func Open(path string, retain int) (*Store, error) {
+	// SQLite 文件所在目录可能是首次启动时才创建，先建目录再打开数据库。
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
@@ -78,6 +79,7 @@ func Open(path string, retain int) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 单连接避免 SQLite 写事务在同进程内互相等待，busy_timeout 负责处理短暂文件锁。
 	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
@@ -92,6 +94,7 @@ func Open(path string, retain int) (*Store, error) {
 }
 
 func (s *Store) Migrate() error {
+	// 所有建表语句都必须幂等；旧库新增列放在后面的 addColumnIfMissing，避免 IF NOT EXISTS 表无法补列。
 	_, err := s.DB.Exec(`
 CREATE TABLE IF NOT EXISTS sessions(
   id TEXT PRIMARY KEY,
@@ -166,12 +169,14 @@ CREATE INDEX IF NOT EXISTS idx_download_leases_expires_at ON download_leases(exp
 	if err := s.addColumnIfMissing("download_leases", "file_sha256", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// 旧版本 sessions 没有空闲会话字段，迁移时用既有创建时间和绝对过期时间回填。
 	if _, err := s.DB.Exec(`UPDATE sessions SET last_seen_at = created_at WHERE last_seen_at IS NULL`); err != nil {
 		return err
 	}
 	if _, err := s.DB.Exec(`UPDATE sessions SET idle_expires_at = expires_at WHERE idle_expires_at IS NULL`); err != nil {
 		return err
 	}
+	// 索引必须在补列之后创建，否则旧数据库启动时会因字段不存在而失败。
 	if _, err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at)`); err != nil {
 		return err
 	}
@@ -179,6 +184,7 @@ CREATE INDEX IF NOT EXISTS idx_download_leases_expires_at ON download_leases(exp
 }
 
 func (s *Store) addColumnIfMissing(table, column, definition string) error {
+	// SQLite 没有通用的 ADD COLUMN IF NOT EXISTS，先读 PRAGMA table_info 再决定是否 ALTER。
 	rows, err := s.DB.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return err
@@ -214,6 +220,7 @@ func (s *Store) CreateSessionWithIdle(id string, expiresAt, idleExpiresAt time.T
 	}
 	now := time.Now()
 	if idleExpiresAt.After(expiresAt) {
+		// 空闲有效期不能超过绝对会话有效期，否则页面心跳会绕过最大登录时长。
 		idleExpiresAt = expiresAt
 	}
 	storedID := hashSessionID(id)
@@ -265,6 +272,7 @@ func (s *Store) DeleteSession(id string) error {
 }
 
 func hashSessionID(id string) string {
+	// Cookie 中的明文 sid 不落库，只保存哈希，降低数据库只读泄露后的会话复用风险。
 	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:])
 }
@@ -275,6 +283,7 @@ func (s *Store) DeleteExpiredSessions(now time.Time) error {
 }
 
 func (s *Store) DeleteExpiredSessionsWithIdleGrace(now time.Time, grace time.Duration) error {
+	// 心跳宽限只用于清理延后，真实请求鉴权仍由 server.auth 决定是否允许。
 	_, err := s.DB.Exec(
 		`DELETE FROM sessions WHERE datetime(expires_at) <= datetime(?) OR datetime(idle_expires_at, ?) <= datetime(?)`,
 		now,
@@ -364,6 +373,7 @@ func (s *Store) Audit(action, ip, detail string) error {
 		return err
 	}
 	if s.Retain > 0 {
+		// 审计日志按最新 ID 保留固定条数，避免长期运行时数据库无限增长。
 		_, err = s.DB.Exec(
 			`DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT ?)`,
 			s.Retain,
@@ -427,6 +437,7 @@ func (s *Store) TokenByHash(hash string) (Token, error) {
 }
 
 func (s *Store) ReserveTokenUse(hash, tokenType string, now time.Time, uploadBytes, uploadMaxBytes int64) (Token, error) {
+	// 使用单条条件 UPDATE 原子预占次数和上传容量，防止并发请求同时越过 max_uses 或容量限制。
 	res, err := s.DB.Exec(`
 UPDATE tokens
 SET uses = uses + 1,
@@ -457,6 +468,7 @@ WHERE token_hash = ?
 }
 
 func (s *Store) ReleaseTokenUse(id int64, uploadBytes int64) error {
+	// 上传保存失败时回滚预占的次数和容量，CASE 可避免异常重试导致负数。
 	_, err := s.DB.Exec(`UPDATE tokens SET uses = CASE WHEN uses > 0 THEN uses - 1 ELSE 0 END, uploaded_bytes = CASE WHEN uploaded_bytes >= ? THEN uploaded_bytes - ? ELSE 0 END WHERE id = ?`, uploadBytes, uploadBytes, id)
 	return err
 }
@@ -481,6 +493,7 @@ func (s *Store) RevokeTokenAndLeases(id string) error {
 	if err != nil {
 		return err
 	}
+	// 撤销令牌和删除其下载票据必须同事务完成，确保应急止血不会留下可继续使用的票据。
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return err
@@ -512,6 +525,7 @@ func (s *Store) DeleteTokenAndLeases(id string) error {
 	if err != nil {
 		return err
 	}
+	// 删除记录同样清理下载票据，避免用户以为记录没了但旧票据仍能下载。
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return err

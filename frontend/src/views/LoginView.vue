@@ -23,6 +23,7 @@ watch(mode, () => {
 })
 
 function safeRedirect(value: unknown) {
+  // 登录后只允许跳回站内相对路径，避免 redirect 参数被构造成开放跳转。
   const target = typeof value === 'string' ? value : '/files'
   if (!target.startsWith('/') || target.startsWith('//')) return '/files'
   return target
@@ -31,6 +32,7 @@ function safeRedirect(value: unknown) {
 async function submit() {
   error.value = ''
   if (mode.value === 'totp') {
+    // TOTP 只保留数字，允许用户从验证器复制带空格的验证码。
     code.value = normalized.value
     if (!totpValid.value) {
       error.value = '请输入 6 位动态验证码。'

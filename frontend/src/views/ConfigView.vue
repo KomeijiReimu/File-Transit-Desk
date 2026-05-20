@@ -12,6 +12,7 @@ const error = ref('')
 async function load() {
   loading.value = true
   error.value = ''
+  // 管理员可看到 root 字段，普通用户进入该页前已被路由守卫拦回文件浏览。
   try { dirs.value = await api.dirs() }
   catch (err) { error.value = err instanceof ApiError ? err.message : '配置加载失败。' }
   finally { loading.value = false }

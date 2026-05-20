@@ -14,19 +14,20 @@ export function formatDate(value?: string) {
 }
 
 export function joinPath(base: string, name: string) {
+  // 前端只拼接相对展示路径；真正的越权校验仍由后端 fsutil 负责。
   return [base.replace(/\/+$/, ''), name.replace(/^\/+/, '')].filter(Boolean).join('/')
 }
 
 export function parentPath(path: string) {
+  // 空路径表示目录根，继续返回空字符串，便于“返回上级”按钮自然禁用。
   const parts = path.split('/').filter(Boolean)
   parts.pop()
   return parts.join('/')
 }
 
 /**
- * Extract a bare share token string from arbitrary token-link representations.
- * Accepts: "abcd", "/t/abcd", "/t/abcd/download", "/share/abcd",
- * "https://host/t/abcd/upload", full URLs, etc.
+ * 从任意分享链接形态中提取裸 token。
+ * 兼容："abcd"、"/t/abcd"、"/t/abcd/download"、"/share/abcd"、完整 URL 等。
  */
 export function extractShareToken(raw?: string): string {
   if (!raw) return ''
@@ -34,7 +35,7 @@ export function extractShareToken(raw?: string): string {
   try {
     if (/^https?:\/\//i.test(value)) value = new URL(value).pathname
   } catch {
-    /* keep raw */
+    // URL 解析失败时保留原始字符串，后续正则仍可能提取到 token。
   }
   const shareMatch = value.match(/\/share\/([^/?#]+)/)
   if (shareMatch) return decodeURIComponent(shareMatch[1])
@@ -44,8 +45,7 @@ export function extractShareToken(raw?: string): string {
 }
 
 /**
- * Build a user-facing share URL pointing at the SPA share page.
- * Prefers /share/{token}; falls back to anything reasonable.
+ * 构造面向用户的前端分享页地址，避免把后端兼容 HTML 接口直接暴露给用户。
  */
 export function buildShareUrl(token: string, origin?: string): string {
   const base = origin || (typeof window !== 'undefined' ? window.location.origin : '')
@@ -64,6 +64,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     // fall through
   }
   try {
+    // Clipboard API 不可用时退回到隐藏 textarea，兼容较旧浏览器或非安全上下文。
     const el = document.createElement('textarea')
     el.value = text
     el.setAttribute('readonly', '')

@@ -9,6 +9,7 @@ import (
 )
 
 func TestSessionRoleAndExpiryCleanup(t *testing.T) {
+	// 会话 ID 入库必须是哈希值，测试同时覆盖角色字段和过期清理逻辑。
 	st, err := Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -55,6 +56,7 @@ func TestSessionRoleAndExpiryCleanup(t *testing.T) {
 }
 
 func TestSessionIdleAndDownloadLeaseLifecycle(t *testing.T) {
+	// 空闲会话与下载票据是长下载保护的核心，放在同一个生命周期测试里验证读写和清理。
 	st, err := Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -122,6 +124,7 @@ func TestSessionIdleAndDownloadLeaseLifecycle(t *testing.T) {
 }
 
 func TestMigrateLegacyDatabaseAddsSessionAndLeaseColumns(t *testing.T) {
+	// 手工构造旧 schema，确保真实用户旧库启动时会自动补新列和索引。
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -178,6 +181,7 @@ CREATE TABLE download_leases(
 }
 
 func TestTokenUploadByteQuota(t *testing.T) {
+	// 上传令牌容量使用预占策略，保存失败后必须能回滚次数和容量。
 	st, err := Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)

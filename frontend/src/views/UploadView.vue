@@ -36,6 +36,7 @@ const dirOptions = computed(() => dirs.value.map((dir) => ({
 const canUpload = computed(() => Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const hasPendingUploads = computed(() => uploadQueue.value.some((item) => item.status === 'queued' || item.status === 'error'))
 const uploading = computed(() => uploadQueue.value.some((item) => item.status === 'uploading'))
+// 返回浏览页时带回当前目录和上传路径，用户可直接检查刚上传的位置。
 const filesRoute = computed(() => ({ name: 'files', query: { dirId: selectedDirId.value, path: targetPath.value } }))
 let restoringInitialQuery = true
 
@@ -60,6 +61,7 @@ function addUploadFiles(files: FileList | File[]) {
     return
   }
   if (uploading.value) {
+    // 当前实现逐项串行上传，禁止上传中追加文件，避免队列状态和目标路径发生竞态。
     notice.value = '正在上传，请等待当前队列完成后再追加文件。'
     return
   }
@@ -75,6 +77,7 @@ function onFileChange(event: Event) {
 }
 
 function chooseFiles() {
+  // 拖拽区整块可点击，但实际仍复用隐藏 file input，以保留浏览器原生文件选择能力。
   if (!canUpload.value || uploading.value) return
   fileInput.value?.click()
 }
@@ -92,6 +95,7 @@ async function uploadItem(item: UploadItem) {
   item.status = 'uploading'
   item.error = undefined
   try {
+    // 队列逐个调用单文件接口，失败项可以单独重试，不影响已完成项。
     await api.uploadOne(selectedDirId.value, targetPath.value, item.file)
     item.status = 'success'
     notice.value = `已上传 ${item.file.name}`
@@ -117,6 +121,7 @@ watch(selectedDirId, () => {
     restoringInitialQuery = false
     return
   }
+  // 用户主动切换目录时清空旧路径，避免把上一个目录的子路径误用于新目录。
   targetPath.value = ''
   uploadQueue.value = []
   notice.value = ''

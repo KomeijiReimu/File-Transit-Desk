@@ -11,6 +11,7 @@ export function useSessionActivity() {
   let lastHeartbeatAt = 0
   let heartbeatRunning = false
 
+  // 只有登录态、非公开页、页面可见时才保活；用户离开页面后不持续刷新空闲会话。
   const shouldTrack = () => authState.authenticated && route.meta.public !== true && document.visibilityState === 'visible'
 
   function expireLocally() {
@@ -22,6 +23,7 @@ export function useSessionActivity() {
   async function sendHeartbeat(force = false) {
     if (!shouldTrack() || heartbeatRunning) return
     const now = Date.now()
+    // 高频输入事件只触发节流后的心跳，避免滚动或键盘长按造成请求风暴。
     if (!force && now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return
     heartbeatRunning = true
     lastHeartbeatAt = now
@@ -48,6 +50,7 @@ export function useSessionActivity() {
   const events = ['pointerdown', 'keydown', 'scroll', 'touchstart'] as const
 
   onMounted(() => {
+    // 监听真实用户活动，而不是定时无条件保活，和后端 idle_timeout 语义保持一致。
     events.forEach((event) => window.addEventListener(event, markActivity, { passive: true }))
     document.addEventListener('visibilitychange', handleVisibilityChange)
     window.addEventListener('focus', handleVisibilityChange)
@@ -62,6 +65,7 @@ export function useSessionActivity() {
   watch(
     () => [authState.authenticated, route.fullPath],
     () => {
+      // 登录成功或路由切换时立即补一次心跳，减少刚进入页面就空闲过期的误判。
       if (shouldTrack()) sendHeartbeat(true)
     },
     { immediate: true },

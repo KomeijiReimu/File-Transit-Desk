@@ -11,6 +11,7 @@ const chromeless = computed(() => route.name === 'login' || route.name === 'shar
 const displayName = computed(() => authState.name || (isAdmin.value ? '管理员' : '访客'))
 const roleLabel = computed(() => (isAdmin.value ? '管理员会话' : '受信用户会话'))
 
+// 在根组件统一挂载会话活跃监听，所有受保护页面共享同一套空闲保活策略。
 useSessionActivity()
 
 async function handleLogout() {

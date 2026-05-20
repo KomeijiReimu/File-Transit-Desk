@@ -23,11 +23,13 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  // 首次进入受保护页面前先恢复会话，避免刷新后短暂闪到登录页。
   if ((to.name === 'login' || !to.meta.public) && !authState.ready) await restoreSession()
   if (!to.meta.public && !authState.authenticated) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
   if (to.name === 'login' && authState.authenticated) return { name: 'files' }
+  // 管理页只允许 admin；普通用户被温和带回文件浏览页。
   if (to.meta.adminOnly && authState.role !== 'admin') return { name: 'files' }
   return true
 })

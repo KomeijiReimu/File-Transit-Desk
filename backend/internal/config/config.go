@@ -88,6 +88,7 @@ type Dir struct {
 }
 
 func Load(path string) (*Config, error) {
+	// 先加载默认值，再让 YAML 覆盖，保证新增配置项对旧配置文件保持兼容。
 	c := Default()
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -125,6 +126,7 @@ func Default() *Config {
 }
 
 func (c *Config) normalize() {
+	// 归一化只做安全的默认值补齐和大小写/空白处理，不在这里放宽 validate 的硬约束。
 	c.Auth.TOTPSecret = normalizeTOTPSecret(c.Auth.TOTPSecret)
 	c.Auth.Admin.Username = strings.TrimSpace(c.Auth.Admin.Username)
 	c.Auth.Admin.PasswordSHA256 = strings.TrimSpace(c.Auth.Admin.PasswordSHA256)
@@ -175,6 +177,7 @@ func (c *Config) normalize() {
 }
 
 func (c *Config) validate() error {
+	// 启动阶段集中拒绝危险配置，避免服务运行后才在请求路径上暴露问题。
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535")
 	}
@@ -261,6 +264,7 @@ func (c *Config) validate() error {
 }
 
 func normalizeTOTPSecret(secret string) string {
+	// 用户常会从验证器复制带空格或小写的 Base32 Secret，这里统一成校验库可接受的格式。
 	secret = strings.TrimSpace(secret)
 	secret = strings.ReplaceAll(secret, " ", "")
 	return strings.ToUpper(secret)
@@ -286,6 +290,7 @@ func validateSecretLength(decoded []byte) error {
 }
 
 func normalizeExtensions(values []string) []string {
+	// 扩展名统一转小写并补前导点，避免 .JPG / jpg 这类写法绕过上传策略。
 	out := make([]string, 0, len(values))
 	seen := map[string]struct{}{}
 	for _, value := range values {
@@ -319,6 +324,7 @@ func intersectExtensions(left, right []string) string {
 }
 
 func (c *Config) Dir(id string) (Dir, bool) {
+	// 目录 ID 是所有文件、令牌和审计操作的权限边界，禁止用前端传入的真实路径查找。
 	for _, d := range c.Storage.Dirs {
 		if d.ID == id {
 			return d, true

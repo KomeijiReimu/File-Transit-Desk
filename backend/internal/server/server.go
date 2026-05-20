@@ -130,6 +130,7 @@ const (
 
 func New(cfg *config.Config, st *store.Store) *fiber.App {
 	s := &Server{config: cfg, store: st, loginLimiter: newLoginLimiter()}
+	// 启动时先做一次轻量清理，避免旧会话、旧令牌和旧票据继续影响新进程。
 	_ = st.DeleteExpiredSessions(time.Now())
 	_ = st.DeleteExpiredTokens(time.Now())
 	_ = st.DeleteExpiredDownloadLeases(time.Now())
@@ -138,6 +139,7 @@ func New(cfg *config.Config, st *store.Store) *fiber.App {
 		ErrorHandler: jsonErrorHandler,
 	})
 	if len(cfg.CORS.AllowOrigins) > 0 {
+		// 接口使用 Cookie 凭据，CORS 必须显式列出允许来源，不能依赖通配符。
 		app.Use(cors.New(cors.Config{
 			AllowOrigins:     strings.Join(cfg.CORS.AllowOrigins, ","),
 			AllowCredentials: true,
@@ -158,6 +160,7 @@ func jsonErrorHandler(c *fiber.Ctx, err error) error {
 }
 
 func (s *Server) routes(app *fiber.App) {
+	// /api 是登录态接口，/t 是公开分享接口；公开下载也走票据，避免 GET 预览直接消耗次数。
 	app.Get("/api/health", s.health)
 	app.Post("/api/auth/login", s.login)
 	app.Post("/api/auth/admin-login", s.adminLogin)
@@ -184,6 +187,7 @@ func (s *Server) routes(app *fiber.App) {
 }
 
 func (s *Server) csrfOriginGuard(c *fiber.Ctx) error {
+	// 只拦截会修改状态的 /api 请求；公开 /t 上传下载由令牌自身约束。
 	if !isUnsafeMethod(c.Method()) || !strings.HasPrefix(c.Path(), "/api/") {
 		return c.Next()
 	}
@@ -232,6 +236,7 @@ func (s *Server) static(app *fiber.App) {
 	}
 	app.Static("/", s.config.Web.StaticDir)
 	app.Get("/*", func(c *fiber.Ctx) error {
+		// SPA 回退不能吞掉后端接口，否则错误路径会被前端 index.html 掩盖。
 		if strings.HasPrefix(c.Path(), "/api") || strings.HasPrefix(c.Path(), "/t/") {
 			return fiber.ErrNotFound
 		}
@@ -248,6 +253,7 @@ func (s *Server) auth(next fiber.Handler) fiber.Handler {
 		idleValid := err == nil && now.Before(sess.IdleExpiresAt)
 		withinIdleGrace := err == nil && !idleValid && grace > 0 && now.Before(sess.IdleExpiresAt.Add(grace))
 		if withinIdleGrace && c.Path() == "/api/auth/heartbeat" {
+			// 只允许心跳在短宽限期内恢复会话，普通业务请求不能借宽限继续访问文件。
 			idleValid = true
 		}
 		if id == "" || err != nil || !now.Before(sess.ExpiresAt) || !idleValid {
@@ -283,6 +289,7 @@ func (s *Server) health(c *fiber.Ctx) error {
 
 func (s *Server) login(c *fiber.Ctx) error {
 	ip := s.clientIP(c)
+	// 登录入口顺手清理过期状态，减少后台定时任务依赖。
 	_ = s.store.DeleteExpiredSessions(time.Now())
 	_ = s.store.DeleteExpiredTokens(time.Now())
 	if !s.loginLimiter.allow(ip) {
@@ -359,6 +366,7 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 }
 
 func (s *Server) validateAdminLogin(username, password string) bool {
+	// 用户名和密码哈希都使用常量时间比较，降低可观测时序差异。
 	if subtle.ConstantTimeCompare([]byte(username), []byte(s.config.Auth.Admin.Username)) != 1 {
 		return false
 	}
@@ -373,6 +381,7 @@ func (s *Server) validateAdminLogin(username, password string) bool {
 func (s *Server) validateLoginCode(code string) bool {
 	code = normalizeLoginCode(code)
 	if s.config.Auth.TOTPSecret == "" {
+		// 固定验证码只允许显式开发开关开启，生产配置校验会阻止空 Secret。
 		return s.config.Auth.DevAllowFixedCode && code == "000000"
 	}
 	ok, err := totp.ValidateCustom(code, s.config.Auth.TOTPSecret, time.Now(), totp.ValidateOpts{
@@ -396,6 +405,7 @@ func normalizeLoginCode(code string) string {
 
 func (s *Server) clientIP(c *fiber.Ctx) string {
 	if s.config.Server.TrustProxyHeaders {
+		// 只有部署在可信代理后才读取这些头，避免直连场景客户端伪造审计 IP。
 		if xff := strings.TrimSpace(c.Get("X-Forwarded-For")); xff != "" {
 			parts := strings.Split(xff, ",")
 			if ip := strings.TrimSpace(parts[0]); ip != "" {
@@ -495,6 +505,7 @@ func (s *Server) dirs(c *fiber.Ctx) error {
 			CanUpload:     dir.AllowUpload,
 		}
 		if includeRoot {
+			// 真实根路径只给管理员看，普通用户只拿到逻辑目录 ID 和权限标记。
 			item.Root = dir.Path
 		}
 		out = append(out, item)
@@ -549,6 +560,7 @@ func (s *Server) createDownloadLease(c *fiber.Ctx) error {
 	if !dir.AllowDownload {
 		return fiber.ErrForbidden
 	}
+	// 下载不直接暴露长期会话 URL，而是先把当前文件状态绑定到短期票据。
 	full, safePath, info, err := s.resolveDownloadFile(dir, in.Path)
 	if err != nil {
 		return err
@@ -590,6 +602,7 @@ func (s *Server) downloadByLease(c *fiber.Ctx) error {
 	hash := security.HashToken(plain)
 	lease, err := s.store.DownloadLeaseByHash(hash)
 	if err != nil || !time.Now().Before(lease.ExpiresAt) {
+		// 票据过期或不存在时统一返回未授权，不暴露是否曾存在。
 		_ = s.store.DeleteExpiredDownloadLeases(time.Now())
 		return fiber.ErrUnauthorized
 	}
@@ -630,6 +643,7 @@ func (s *Server) createLeaseRecord(lease store.DownloadLease) (store.DownloadLea
 		return lease, "", err
 	}
 	now := time.Now()
+	// 数据库只保存哈希；plain 只返回给本次响应，用于浏览器跳转下载。
 	lease.Hash = hash
 	lease.ExpiresAt = now.Add(s.downloadLeaseTTL())
 	lease.CreatedAt = now
@@ -642,6 +656,7 @@ func (s *Server) createLeaseRecord(lease store.DownloadLease) (store.DownloadLea
 func (s *Server) downloadLeaseTTL() time.Duration {
 	ttl := time.Duration(s.config.Downloads.LeaseTTLSeconds) * time.Second
 	maxTTL := time.Duration(s.config.Downloads.LeaseMaxTTLSeconds) * time.Second
+	// 二次夹紧可防止旧配置或手工构造的 Config 绕过 config.normalize。
 	if maxTTL > 0 && ttl > maxTTL {
 		return maxTTL
 	}
@@ -659,6 +674,7 @@ func (s *Server) downloadLeaseURL(plain string, public bool) string {
 func (s *Server) downloadLeaseFileHash(full string, info os.FileInfo) (sql.NullString, error) {
 	maxBytes := s.downloadLeaseHashMaxBytes()
 	if maxBytes > 0 && info.Size() > maxBytes {
+		// 大文件默认跳过内容哈希，用大小和 mtime 兜底，避免 Range 续传前反复读完整文件。
 		return sql.NullString{String: "", Valid: true}, nil
 	}
 	// 内容哈希让小文件票据具备内容级绑定；大文件可通过配置选择是否启用，避免 Range 续传反复扫完整文件。
@@ -702,6 +718,7 @@ func (s *Server) resolveDownloadFile(dir config.Dir, rel string) (string, string
 }
 
 func friendlyPathError(err error, missingMessage string) error {
+	// 把底层文件系统错误翻译成前端可直接展示的中文提示，同时保留非法路径的 400 语义。
 	if errors.Is(err, fsutil.ErrUnsafePath) {
 		return fiber.NewError(fiber.StatusBadRequest, "路径不合法，请不要使用绝对路径或 ..。")
 	}
@@ -744,6 +761,7 @@ func (s *Server) saveUploads(c *fiber.Ctx, dir config.Dir, rel string, files []*
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return uploadResponse{}, err
 	}
+	// 单个文件逐个落盘，任一失败直接返回，已保存文件保留并由审计记录整体上传结果。
 	resp := uploadResponse{OK: true, Files: make([]uploadedFile, 0, len(files))}
 	for _, fh := range files {
 		dst, err := saveFileUniqueAtomic(targetDir, fh)
@@ -766,9 +784,11 @@ func saveFileUniqueAtomic(dir string, fh *multipart.FileHeader) (string, error) 
 	for i := 0; ; i++ {
 		candidateName := name
 		if i > 0 {
+			// 同名文件使用递增后缀，不覆盖已有文件。
 			candidateName = fmt.Sprintf("%s-%d%s", stem, i, ext)
 		}
 		dst := filepath.Join(dir, candidateName)
+		// O_EXCL 保证并发上传时只有一个请求能占用同一个目标名。
 		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 		if errors.Is(err, os.ErrExist) {
 			continue
@@ -805,6 +825,7 @@ func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error)
 	if err != nil {
 		return nil, 0, fiber.ErrBadRequest
 	}
+	// 同时兼容旧字段 file 和新字段 files，便于公开页与登录态页面共用后端。
 	files := append([]*multipart.FileHeader{}, form.File["file"]...)
 	files = append(files, form.File["files"]...)
 	if len(files) == 0 {
@@ -833,6 +854,7 @@ func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error)
 
 func (s *Server) extensionAllowed(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
+	// 黑名单优先级高于白名单，确保危险扩展名不会因白名单误配而放行。
 	for _, blocked := range s.config.Storage.BlockedExtensions {
 		if ext == blocked {
 			return false
@@ -862,6 +884,7 @@ func (l *loginLimiter) allow(key string) bool {
 		return false
 	}
 	if now.Sub(attempt.windowFrom) > loginLimitWindow {
+		// 旧窗口外的失败次数不再参与限速，避免偶发错误长期影响登录。
 		delete(l.attempts, key)
 	}
 	return true
@@ -949,8 +972,10 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 	var fullPath string
 	var err error
 	if in.Type == "download" {
+		// 下载令牌必须提前确认具体文件存在，避免对外发出不可用链接。
 		fullPath, safePath, err = fsutil.Resolve(dir.Path, in.Path)
 	} else {
+		// 上传令牌允许未来创建子目录，但必须确保最近存在父目录没有符号链接逃逸。
 		_, safePath, err = fsutil.ResolveForCreate(dir.Path, in.Path)
 	}
 	if err != nil {
@@ -986,6 +1011,7 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 }
 
 func tokenExpiry(cfg *config.Config, in tokenRequest) sql.NullTime {
+	// 兼容新旧字段优先级：显式过期时间 > ttl_seconds/ttlMinutes > 默认 TTL。
 	expiresAt := in.ExpiresAt
 	if expiresAt == nil {
 		expiresAt = in.ExpiresOld
@@ -1047,6 +1073,7 @@ func (s *Server) auditLogs(c *fiber.Ctx) error {
 func (s *Server) publicTokenInfo(c *fiber.Ctx) error {
 	t, err := s.store.TokenByHash(security.HashToken(c.Params("token")))
 	if err != nil {
+		// 公开查询不区分不存在和不可用的内部细节，只返回前端可渲染的失效原因。
 		return c.JSON(fiber.Map{"valid": false, "reason": "not_found"})
 	}
 	valid, reason := tokenValidity(t, time.Now())
@@ -1110,6 +1137,7 @@ func (s *Server) publicDownload(c *fiber.Ctx) error {
 	}
 	endpoint := "/t/" + url.PathEscape(c.Params("token")) + "/download-lease"
 	c.Type("html", "utf-8")
+	// 兼容旧后端下载链接：GET 只展示确认页，真正消耗次数的操作放到用户点击后的 POST。
 	return c.SendString(fmt.Sprintf(`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1208,6 +1236,7 @@ func (s *Server) publicUpload(c *fiber.Ctx) error {
 
 func (s *Server) reservePublicToken(c *fiber.Ctx, tokenType string, uploadBytes int64) (store.Token, config.Dir, error) {
 	hash := security.HashToken(c.Params("token"))
+	// 先做一次只读校验给出稳定错误，再用条件更新原子预占次数和容量。
 	if _, _, err := s.lookupPublicToken(c, tokenType); err != nil {
 		return store.Token{}, config.Dir{}, err
 	}
@@ -1288,6 +1317,7 @@ func tokenToDTO(t store.Token, now time.Time, uploadMaxBytes int64) tokenDTO {
 	}
 	valid, reason := tokenValidity(t, now)
 	if valid && t.Type == "upload" && uploadMaxBytes > 0 && t.UploadedBytes >= uploadMaxBytes {
+		// 上传容量是令牌级限制，和 maxUses 独立显示，前端据 reason 给出更准确文案。
 		valid = false
 		reason = "upload_quota_exhausted"
 	}
@@ -1319,6 +1349,7 @@ func tokenValidity(t store.Token, now time.Time) (bool, string) {
 }
 
 func actionLabel(action string) string {
+	// 后端统一补充中文动作名，前端无需维护另一份审计动作映射。
 	labels := map[string]string{
 		"file_list":                    "文件列表",
 		"dirs":                         "查看目录",

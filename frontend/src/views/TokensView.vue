@@ -40,6 +40,7 @@ function tokenType(token: TokenInfo) {
 }
 
 function shareUrlFor(token: TokenInfo | CreateTokenResponse): string {
+  // 后端只在创建响应返回一次明文 token；列表行若没有 url/token，就不再尝试拼出分享链接。
   const raw = token.url || token.link || token.token || ''
   const t = extractShareToken(raw)
   return t ? buildShareUrl(t) : ''
@@ -69,6 +70,7 @@ function deleteLabel(token: TokenInfo) {
 }
 
 const deleteDialogTitle = computed(() => pendingDelete.value && canRevoke(pendingDelete.value) ? '删除并立即失效？' : '删除这条令牌记录？')
+// 弹窗文案根据当前令牌是否仍可用动态切换，避免“删除记录”和“失效链接”混为一谈。
 const deleteDialogMessage = computed(() => pendingDelete.value && canRevoke(pendingDelete.value)
   ? '这个令牌当前仍可用。删除后会立即失效，并清理它已经兑换但尚未过期的下载票据。'
   : '这条令牌已经不可用。删除后只会从管理列表中移除历史记录。')
@@ -99,6 +101,7 @@ async function createToken() {
     return
   }
   if (form.type === 'download' && !form.path) {
+    // 下载令牌必须绑定具体文件；上传令牌才允许留空表示目录根路径。
     error.value = '下载令牌需要填写具体文件路径，例如 sub/file.zip。'
     return
   }
@@ -127,6 +130,7 @@ async function copyRow(token: TokenInfo) {
   if (!url) return
   const ok = await copyToClipboard(url)
   if (ok) {
+    // 每行复制状态只短暂显示，避免刷新列表或切换页面后残留“已复制”。
     rowCopyId.value = token.id
     window.setTimeout(() => {
       if (rowCopyId.value === token.id) rowCopyId.value = null
@@ -156,6 +160,7 @@ async function confirmRemove() {
   deleteError.value = ''
   deleting.value = true
   try {
+    // 删除失败时错误显示在弹窗内部，避免被遮罩后的页面级错误提示挡住。
     await api.deleteToken(token.id)
     tokens.value = tokens.value.filter((item) => item.id !== token.id)
     pendingDelete.value = null

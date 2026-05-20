@@ -1,5 +1,6 @@
 export type UserRole = 'admin' | 'user' | string
 
+// 后端 /api/auth/me 和登录接口返回的会话摘要；idleExpiresAt 用于前端展示空闲状态。
 export interface UserInfo {
   authenticated: boolean
   name?: string
@@ -13,6 +14,7 @@ export interface AdminLoginPayload {
   password: string
 }
 
+// 目录字段兼容新旧后端命名：canUpload/canDownload 与 allowUpload/allowDownload 均可渲染。
 export interface DirectoryInfo {
   id: string
   name: string
@@ -26,6 +28,7 @@ export interface DirectoryInfo {
   allowDownload?: boolean
 }
 
+// 文件列表同样兼容 isDir 与 type 字段，便于不同接口版本共用同一表格组件。
 export interface FileEntry {
   name: string
   path?: string
@@ -46,6 +49,7 @@ export interface ListFilesResponse {
   canDownload?: boolean
 }
 
+// TokenInfo 同时覆盖管理端列表、创建响应和公开分享信息页的可选字段。
 export interface TokenInfo {
   id: string | number
   token?: string

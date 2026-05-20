@@ -16,6 +16,7 @@ function readRoleHint(): UserRole | undefined {
 
 function writeRoleHint(role?: UserRole, name?: string) {
   try {
+    // 只缓存展示用的角色和名称，不保存任何可用于鉴权的 Cookie 或 token。
     if (role) localStorage.setItem(ROLE_STORAGE_KEY, role)
     else localStorage.removeItem(ROLE_STORAGE_KEY)
     if (name) localStorage.setItem(NAME_STORAGE_KEY, name)
@@ -46,6 +47,7 @@ export const isAdmin = computed(() => authState.role === 'admin')
 function applyUser(user: UserInfo, fallbackRole?: UserRole, fallbackName?: string) {
   authState.user = user
   authState.authenticated = user.authenticated !== false
+  // 后端 role 优先，其次使用本次登录入口传入的兜底值，最后才用本地展示缓存。
   const role = (user.role as UserRole | undefined) || fallbackRole || readRoleHint() || 'user'
   authState.role = role
   authState.name = user.name || fallbackName || readNameHint() || (role === 'admin' ? '管理员' : '访客')
@@ -66,6 +68,7 @@ if (typeof window !== 'undefined') {
 
 export async function restoreSession() {
   try {
+    // 刷新页面后用 /me 恢复真实登录态；失败时清本地状态即可，Cookie 由后端过期策略决定。
     const user = await api.me()
     if (user.authenticated === false) {
       clearUser()

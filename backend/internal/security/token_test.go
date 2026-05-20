@@ -3,6 +3,7 @@ package security
 import "testing"
 
 func TestTokenHashAndValidate(t *testing.T) {
+	// 明文 token 只返回给客户端；数据库保存哈希，因此两者绝不能相同。
 	tok, hash, err := NewToken()
 	if err != nil {
 		t.Fatal(err)
