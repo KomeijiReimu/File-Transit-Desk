@@ -33,8 +33,8 @@
 ├── backend/          # Go 后端
 ├── frontend/         # Vue 前端（Bun）
 ├── scripts/          # 本地开发辅助脚本
-├── README.md         # 项目总说明
-└── 部署说明.md       # 简要部署说明
+├── LICENSE           # AGPL-3.0-or-later 许可证
+└── README.md         # 项目总说明、开发、部署和维护文档
 ```
 
 运行数据、本地配置、依赖目录和构建产物不纳入 Git：`backend/config.yaml`、`backend/data/`、`backend/uploads/`、`frontend/node_modules/`、`frontend/dist/` 等均由根 `.gitignore` 排除。
@@ -229,24 +229,6 @@ cors:
     - "http://localhost:5174"
 ```
 
-### Docker 映射端口
-
-Docker Compose 中浏览器访问端口由 `backend/docker-compose.example.yml` 的 `ports` 控制：
-
-```yaml
-ports:
-  - "8080:80"
-```
-
-例如要让宿主机用 `9000` 访问前端容器：
-
-```yaml
-ports:
-  - "9000:80"
-```
-
-容器内部后端仍默认监听 `8080`，前端 nginx 通过服务名 `backend:8080` 访问后端；仅改变宿主机访问端口时不需要修改后端 `server.port`。
-
 ## 日常维护：清除数据库和记录
 
 后端运行数据默认保存在 `backend/data/`，上传文件默认按 `storage.dirs` 指向的目录保存。清理前请先停止后端服务，并确认已经备份需要保留的文件。
@@ -315,18 +297,35 @@ rm -rf backend/uploads/*
 
 ## 部署方式
 
-### 前后端分容器
+### 方式一：前后端分容器
+
+在 `backend/` 中准备 `config.yaml` 后运行：
 
 ```bash
 cd backend
 cp config.example.yaml config.yaml
-# 修改 auth.totp_secret、auth.admin、storage.dirs 等配置
+# 必须修改 auth.totp_secret、auth.admin，并确认 storage.dirs 指向需要开放的目录
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
-前端 nginx 容器会代理 `/api` 和 `/t` 到后端容器。
+浏览器默认访问：
 
-### 后端托管前端静态文件
+```text
+http://服务器地址:8080
+```
+
+前端 nginx 容器会代理 `/api` 和 `/t` 到后端容器。此方式要求 `backend/` 和 `frontend/` 保持同级目录；后端容器使用非 root 用户运行，请确保挂载的 `data/` 和上传目录对容器用户可写。
+
+如需修改 Docker 对外访问端口，调整 `backend/docker-compose.example.yml` 中的左侧端口即可：
+
+```yaml
+ports:
+  - "9000:80"
+```
+
+仅修改宿主机访问端口时，容器内部后端仍可保持 `8080`，因为前端容器通过 Docker 网络访问 `backend:8080`。
+
+### 方式二：后端托管前端静态文件
 
 ```bash
 cd frontend
@@ -338,6 +337,60 @@ cp config.example.yaml config.yaml
 # 确保 web.static_dir 指向 ../frontend/dist
 go run ./cmd/server -config config.yaml
 ```
+
+后端会托管 `web.static_dir` 指向的前端构建产物，并对非 `/api`、非 `/t` 路径回退到 `index.html`，适配 Vue 单页应用路由。
+
+### 反向代理与真实 IP
+
+若部署在 Nginx、Caddy、Traefik 等可信反向代理之后，并希望访问记录显示真实客户端 IP，需要：
+
+1. 在反向代理层传递 `X-Forwarded-For` 或 `X-Real-IP`；
+2. 将后端配置 `server.trust_proxy_headers` 设置为 `true`；
+3. 不要在直连公网时启用该项，避免客户端伪造 IP。
+
+登录失败限速和审计日志都会使用后端解析出的客户端 IP。
+
+### Cookie 与跨站请求防护
+
+- HTTPS 生产部署时应将 `auth.cookie_secure` 设置为 `true`，确保浏览器只通过安全连接发送会话 Cookie。
+- `cors.allow_origins` 必须精确列出前端来源；后端会对 `/api` 下非空 `Origin` 的状态变更请求做白名单校验。
+- 如果修改前端开发端口或生产访问域名，需要同步更新 `cors.allow_origins`，否则登录、上传、令牌管理等 Cookie 凭据请求会被拒绝。
+
+### 空闲会话与长下载部署建议
+
+推荐保留较短空闲时间和较长下载票据时间：
+
+```yaml
+auth:
+  session_ttl_seconds: 86400
+  idle_timeout_seconds: 180
+  idle_grace_seconds: 30
+
+downloads:
+  lease_ttl_seconds: 7200
+  lease_max_ttl_seconds: 21600
+  content_hash_max_mb: 64
+```
+
+- `session_ttl_seconds` 是登录态绝对最长有效期。
+- `idle_timeout_seconds` 是页面无活动后的空闲过期时间；前端只在页面可见且用户有操作时发送心跳续期。
+- `downloads.lease_ttl_seconds` 是下载票据有效期。用户点击下载时先兑换票据，文件传输和 HTTP Range 断点续传使用票据地址，不依赖页面会话继续在线。
+- `downloads.content_hash_max_mb` 控制下载票据内容哈希阈值。默认对 64 MiB 及以下文件记录 SHA-256 并在票据下载前复核；设为 `0` 可对所有文件启用内容哈希，但大文件创建票据和每次 Range 续传前都会读取完整文件。
+- 公开下载令牌在兑换票据时消耗一次 `uses`，同一票据的 Range 续传不会重复扣次数。
+- 兼容保留的 `/t/:token/download` 只显示确认页，用户主动点击后才兑换票据，避免邮件扫描、聊天软件预览等自动 GET 请求提前消耗一次性令牌。
+
+因此，用户离开页面后会较快变成未登录，但已经开始的大文件下载和同一票据有效期内的断点续传不会被会话空闲过期打断。若下载票据过期或文件被替换，需要回到页面重新获取下载链接。
+
+### 上传安全策略
+
+`backend/config.example.yaml` 中提供以下上传限制：
+
+- `storage.upload_max_mb`：单次上传请求总量；
+- `storage.upload_max_file_mb`：单个文件大小；
+- `storage.upload_max_files`：单次请求文件数量；
+- `storage.allowed_extensions`：扩展名白名单，空数组表示不限制；
+- `storage.blocked_extensions`：扩展名黑名单，优先级高于白名单；
+- `tokens.upload_max_mb`：单个上传令牌累计上传容量，`0` 表示不限制。
 
 ## 安全设计
 
@@ -404,5 +457,6 @@ bun run preview
 
 ## 许可证
 
-本项目以 GNU Affero General Public License v3.0 or later（`AGPL-3.0-or-later`）发布。
+本项目以 GNU Affero General Public License v3.0 or later（`AGPL-3.0-or-later`）发布，完整条款见仓库根目录 `LICENSE`。
 
+AGPL 适合网络服务类项目：如果你修改本项目并通过网络向用户提供服务，需要按 AGPL 要求向这些用户提供对应源码。
