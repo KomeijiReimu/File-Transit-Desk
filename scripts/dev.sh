@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_CONFIG="${BACKEND_CONFIG:-backend/config.yaml}"
 BACKEND_PORT="${BACKEND_PORT:-17878}"
-BACKEND_ORIGIN="${BACKEND_ORIGIN:-http://localhost:${BACKEND_PORT}}"
+# 使用 127.0.0.1 避免部分系统把 localhost 解析到 IPv6 ::1，导致前端代理连不上只监听 IPv4 的后端。
+BACKEND_ORIGIN="${BACKEND_ORIGIN:-http://127.0.0.1:${BACKEND_PORT}}"
 FRONTEND_HOST="${FRONTEND_HOST:-0.0.0.0}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
@@ -58,6 +59,33 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+wait_for_backend() {
+  local origin="${BACKEND_ORIGIN#http://}"
+  origin="${origin#https://}"
+  local host="${origin%%[:/]*}"
+  local rest="${origin#${host}}"
+  local port="${rest#:}"
+  port="${port%%/*}"
+  if [[ -z "${host}" || -z "${port}" || "${port}" = "${rest}" ]]; then
+    sleep 2
+    return
+  fi
+  echo "等待后端就绪：${BACKEND_ORIGIN}/api/health"
+  for _ in {1..60}; do
+    if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
+      wait "${BACKEND_PID}"
+    fi
+    # 这里只检查 TCP 端口是否可连接，避免额外依赖 curl；后端监听后 /api/health 会立即可用。
+    if (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
+      exec 3>&- 3<&- || true
+      return
+    fi
+    sleep 0.5
+  done
+  echo "后端未在预期时间内就绪，请检查后端启动日志。" >&2
+  exit 1
+}
+
 echo "启动后端：${BACKEND_CONFIG}"
 echo "前端代理目标：${BACKEND_ORIGIN}"
 (
@@ -65,6 +93,7 @@ echo "前端代理目标：${BACKEND_ORIGIN}"
   go run ./cmd/server -config "${BACKEND_CONFIG_PATH}"
 ) &
 BACKEND_PID=$!
+wait_for_backend
 
 echo "启动前端：http://localhost:${FRONTEND_PORT}"
 (

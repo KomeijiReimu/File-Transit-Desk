@@ -10,7 +10,8 @@ $ErrorActionPreference = 'Stop'
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ([string]::IsNullOrWhiteSpace($BackendOrigin)) {
-  $BackendOrigin = "http://localhost:$BackendPort"
+  # 使用 127.0.0.1 避免 Windows/Node 将 localhost 优先解析为 ::1，导致 Vite 代理连不上只监听 IPv4 的后端。
+  $BackendOrigin = "http://127.0.0.1:$BackendPort"
 }
 
 if ([System.IO.Path]::IsPathRooted($BackendConfig)) {
@@ -36,6 +37,26 @@ function Join-CmdArguments {
       $_
     }
   }) -join ' '
+}
+
+function Wait-BackendReady {
+  param([string]$Origin, [object]$Process)
+  $HealthUrl = "$Origin/api/health"
+  Write-Host "等待后端就绪：$HealthUrl"
+  for ($i = 0; $i -lt 60; $i++) {
+    if ($Process -and $Process.HasExited) {
+      exit $Process.ExitCode
+    }
+    try {
+      $Response = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 1
+      if ($Response.StatusCode -eq 200) {
+        return
+      }
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  throw "后端未在预期时间内就绪，请检查后端启动日志。"
 }
 
 Require-Command -Name 'go' -InstallHint 'Go'
@@ -82,6 +103,8 @@ try {
     -WorkingDirectory (Join-Path $RootDir 'backend') `
     -NoNewWindow `
     -PassThru
+
+  Wait-BackendReady -Origin $BackendOrigin -Process $BackendProcess
 
   $env:BACKEND_ORIGIN = $BackendOrigin
   $env:VITE_BACKEND_ORIGIN = $BackendOrigin

@@ -150,7 +150,7 @@ bun install
 bun run dev
 ```
 
-Vite 会把 `/api` 和 `/t` 代理到 `http://localhost:17878`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。
+Vite 会把 `/api` 和 `/t` 代理到 `http://127.0.0.1:17878`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。代理目标默认使用 IPv4 地址，避免部分 Windows/Node 环境把 `localhost` 解析成 `::1` 后连接失败；代理转发时会把 `Origin` 改写为后端同源，避免通过局域网 IP 访问 Vite 时被后端 CSRF Origin 防护误拒绝。
 
 ## 修改绑定端口
 
