@@ -78,16 +78,21 @@ downloads:
 生成 TOTP Secret：
 
 ```bash
-python3 - <<'PY'
-import base64, os
-print(base64.b32encode(os.urandom(20)).decode().rstrip('='))
-PY
+python3 scripts/generate-totp-secret.py
 ```
+
+脚本默认生成 20 字节随机数并输出无填充 Base32，可直接写入 `auth.totp_secret`。如需调整随机字节数，可使用 `--bytes`，但不建议低于默认值。
 
 生成管理员密码摘要：
 
 ```bash
-printf '%s' 'your-password' | sha256sum | awk '{print $1}'
+python3 scripts/hash-admin-password.py
+```
+
+脚本会隐藏输入并要求二次确认，输出结果写入 `auth.admin.password_sha256`。如果需要在非交互环境生成，也可以使用管道：
+
+```bash
+printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 ```
 
 ### 2. 一键启动前后端

@@ -103,20 +103,25 @@ pwsh -File scripts/dev.ps1 -BackendPort 9000
 推荐使用 Base32 secret，例如：
 
 ```bash
-python3 - <<'PY'
-import base64, os
-print(base64.b32encode(os.urandom(20)).decode().rstrip('='))
-PY
+cd ..
+python3 scripts/generate-totp-secret.py
 ```
 
-也可以使用任意 TOTP 工具生成后写入 `auth.totp_secret`，并导入手机验证器。
+脚本默认生成 20 字节随机数并输出无填充 Base32，可直接写入 `auth.totp_secret`。也可以使用任意 TOTP 工具生成后写入配置，并导入手机验证器。
 
 ## 生成管理员密码摘要
 
-将下面的 `your-password` 替换为管理员密码，输出写入 `auth.admin.password_sha256`：
+运行脚本后按提示隐藏输入管理员密码，输出写入 `auth.admin.password_sha256`：
 
 ```bash
-printf '%s' 'your-password' | sha256sum | awk '{print $1}'
+cd ..
+python3 scripts/hash-admin-password.py
+```
+
+如果需要在非交互环境生成，也可以使用管道：
+
+```bash
+printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 ```
 
 ## API 契约摘要
