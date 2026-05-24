@@ -82,7 +82,7 @@ go run ./cmd/server -config config.yaml
 ```yaml
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 17878
 ```
 
 把 `port` 改成目标端口后重启服务即可。如果同时使用前端开发服务器，需要让前端代理指向相同端口，例如：
@@ -215,7 +215,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 ```bash
 docker build -t filetrans-backend .
 docker run --rm \
-  -p 8080:8080 \
+  -p 17878:17878 \
   -v "$PWD/config.yaml:/app/config.yaml:ro" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/uploads:/app/uploads" \
@@ -234,7 +234,7 @@ cp config.example.yaml config.yaml
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
-该编排文件会构建当前后端目录，并使用相邻的 `../frontend` 目录构建 nginx 前端镜像。浏览器访问 `http://服务器地址:8080`，前端容器会代理 `/api` 和 `/t` 到后端服务。
+该编排文件会构建当前后端目录，并使用相邻的 `../frontend` 目录构建 nginx 前端镜像。浏览器访问 `http://服务器地址:17878`，前端容器会代理 `/api` 和 `/t` 到监听 `17878` 的后端服务。
 
 ## 前端 dist 放置
 

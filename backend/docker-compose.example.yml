@@ -9,7 +9,7 @@ services:
       - ./data:/app/data
       - ./uploads:/app/uploads
     expose:
-      - "8080"
+      - "17878"
 
   frontend:
     build:
@@ -19,4 +19,4 @@ services:
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "17878:80"

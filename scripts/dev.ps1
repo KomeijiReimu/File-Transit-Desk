@@ -1,6 +1,6 @@
 param(
   [string]$BackendConfig = $(if ($env:BACKEND_CONFIG) { $env:BACKEND_CONFIG } else { 'backend/config.yaml' }),
-  [int]$BackendPort = $(if ($env:BACKEND_PORT) { [int]$env:BACKEND_PORT } else { 8080 }),
+  [int]$BackendPort = $(if ($env:BACKEND_PORT) { [int]$env:BACKEND_PORT } else { 17878 }),
   [string]$BackendOrigin = $(if ($env:BACKEND_ORIGIN) { $env:BACKEND_ORIGIN } else { '' }),
   [string]$FrontendHost = $(if ($env:FRONTEND_HOST) { $env:FRONTEND_HOST } else { '0.0.0.0' }),
   [int]$FrontendPort = $(if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 5173 })
@@ -24,6 +24,18 @@ function Require-Command {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
     Write-Error "未找到 $Name，请先安装 $InstallHint。"
   }
+}
+
+function Join-CmdArguments {
+  param([string[]]$Arguments)
+  # Start-Process 直接启动 bun 时可能拿到 .cmd 或脚本包装器，cmd.exe /c 需要自行保护参数空格。
+  return ($Arguments | ForEach-Object {
+    if ($_ -match '[\s"&|<>^]') {
+      '"' + ($_ -replace '"', '\"') + '"'
+    } else {
+      $_
+    }
+  }) -join ' '
 }
 
 Require-Command -Name 'go' -InstallHint 'Go'
@@ -75,8 +87,11 @@ try {
   $env:VITE_BACKEND_ORIGIN = $BackendOrigin
 
   Write-Host "启动前端：http://localhost:$FrontendPort"
-  $FrontendProcess = Start-Process -FilePath 'bun' `
-    -ArgumentList @('run', 'dev', '--', '--host', $FrontendHost, '--port', [string]$FrontendPort) `
+  $FrontendCommand = 'bun ' + (Join-CmdArguments @('run', 'dev', '--', '--host', $FrontendHost, '--port', [string]$FrontendPort))
+  # Windows 上 bun 常以 bun.cmd/shim 形式出现在 PATH 中，Start-Process 不能总是把它当原生 Win32 程序启动。
+  # 通过 cmd.exe 启动可复用命令解析规则，避免 “%1 不是有效的 Win32” 错误。
+  $FrontendProcess = Start-Process -FilePath 'cmd.exe' `
+    -ArgumentList @('/d', '/s', '/c', $FrontendCommand) `
     -WorkingDirectory $FrontendDir `
     -NoNewWindow `
     -PassThru

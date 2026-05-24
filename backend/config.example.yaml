@@ -1,6 +1,6 @@
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 17878
   # 仅在可信反向代理后启用；启用后审计和登录限速会读取 X-Forwarded-For / X-Real-IP。
   trust_proxy_headers: false
 database:
@@ -19,7 +19,7 @@ auth:
   cookie_secure: false
   admin:
     username: "REPLACE_WITH_ADMIN_USERNAME"
-    # 管理员密码的 sha256 hex。生成：printf '%s' 'your-password' | sha256sum | awk '{print $1}'
+    # 管理员密码的 sha256 hex。生成：python3 scripts/hash-admin-password.py
     password_sha256: "REPLACE_WITH_ADMIN_PASSWORD_SHA256"
 web:
   static_dir: "../frontend/dist"

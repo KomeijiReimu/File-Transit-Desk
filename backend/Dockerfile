@@ -14,7 +14,7 @@ RUN apk add --no-cache ca-certificates tzdata wget \
   && chown -R filetrans:filetrans /app
 WORKDIR /app
 COPY --from=build /out/filetrans /usr/local/bin/filetrans
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/api/health || exit 1
+EXPOSE 17878
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:17878/api/health || exit 1
 USER filetrans
 CMD ["filetrans", "-config", "/app/config.yaml"]

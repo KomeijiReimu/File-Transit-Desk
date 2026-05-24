@@ -52,12 +52,12 @@ bun run build
 
 Vite 已配置开发代理：
 
-- `/api` → `http://localhost:8080`
-- `/t` → `http://localhost:8080`
+- `/api` → `http://localhost:17878`
+- `/t` → `http://localhost:17878`
 
-因此开发时后端服务需要运行在本机 `8080` 端口。
+因此开发时后端服务需要运行在本机 `17878` 端口。
 
-如果后端端口不是 `8080`，通过环境变量修改代理目标：
+如果后端端口不是 `17878`，通过环境变量修改代理目标：
 
 ```bash
 VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 bun run dev
@@ -98,7 +98,7 @@ docker build -t file-trans-frontend .
 docker run --rm -p 8081:80 file-trans-frontend
 ```
 
-镜像基于 `oven/bun:1-alpine` 完成依赖安装与生产构建，再用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:8080`。nginx 已将上传请求体上限设为 `1g`，避免默认 1MiB 限制影响文件上传。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。
+镜像基于 `oven/bun:1-alpine` 完成依赖安装与生产构建，再用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:17878`。nginx 已将上传请求体上限设为 `1g`，避免默认 1MiB 限制影响文件上传。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。
 
 ## 接口约定
 

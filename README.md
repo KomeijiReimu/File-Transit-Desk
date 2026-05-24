@@ -127,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 
 ```text
 前端：http://localhost:5173
-后端：http://localhost:8080
+后端：http://localhost:17878
 ```
 
 首次运行如果发现 `backend/config.yaml` 不存在，脚本会从示例配置复制一份并退出。请先替换 TOTP Secret、管理员账号和目录配置后再运行。
@@ -150,7 +150,7 @@ bun install
 bun run dev
 ```
 
-Vite 会把 `/api` 和 `/t` 代理到 `http://localhost:8080`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。
+Vite 会把 `/api` 和 `/t` 代理到 `http://localhost:17878`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。
 
 ## 修改绑定端口
 
@@ -163,7 +163,7 @@ Vite 会把 `/api` 和 `/t` 代理到 `http://localhost:8080`。打开 Vite 输�
 ```yaml
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 17878
 ```
 
 例如要把后端改到 `9000`：
@@ -316,7 +316,7 @@ docker compose -f docker-compose.example.yml up -d --build
 浏览器默认访问：
 
 ```text
-http://服务器地址:8080
+http://服务器地址:17878
 ```
 
 前端 nginx 容器会代理 `/api` 和 `/t` 到后端容器。此方式要求 `backend/` 和 `frontend/` 保持同级目录；后端容器使用非 root 用户运行，请确保挂载的 `data/` 和上传目录对容器用户可写。
@@ -328,7 +328,7 @@ ports:
   - "9000:80"
 ```
 
-仅修改宿主机访问端口时，容器内部后端仍可保持 `8080`，因为前端容器通过 Docker 网络访问 `backend:8080`。
+仅修改宿主机访问端口时，容器内部后端仍可保持 `17878`，因为前端容器通过 Docker 网络访问 `backend:17878`。
 
 ### 方式二：后端托管前端静态文件
 

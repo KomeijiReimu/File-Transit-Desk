@@ -107,7 +107,7 @@ func Load(path string) (*Config, error) {
 func Default() *Config {
 	c := &Config{}
 	c.Server.Host = "0.0.0.0"
-	c.Server.Port = 8080
+	c.Server.Port = 17878
 	c.Database.Path = "./data/filetrans.db"
 	c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
 	c.Auth.IdleTimeoutSeconds = int64((3 * time.Minute) / time.Second)
@@ -134,7 +134,7 @@ func (c *Config) normalize() {
 		c.Server.Host = "0.0.0.0"
 	}
 	if c.Server.Port <= 0 {
-		c.Server.Port = 8080
+		c.Server.Port = 17878
 	}
 	if c.Database.Path == "" {
 		c.Database.Path = "./data/filetrans.db"
