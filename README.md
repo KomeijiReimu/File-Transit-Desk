@@ -401,3 +401,8 @@ bun run preview
 - 前端：`bun install --frozen-lockfile`
 - 前端：`bun run typecheck`
 - 前端：`bun run build`
+
+## 许可证
+
+本项目以 GNU Affero General Public License v3.0 or later（`AGPL-3.0-or-later`）发布。
+
