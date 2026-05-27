@@ -6,10 +6,14 @@ import type {
   CreateTokenResponse,
   DirectoryInfo,
   DownloadLeaseResponse,
+  FilePickerListResponse,
+  FilePickerRoot,
+  FilePickerSelection,
   ListFilesResponse,
   ResourcePayload,
   SafeConfig,
   TokenInfo,
+  UploadPolicyPayload,
   UserInfo,
 } from '@/types'
 
@@ -133,6 +137,16 @@ export const api = {
   auditLogs: (filter: AuditFilter = {}) =>
     request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status })}`),
   safeConfig: () => request<SafeConfig>('/api/config'),
+  updateUploadPolicy: (payload: UploadPolicyPayload) =>
+    request<UploadPolicyPayload>('/api/config/upload-policy', { method: 'PUT', body: JSON.stringify(payload) }),
+  filePickerRoots: () => request<FilePickerRoot[]>('/api/config/file-picker/roots'),
+  filePickerList: (rootId: string, path = '', page = 1, pageSize = 100) =>
+    request<FilePickerListResponse>(`/api/config/file-picker/list${query({ rootId, path, page, pageSize })}`),
+  validateFilePickerSelection: (rootId: string, path: string, expectedType: 'file' | 'directory') =>
+    request<FilePickerSelection>('/api/config/file-picker/validate', {
+      method: 'POST',
+      body: JSON.stringify({ rootId, path, expectedType }),
+    }),
   createResource: (payload: ResourcePayload) =>
     request<DirectoryInfo>('/api/config/resources', { method: 'POST', body: JSON.stringify(payload) }),
   updateResource: (id: string, payload: ResourcePayload) =>

@@ -231,6 +231,10 @@ func (s *Server) routes(app *fiber.App) {
 	app.Delete("/api/tokens/:id", s.adminOnly(s.deleteToken))
 	app.Get("/api/audit/logs", s.adminOnly(s.auditLogs))
 	app.Get("/api/config", s.adminOnly(s.safeConfig))
+	app.Put("/api/config/upload-policy", s.adminOnly(s.updateUploadPolicy))
+	app.Get("/api/config/file-picker/roots", s.adminOnly(s.filePickerRoots))
+	app.Get("/api/config/file-picker/list", s.adminOnly(s.filePickerList))
+	app.Post("/api/config/file-picker/validate", s.adminOnly(s.filePickerValidate))
 	app.Post("/api/config/resources", s.adminOnly(s.createResource))
 	app.Put("/api/config/resources/:id", s.adminOnly(s.updateResource))
 	app.Delete("/api/config/resources/:id", s.adminOnly(s.deleteResource))
@@ -675,31 +679,67 @@ func (s *Server) deleteResource(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"ok": true})
 }
 
-func (s *Server) updateConfigResources(mutator func([]config.Dir) ([]config.Dir, error)) error {
-	if s.configPath == "" {
-		return fiber.NewError(fiber.StatusServiceUnavailable, "当前服务未记录配置文件路径，不能在线写回配置。")
+func (s *Server) updateUploadPolicy(c *fiber.Ctx) error {
+	var in uploadPolicyRequest
+	if err := c.BodyParser(&in); err != nil {
+		return fiber.ErrBadRequest
 	}
-	s.configWriteMu.Lock()
-	defer s.configWriteMu.Unlock()
-	next := s.cfg().Clone()
-	oldResources := next.Resources()
-	resources, err := mutator(next.Resources())
-	if err != nil {
+	if err := s.updateConfig(func(next *config.Config) error {
+		next.Storage.AllowedExtensions = append([]string{}, in.AllowedExtensions...)
+		next.Storage.BlockedExtensions = append([]string{}, in.BlockedExtensions...)
+		return nil
+	}); err != nil {
 		return err
 	}
-	next.SetResources(resources)
-	changedIDs := changedResourceIDs(oldResources, next.Resources())
-	if err := config.SaveAtomic(s.configPath, next); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "配置写入失败："+err.Error())
+	saved := s.cfg()
+	_ = s.store.Audit("config_upload_policy_update", s.clientIP(c), fmt.Sprintf("允许 %d 项，阻断 %d 项", len(saved.Storage.AllowedExtensions), len(saved.Storage.BlockedExtensions)))
+	return c.JSON(uploadPolicyResponse{AllowedExtensions: saved.Storage.AllowedExtensions, BlockedExtensions: saved.Storage.BlockedExtensions})
+}
+
+func (s *Server) updateConfigResources(mutator func([]config.Dir) ([]config.Dir, error)) error {
+	var oldResources []config.Dir
+	var nextResources []config.Dir
+	if err := s.updateConfig(func(next *config.Config) error {
+		oldResources = next.Resources()
+		resources, err := mutator(next.Resources())
+		if err != nil {
+			return err
+		}
+		next.SetResources(resources)
+		nextResources = next.Resources()
+		return nil
+	}); err != nil {
+		return err
 	}
-	// 写回成功后再替换内存配置，新请求立即看到新的共享目录或单文件资源。
-	s.replaceConfig(next)
+	changedIDs := changedResourceIDs(oldResources, nextResources)
 	if len(changedIDs) > 0 {
 		// 资源根路径、类型或权限变化后，旧令牌不能自动指向新位置；统一撤销相关令牌并清理下载票据。
 		if err := s.store.RevokeTokensByDirIDsAndLeases(changedIDs); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func (s *Server) updateConfig(mutator func(*config.Config) error) error {
+	if s.configPath == "" {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "当前服务未记录配置文件路径，不能在线写回配置。")
+	}
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
+	next := s.cfg().Clone()
+	if err := mutator(next); err != nil {
+		return err
+	}
+	normalized, err := next.NormalizedClone()
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "配置写入失败："+err.Error())
+	}
+	if err := config.SaveAtomic(s.configPath, normalized); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "配置写入失败："+err.Error())
+	}
+	// 写回成功后再替换内存配置，新请求立即看到新的策略、选择器根和共享资源。
+	s.replaceConfig(normalized)
 	return nil
 }
 
@@ -1883,6 +1923,9 @@ func actionLabel(action string) string {
 		"config_resource_create":       "新增共享资源",
 		"config_resource_update":       "修改共享资源",
 		"config_resource_delete":       "删除共享资源",
+		"config_upload_policy_update":  "修改上传策略",
+		"file_picker_select":           "选择服务端路径",
+		"file_picker_denied":           "文件选择拒绝",
 	}
 	if label, ok := labels[action]; ok {
 		return label

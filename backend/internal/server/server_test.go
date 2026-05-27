@@ -383,6 +383,150 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 	}
 }
 
+func TestAdminCanUpdateUploadPolicyWithEmptyBlacklist(t *testing.T) {
+	// 默认黑名单允许被清空；Web 保存后配置热更新，新的上传立即按最新策略判断。
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Auth.DevAllowFixedCode = true
+	cfg.Storage.BlockedExtensions = []string{".exe"}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.SaveAtomic(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	app := NewWithConfigPath(cfg, st, cfgPath)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+
+	policyReq := httptest.NewRequest(http.MethodPut, "/api/config/upload-policy", strings.NewReader(`{"allowedExtensions":[],"blockedExtensions":[]}`))
+	policyReq.Header.Set("Content-Type", "application/json")
+	policyReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	policyResp, err := app.Test(policyReq)
+	if err != nil {
+		t.Fatalf("update upload policy: %v", err)
+	}
+	var policy uploadPolicyResponse
+	decodeJSON(t, policyResp, &policy)
+	if policyResp.StatusCode != http.StatusOK || len(policy.BlockedExtensions) != 0 {
+		t.Fatalf("expected empty blacklist policy, status=%d policy=%+v", policyResp.StatusCode, policy)
+	}
+
+	body, contentType := multipartUploadBody(t, "tool.exe", []byte("ok"))
+	uploadReq := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
+	uploadReq.Header.Set("Content-Type", contentType)
+	uploadReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	uploadResp, err := app.Test(uploadReq)
+	if err != nil {
+		t.Fatalf("upload request: %v", err)
+	}
+	uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected exe upload to follow cleared blacklist, got %d", uploadResp.StatusCode)
+	}
+
+	badReq := httptest.NewRequest(http.MethodPut, "/api/config/upload-policy", strings.NewReader(`{"allowedExtensions":["*"],"blockedExtensions":[]}`))
+	badReq.Header.Set("Content-Type", "application/json")
+	badReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	badResp, err := app.Test(badReq)
+	if err != nil {
+		t.Fatalf("bad policy request: %v", err)
+	}
+	badResp.Body.Close()
+	if badResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected wildcard policy to be rejected, got %d", badResp.StatusCode)
+	}
+}
+
+func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
+	// 文件选择器是管理员路径输入辅助：只列允许根内条目，最终选择仍由后端校验。
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "docs"), 0755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	manualPath := filepath.Join(root, "manual.pdf")
+	if err := osWriteFile(manualPath, []byte("manual")); err != nil {
+		t.Fatalf("write manual: %v", err)
+	}
+	if err := osWriteFile(filepath.Join(root, ".env"), []byte("secret")); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	cfg := testConfig(t.TempDir())
+	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "pick", Name: "可选根", Path: root, AllowSelectFiles: true, AllowSelectDirs: true}}
+	app := New(cfg, st)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&pageSize=10", nil)
+	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	listResp, err := app.Test(listReq)
+	if err != nil {
+		t.Fatalf("list picker: %v", err)
+	}
+	var list filePickerListResponse
+	decodeJSON(t, listResp, &list)
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("picker list status=%d list=%+v", listResp.StatusCode, list)
+	}
+	seenManual := false
+	seenEnv := false
+	seenLinkBlocked := false
+	for _, item := range list.Items {
+		switch item.Name {
+		case "manual.pdf":
+			seenManual = item.Selectable && item.Type == config.ResourceFile
+		case ".env":
+			seenEnv = true
+		case "outside-link":
+			seenLinkBlocked = item.Symlink && !item.Selectable
+		}
+	}
+	if !seenManual || seenEnv || !seenLinkBlocked {
+		t.Fatalf("unexpected picker items: %+v", list.Items)
+	}
+
+	validateReq := httptest.NewRequest(http.MethodPost, "/api/config/file-picker/validate", strings.NewReader(`{"rootId":"pick","path":"/manual.pdf","expectedType":"file"}`))
+	validateReq.Header.Set("Content-Type", "application/json")
+	validateReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	validateResp, err := app.Test(validateReq)
+	if err != nil {
+		t.Fatalf("validate picker: %v", err)
+	}
+	var picked filePickerValidateResponse
+	decodeJSON(t, validateResp, &picked)
+	if validateResp.StatusCode != http.StatusOK || picked.AbsolutePath != manualPath || picked.RelativePath != "manual.pdf" {
+		t.Fatalf("unexpected picker validation: status=%d picked=%+v", validateResp.StatusCode, picked)
+	}
+
+	traversalReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&path=../", nil)
+	traversalReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	traversalResp, err := app.Test(traversalReq)
+	if err != nil {
+		t.Fatalf("traversal picker: %v", err)
+	}
+	traversalResp.Body.Close()
+	if traversalResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected traversal to be rejected, got %d", traversalResp.StatusCode)
+	}
+}
+
 func TestUploadCommitsFinalFileWithReadablePermission(t *testing.T) {
 	// 上传先落临时文件再提交，最终文件仍保持既有 0644 权限，便于同机工具按目录权限读取。
 	root := t.TempDir()

@@ -49,6 +49,49 @@ export interface SafeConfig {
   configWritable: boolean
 }
 
+export interface UploadPolicyPayload {
+  allowedExtensions: string[]
+  blockedExtensions: string[]
+}
+
+export interface FilePickerRoot {
+  id: string
+  name: string
+  allowSelectFiles: boolean
+  allowSelectDirs: boolean
+}
+
+export interface FilePickerItem {
+  name: string
+  path: string
+  type: 'file' | 'directory' | 'symlink' | 'other'
+  size?: number | null
+  modifiedAt?: string
+  hidden: boolean
+  symlink: boolean
+  selectable: boolean
+  readable: boolean
+}
+
+export interface FilePickerListResponse {
+  rootId: string
+  path: string
+  parentPath: string
+  page: number
+  pageSize: number
+  hasMore: boolean
+  items: FilePickerItem[]
+}
+
+export interface FilePickerSelection {
+  valid: boolean
+  rootId: string
+  path: string
+  relativePath: string
+  type: 'file' | 'directory'
+  absolutePath: string
+}
+
 export interface ResourcePayload {
   id: string
   name: string

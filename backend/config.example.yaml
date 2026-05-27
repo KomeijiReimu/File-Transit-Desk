@@ -42,8 +42,8 @@ storage:
   upload_max_files: 20
   # 白名单非空时，只允许这些扩展名；示例： [".zip", ".txt", ".pdf"]。
   allowed_extensions: []
-  # 黑名单优先级高于白名单，危险类型建议显式阻断。
-  blocked_extensions: [".exe", ".bat", ".cmd", ".sh", ".ps1", ".msi"]
+  # 黑名单优先级高于白名单；默认清空，管理员可在 Web 配置管理页按需添加。
+  blocked_extensions: []
   dirs:
     - id: "default"
       name: "Default"
@@ -53,6 +53,21 @@ storage:
       allow_upload: true
   # 管理员也可在前端“配置管理”页维护目录和单文件资源；单文件资源只允许下载。
   shares: []
+file_picker:
+  # 文件选择器只用于管理员在 Web 配置页辅助选择服务端路径；示例仅开放上传目录，避免误开放系统路径。
+  roots:
+    - id: "uploads"
+      name: "上传目录"
+      path: "./uploads"
+      allow_select_files: true
+      allow_select_dirs: true
+      show_hidden: false
+      follow_symlinks: false
+  # 单页最多返回的条目数；接口会强制裁剪前端传入的 pageSize。
+  max_page_size: 200
+  # 防误选的隐藏名称和模式，过滤在后端执行，不依赖前端隐藏。
+  deny_names: [".git", ".svn", ".hg", ".ssh", ".gnupg", ".kube", "node_modules", "vendor"]
+  deny_patterns: [".env", "*.pem", "*.key", "*.crt", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".upload-*.tmp"]
 tokens:
   default_ttl_seconds: 3600
   # 单个上传令牌的累计上传容量；0 表示不限制。

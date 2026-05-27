@@ -4,17 +4,22 @@ import { ApiError, api } from '@/api'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
+import ServerFilePicker from '@/components/ServerFilePicker.vue'
 import StateBlock from '@/components/StateBlock.vue'
-import type { DirectoryInfo, ResourcePayload, SafeConfig } from '@/types'
+import type { DirectoryInfo, FilePickerSelection, ResourcePayload, SafeConfig, UploadPolicyPayload } from '@/types'
 
 const configData = ref<SafeConfig | null>(null)
 const loading = ref(true)
 const saving = ref(false)
+const policySaving = ref(false)
 const error = ref('')
 const success = ref('')
 const editingId = ref<string | null>(null)
 const pendingDelete = ref<DirectoryInfo | null>(null)
+const pendingUploadPolicy = ref<UploadPolicyPayload | null>(null)
 const deleteError = ref('')
+const policyError = ref('')
+const pickerOpen = ref(false)
 
 const form = reactive<ResourcePayload>({
   id: '',
@@ -23,6 +28,11 @@ const form = reactive<ResourcePayload>({
   path: '',
   allowDownload: true,
   allowUpload: false,
+})
+
+const uploadPolicy = reactive({
+  allowedText: '',
+  blockedText: '',
 })
 
 const resources = computed(() => configData.value?.resources || [])
@@ -49,6 +59,11 @@ function resetForm() {
   Object.assign(form, { id: '', name: '', type: 'directory', path: '', allowDownload: true, allowUpload: false })
 }
 
+function syncUploadPolicy() {
+  uploadPolicy.allowedText = storage.value?.allowedExtensions.join('\n') || ''
+  uploadPolicy.blockedText = storage.value?.blockedExtensions.join('\n') || ''
+}
+
 function editResource(resource: DirectoryInfo) {
   editingId.value = resource.id
   Object.assign(form, {
@@ -68,10 +83,84 @@ async function load() {
   error.value = ''
   try {
     configData.value = await api.safeConfig()
+    syncUploadPolicy()
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '配置加载失败。'
   } finally {
     loading.value = false
+  }
+}
+
+function parseExtensions(text: string) {
+  const values = text.split(/[\s,，;；]+/).map((item) => item.trim()).filter(Boolean)
+  const normalized: string[] = []
+  const seen = new Set<string>()
+  for (const raw of values) {
+    let ext = raw.toLowerCase()
+    if (ext === '*') throw new Error('不支持使用 *；白名单留空即可表示允许所有未被黑名单阻断的扩展名。')
+    if (!ext.startsWith('.')) ext = `.${ext}`
+    if (!/^\.[a-z0-9][a-z0-9+_-]{0,31}$/.test(ext)) throw new Error(`扩展名格式不正确：${raw}`)
+    if (!seen.has(ext)) {
+      seen.add(ext)
+      normalized.push(ext)
+    }
+  }
+  return normalized
+}
+
+async function saveUploadPolicy(payload: UploadPolicyPayload) {
+  policySaving.value = true
+  policyError.value = ''
+  success.value = ''
+  try {
+    const saved = await api.updateUploadPolicy(payload)
+    if (configData.value) {
+      configData.value.storage.allowedExtensions = saved.allowedExtensions
+      configData.value.storage.blockedExtensions = saved.blockedExtensions
+    }
+    syncUploadPolicy()
+    success.value = '上传扩展名策略已更新，并已写入配置文件。'
+  } catch (err) {
+    policyError.value = err instanceof ApiError ? err.message : '上传扩展名策略保存失败。'
+  } finally {
+    policySaving.value = false
+    pendingUploadPolicy.value = null
+  }
+}
+
+function submitUploadPolicy() {
+  policyError.value = ''
+  let payload: UploadPolicyPayload
+  try {
+    payload = {
+      allowedExtensions: parseExtensions(uploadPolicy.allowedText),
+      blockedExtensions: parseExtensions(uploadPolicy.blockedText),
+    }
+  } catch (err) {
+    policyError.value = err instanceof Error ? err.message : '扩展名格式不正确。'
+    return
+  }
+  const overlap = payload.allowedExtensions.find((ext) => payload.blockedExtensions.includes(ext))
+  if (overlap) {
+    policyError.value = `${overlap} 不能同时出现在允许和阻断列表。`
+    return
+  }
+  if (!payload.blockedExtensions.length) {
+    pendingUploadPolicy.value = payload
+    return
+  }
+  void saveUploadPolicy(payload)
+}
+
+function handlePick(selection: FilePickerSelection) {
+  form.type = selection.type
+  form.path = selection.absolutePath
+  const leaf = selection.absolutePath.split(/[\\/]/).filter(Boolean).pop() || selection.rootId
+  if (!form.name.trim()) form.name = leaf
+  if (!form.id.trim()) form.id = leaf.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || selection.rootId
+  if (selection.type === 'file') {
+    form.allowDownload = true
+    form.allowUpload = false
   }
 }
 
@@ -166,7 +255,10 @@ onMounted(load)
           </label>
         </div>
         <label>服务端路径
-          <input v-model.trim="form.path" :placeholder="form.type === 'file' ? '/data/manual.pdf' : '/data/photos'" />
+          <div class="path-picker-line">
+            <input v-model.trim="form.path" :placeholder="form.type === 'file' ? '/data/manual.pdf' : '/data/photos'" />
+            <button class="ghost-btn" type="button" @click="pickerOpen = true">浏览</button>
+          </div>
           <small>{{ form.type === 'file' ? '必须是已存在且可读取的具体文件。' : '必须是已存在目录；允许上传时还会校验写入权限。' }}</small>
         </label>
         <div class="permission-row">
@@ -223,6 +315,32 @@ onMounted(load)
       <p class="muted-text">上传扩展名策略：允许 {{ storage?.allowedExtensions.length ? storage.allowedExtensions.join(', ') : '未设置白名单' }}；阻断 {{ storage?.blockedExtensions.join(', ') || '未设置黑名单' }}。</p>
     </section>
 
+    <section v-if="configData" class="panel policy-panel upload-policy-editor">
+      <div class="form-title-row">
+        <div>
+          <h2>上传扩展名策略</h2>
+          <p class="muted-text">白名单留空表示允许所有未被黑名单阻断的扩展名；黑名单优先于白名单。默认黑名单已清空，可按实际需要添加。</p>
+        </div>
+        <button class="mini-btn" type="button" @click="uploadPolicy.allowedText = ''; uploadPolicy.blockedText = ''">清空策略</button>
+      </div>
+      <div v-if="policyError" class="alert error">{{ policyError }}</div>
+      <div class="inline-fields">
+        <label>允许扩展名白名单
+          <textarea v-model="uploadPolicy.allowedText" rows="5" placeholder="例如：&#10;.pdf&#10;.zip&#10;.jpg" />
+          <small>留空表示不限制允许类型；只填写扩展名，不填写文件名。</small>
+        </label>
+        <label>阻断扩展名黑名单
+          <textarea v-model="uploadPolicy.blockedText" rows="5" placeholder="例如：&#10;.exe&#10;.sh&#10;.ps1" />
+          <small>当前默认不预置阻断项；如需收紧上传策略，可在这里添加危险扩展名。</small>
+        </label>
+      </div>
+      <button class="primary-btn" type="button" :disabled="policySaving || !configData.configWritable" @click="submitUploadPolicy">
+        {{ policySaving ? '保存中…' : '保存上传策略' }}
+      </button>
+    </section>
+
+    <ServerFilePicker v-model:open="pickerOpen" :mode="form.type === 'file' ? 'file' : 'directory'" @confirm="handlePick" />
+
     <ConfirmDialog
       :open="Boolean(pendingDelete)"
       title="删除共享资源？"
@@ -233,6 +351,17 @@ onMounted(load)
       confirm-label="删除资源"
       @confirm="confirmDelete"
       @cancel="pendingDelete = null"
+    />
+
+    <ConfirmDialog
+      :open="Boolean(pendingUploadPolicy)"
+      title="确认清空阻断黑名单？"
+      message="清空后，上传扩展名将只受白名单限制；如果白名单也为空，所有扩展名都会被允许上传。"
+      detail="这不会处理已经上传的文件，只会影响之后的新上传和公开上传令牌。"
+      :loading="policySaving"
+      confirm-label="确认保存"
+      @confirm="pendingUploadPolicy && saveUploadPolicy(pendingUploadPolicy)"
+      @cancel="pendingUploadPolicy = null"
     />
   </section>
 </template>

@@ -12,15 +12,16 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Database  DatabaseConfig  `yaml:"database"`
-	Auth      AuthConfig      `yaml:"auth"`
-	Downloads DownloadsConfig `yaml:"downloads"`
-	Web       WebConfig       `yaml:"web"`
-	CORS      CORSConfig      `yaml:"cors"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Tokens    TokensConfig    `yaml:"tokens"`
-	Audit     AuditConfig     `yaml:"audit"`
+	Server     ServerConfig     `yaml:"server"`
+	Database   DatabaseConfig   `yaml:"database"`
+	Auth       AuthConfig       `yaml:"auth"`
+	Downloads  DownloadsConfig  `yaml:"downloads"`
+	Web        WebConfig        `yaml:"web"`
+	CORS       CORSConfig       `yaml:"cors"`
+	Storage    StorageConfig    `yaml:"storage"`
+	FilePicker FilePickerConfig `yaml:"file_picker"`
+	Tokens     TokensConfig     `yaml:"tokens"`
+	Audit      AuditConfig      `yaml:"audit"`
 }
 
 type ServerConfig struct {
@@ -72,6 +73,23 @@ type StorageConfig struct {
 	Shares            []Dir    `yaml:"shares,omitempty"`
 }
 
+type FilePickerConfig struct {
+	Roots        []FilePickerRoot `yaml:"roots"`
+	MaxPageSize  int              `yaml:"max_page_size"`
+	DenyNames    []string         `yaml:"deny_names"`
+	DenyPatterns []string         `yaml:"deny_patterns"`
+}
+
+type FilePickerRoot struct {
+	ID               string `yaml:"id" json:"id"`
+	Name             string `yaml:"name" json:"name"`
+	Path             string `yaml:"path" json:"path"`
+	AllowSelectFiles bool   `yaml:"allow_select_files" json:"allowSelectFiles"`
+	AllowSelectDirs  bool   `yaml:"allow_select_dirs" json:"allowSelectDirs"`
+	ShowHidden       bool   `yaml:"show_hidden" json:"showHidden"`
+	FollowSymlinks   bool   `yaml:"follow_symlinks" json:"followSymlinks"`
+}
+
 type TokensConfig struct {
 	DefaultTTLSeconds int64 `yaml:"default_ttl_seconds"`
 	UploadMaxMB       int   `yaml:"upload_max_mb"`
@@ -113,9 +131,8 @@ func Load(path string) (*Config, error) {
 }
 
 func SaveAtomic(path string, c *Config) error {
-	next := c.Clone()
-	next.normalize()
-	if err := next.validate(); err != nil {
+	next, err := c.NormalizedClone()
+	if err != nil {
 		return err
 	}
 	b, err := yaml.Marshal(next)
@@ -133,6 +150,15 @@ func SaveAtomic(path string, c *Config) error {
 		}
 	}
 	return writeFileAtomic(path, b, 0600)
+}
+
+func (c *Config) NormalizedClone() (*Config, error) {
+	next := c.Clone()
+	next.normalize()
+	if err := next.validate(); err != nil {
+		return nil, err
+	}
+	return next, nil
 }
 
 func writeFileAtomic(path string, content []byte, perm os.FileMode) error {
@@ -197,6 +223,9 @@ func Default() *Config {
 	c.Storage.UploadMaxMB = 512
 	c.Storage.UploadMaxFileMB = 512
 	c.Storage.UploadMaxFiles = 20
+	c.FilePicker.MaxPageSize = 200
+	c.FilePicker.DenyNames = []string{".git", ".svn", ".hg", ".ssh", ".gnupg", ".kube", "node_modules", "vendor"}
+	c.FilePicker.DenyPatterns = []string{".env", "*.pem", "*.key", "*.crt", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".upload-*.tmp"}
 	c.Tokens.DefaultTTLSeconds = 3600
 	c.Tokens.UploadMaxMB = 1024
 	c.Audit.Retain = 1000
@@ -249,6 +278,12 @@ func (c *Config) normalize() {
 	c.Storage.BlockedExtensions = normalizeExtensions(c.Storage.BlockedExtensions)
 	c.Storage.Dirs = normalizeResources(c.Storage.Dirs, ResourceDirectory)
 	c.Storage.Shares = normalizeResources(c.Storage.Shares, "")
+	c.FilePicker.Roots = normalizeFilePickerRoots(c.FilePicker.Roots)
+	if c.FilePicker.MaxPageSize <= 0 {
+		c.FilePicker.MaxPageSize = 200
+	}
+	c.FilePicker.DenyNames = normalizeNames(c.FilePicker.DenyNames)
+	c.FilePicker.DenyPatterns = normalizeNames(c.FilePicker.DenyPatterns)
 	if c.Tokens.DefaultTTLSeconds <= 0 {
 		c.Tokens.DefaultTTLSeconds = 3600
 	}
@@ -294,6 +329,31 @@ func (c *Config) validate() error {
 	}
 	if overlap := intersectExtensions(c.Storage.AllowedExtensions, c.Storage.BlockedExtensions); overlap != "" {
 		return fmt.Errorf("extension %q cannot appear in both storage.allowed_extensions and storage.blocked_extensions", overlap)
+	}
+	if err := validateExtensionList("storage.allowed_extensions", c.Storage.AllowedExtensions); err != nil {
+		return err
+	}
+	if err := validateExtensionList("storage.blocked_extensions", c.Storage.BlockedExtensions); err != nil {
+		return err
+	}
+	if c.FilePicker.MaxPageSize < 1 || c.FilePicker.MaxPageSize > 1000 {
+		return fmt.Errorf("file_picker.max_page_size must be between 1 and 1000")
+	}
+	seenPickerRoots := map[string]struct{}{}
+	for _, root := range c.FilePicker.Roots {
+		if !validResourceID(root.ID) {
+			return fmt.Errorf("file_picker root id %q may only contain letters, numbers, underscore and hyphen", root.ID)
+		}
+		if _, ok := seenPickerRoots[root.ID]; ok {
+			return fmt.Errorf("file_picker contains duplicate root id %q", root.ID)
+		}
+		if strings.TrimSpace(root.Path) == "" {
+			return fmt.Errorf("file_picker root %s path must not be empty", root.ID)
+		}
+		if !root.AllowSelectFiles && !root.AllowSelectDirs {
+			return fmt.Errorf("file_picker root %s must allow selecting files or directories", root.ID)
+		}
+		seenPickerRoots[root.ID] = struct{}{}
 	}
 	if c.Tokens.DefaultTTLSeconds < 60 {
 		return fmt.Errorf("tokens.default_ttl_seconds must be at least 60")
@@ -377,6 +437,37 @@ func normalizeResources(values []Dir, defaultType string) []Dir {
 	return out
 }
 
+func normalizeFilePickerRoots(values []FilePickerRoot) []FilePickerRoot {
+	out := make([]FilePickerRoot, 0, len(values))
+	for _, root := range values {
+		root.ID = strings.TrimSpace(root.ID)
+		root.Name = strings.TrimSpace(root.Name)
+		root.Path = strings.TrimSpace(root.Path)
+		if root.Name == "" {
+			root.Name = root.ID
+		}
+		out = append(out, root)
+	}
+	return out
+}
+
+func normalizeNames(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		name := strings.TrimSpace(strings.ToLower(value))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
 func normalizeResourceType(value, fallback string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "dir" || value == "folder" || value == "" && fallback == ResourceDirectory {
@@ -439,7 +530,7 @@ func normalizeExtensions(values []string) []string {
 		if ext == "" {
 			continue
 		}
-		if ext != "*" && !strings.HasPrefix(ext, ".") {
+		if !strings.HasPrefix(ext, ".") {
 			ext = "." + ext
 		}
 		if _, ok := seen[ext]; ok {
@@ -449,6 +540,28 @@ func normalizeExtensions(values []string) []string {
 		out = append(out, ext)
 	}
 	return out
+}
+
+func validateExtensionList(field string, values []string) error {
+	for _, ext := range values {
+		if !validUploadExtension(ext) {
+			return fmt.Errorf("%s contains invalid extension %q", field, ext)
+		}
+	}
+	return nil
+}
+
+func validUploadExtension(ext string) bool {
+	if len(ext) < 2 || len(ext) > 33 || ext[0] != '.' {
+		return false
+	}
+	for _, r := range ext[1:] {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '+' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func intersectExtensions(left, right []string) string {
