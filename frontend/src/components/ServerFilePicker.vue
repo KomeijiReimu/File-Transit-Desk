@@ -27,8 +27,18 @@ const hasMore = ref(false)
 const loading = ref(false)
 const validating = ref(false)
 const error = ref('')
+const sortValue = ref('name:asc')
 
 const rootOptions = computed(() => roots.value.map((root) => ({ label: root.name, value: root.id })))
+const sortOptions = [
+  { label: '名称 A-Z', value: 'name:asc' },
+  { label: '名称 Z-A', value: 'name:desc' },
+  { label: '类型', value: 'type:asc' },
+  { label: '大小从大到小', value: 'size:desc' },
+  { label: '大小从小到大', value: 'size:asc' },
+  { label: '最新修改', value: 'modifiedAt:desc' },
+  { label: '最早修改', value: 'modifiedAt:asc' },
+]
 const currentRoot = computed(() => roots.value.find((root) => root.id === rootId.value))
 const canSelectCurrentDirectory = computed(() => props.mode === 'directory' && Boolean(currentRoot.value?.allowSelectDirs))
 const breadcrumbs = computed(() => {
@@ -94,9 +104,11 @@ async function loadPath(path: string, nextPage = 1, append = false) {
   loading.value = true
   error.value = ''
   try {
-    const result = await api.filePickerList(rootId.value, path, nextPage, pageSize)
+    const [sort, order] = sortValue.value.split(':')
+    const result = await api.filePickerList(rootId.value, path, nextPage, pageSize, sort, order)
     currentPath.value = result.path || '/'
     parentPath.value = result.parentPath || ''
+    sortValue.value = `${result.sort}:${result.order}`
     page.value = result.page
     hasMore.value = result.hasMore
     items.value = append ? [...items.value, ...result.items] : result.items
@@ -150,6 +162,10 @@ watch(rootId, () => {
   if (props.open && rootId.value) void loadPath('/')
 })
 
+watch(sortValue, () => {
+  if (props.open && rootId.value) void loadPath(currentPath.value || '/')
+})
+
 watch(() => props.open, (open) => {
   if (open && !roots.value.length) void loadRoots()
   else if (open && rootId.value) void loadPath(currentPath.value || '/')
@@ -184,6 +200,9 @@ onBeforeUnmount(() => close())
             <div class="picker-toolbar">
               <label>位置
                 <GlassSelect v-model="rootId" :options="rootOptions" aria-label="选择服务端文件根目录" />
+              </label>
+              <label>排序
+                <GlassSelect v-model="sortValue" :options="sortOptions" aria-label="选择排序方式" />
               </label>
               <div class="picker-actions">
                 <button class="ghost-btn" type="button" :disabled="!parentPath || loading" @click="loadPath(parentPath || '/')">返回上级</button>

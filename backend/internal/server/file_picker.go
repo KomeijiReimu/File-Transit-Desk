@@ -1,13 +1,12 @@
 package server
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -50,6 +49,8 @@ type filePickerListResponse struct {
 	RootID     string              `json:"rootId"`
 	Path       string              `json:"path"`
 	ParentPath string              `json:"parentPath"`
+	Sort       string              `json:"sort"`
+	Order      string              `json:"order"`
 	Page       int                 `json:"page"`
 	PageSize   int                 `json:"pageSize"`
 	HasMore    bool                `json:"hasMore"`
@@ -96,6 +97,8 @@ func (s *Server) filePickerList(c *fiber.Ctx) error {
 	}
 	maxPageSize := s.cfg().FilePicker.MaxPageSize
 	pageSize := clampPositive(c.QueryInt("pageSize", maxPageSize), maxPageSize)
+	sortBy := normalizePickerSort(c.Query("sort", "name"))
+	order := normalizePickerOrder(c.Query("order", "asc"))
 	resolved, err := s.resolvePickerPath(rootID, c.Query("path"))
 	if err != nil {
 		_ = s.store.Audit("file_picker_denied", s.clientIP(c), rootID+":"+c.Query("path"))
@@ -108,11 +111,11 @@ func (s *Server) filePickerList(c *fiber.Ctx) error {
 	if !info.IsDir() {
 		return fiber.NewError(fiber.StatusBadRequest, "只能浏览目录。")
 	}
-	items, hasMore, err := s.readPickerDir(resolved, page, pageSize)
+	items, hasMore, err := s.readPickerDir(resolved, page, pageSize, sortBy, order)
 	if err != nil {
 		return friendlyPathError(err, "目录无法读取，请检查服务端权限。")
 	}
-	return c.JSON(filePickerListResponse{RootID: resolved.root.ID, Path: resolved.virtualPath, ParentPath: pickerParentPath(resolved.virtualPath), Page: page, PageSize: pageSize, HasMore: hasMore, Items: items})
+	return c.JSON(filePickerListResponse{RootID: resolved.root.ID, Path: resolved.virtualPath, ParentPath: pickerParentPath(resolved.virtualPath), Sort: sortBy, Order: order, Page: page, PageSize: pageSize, HasMore: hasMore, Items: items})
 }
 
 func (s *Server) filePickerValidate(c *fiber.Ctx) error {
@@ -150,41 +153,112 @@ func (s *Server) filePickerValidate(c *fiber.Ctx) error {
 	return c.JSON(filePickerValidateResponse{Valid: true, RootID: resolved.root.ID, Path: resolved.virtualPath, RelativePath: resolved.relativePath, Type: pickedType, AbsolutePath: resolved.absolutePath})
 }
 
-func (s *Server) readPickerDir(resolved resolvedPickerPath, page, pageSize int) ([]filePickerItemDTO, bool, error) {
-	dir, err := os.Open(resolved.absolutePath)
+func (s *Server) readPickerDir(resolved resolvedPickerPath, page, pageSize int, sortBy, order string) ([]filePickerItemDTO, bool, error) {
+	entries, err := os.ReadDir(resolved.absolutePath)
 	if err != nil {
 		return nil, false, err
 	}
-	defer dir.Close()
-	start := (page - 1) * pageSize
-	items := make([]filePickerItemDTO, 0, pageSize)
-	accepted := 0
-	for {
-		// 使用流式分批读取，避免像普通文件列表那样一次性把超大目录全部读入内存。
-		entries, err := dir.ReadDir(128)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, false, err
-		}
-		for _, entry := range entries {
-			item, include := s.pickerItem(resolved, entry)
-			if !include {
-				continue
-			}
-			if accepted < start {
-				accepted++
-				continue
-			}
-			if len(items) >= pageSize {
-				return items, true, nil
-			}
-			items = append(items, item)
-			accepted++
-		}
-		if errors.Is(err, io.EOF) {
-			break
+	all := make([]filePickerItemDTO, 0, len(entries))
+	for _, entry := range entries {
+		item, include := s.pickerItem(resolved, entry)
+		if include {
+			all = append(all, item)
 		}
 	}
-	return items, false, nil
+	sortPickerItems(all, sortBy, order)
+	start := (page - 1) * pageSize
+	if start >= len(all) {
+		return []filePickerItemDTO{}, false, nil
+	}
+	end := start + pageSize
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[start:end], end < len(all), nil
+}
+
+func sortPickerItems(items []filePickerItemDTO, sortBy, order string) {
+	desc := order == "desc"
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := items[i], items[j]
+		// 商用文件选择器默认遵循常见系统文件浏览器习惯：目录始终排在文件前面。
+		if leftRank, rightRank := pickerTypeRank(left), pickerTypeRank(right); leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		less := pickerItemLess(left, right, sortBy)
+		if desc {
+			return !less && !pickerItemEqual(left, right, sortBy)
+		}
+		return less
+	})
+}
+
+func pickerItemLess(left, right filePickerItemDTO, sortBy string) bool {
+	switch sortBy {
+	case "type":
+		if pickerTypeRank(left) != pickerTypeRank(right) {
+			return pickerTypeRank(left) < pickerTypeRank(right)
+		}
+	case "size":
+		leftSize, rightSize := pickerSizeValue(left), pickerSizeValue(right)
+		if leftSize != rightSize {
+			return leftSize < rightSize
+		}
+	case "modifiedAt":
+		leftTime, rightTime := pickerTimeValue(left), pickerTimeValue(right)
+		if !leftTime.Equal(rightTime) {
+			return leftTime.Before(rightTime)
+		}
+	}
+	return strings.ToLower(left.Name) < strings.ToLower(right.Name)
+}
+
+func pickerItemEqual(left, right filePickerItemDTO, sortBy string) bool {
+	return !pickerItemLess(left, right, sortBy) && !pickerItemLess(right, left, sortBy)
+}
+
+func pickerTypeRank(item filePickerItemDTO) int {
+	switch item.Type {
+	case config.ResourceDirectory:
+		return 0
+	case config.ResourceFile:
+		return 1
+	case "symlink":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func pickerSizeValue(item filePickerItemDTO) int64 {
+	if item.Size == nil {
+		return -1
+	}
+	return *item.Size
+}
+
+func pickerTimeValue(item filePickerItemDTO) time.Time {
+	value, err := time.Parse(time.RFC3339, item.ModifiedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return value
+}
+
+func normalizePickerSort(value string) string {
+	switch strings.TrimSpace(value) {
+	case "type", "size", "modifiedAt":
+		return strings.TrimSpace(value)
+	default:
+		return "name"
+	}
+}
+
+func normalizePickerOrder(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "desc") {
+		return "desc"
+	}
+	return "asc"
 }
 
 func (s *Server) pickerItem(resolved resolvedPickerPath, entry os.DirEntry) (filePickerItemDTO, bool) {

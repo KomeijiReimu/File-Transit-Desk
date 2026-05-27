@@ -454,8 +454,20 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	defer st.DB.Close()
 	root := t.TempDir()
 	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "alpha"), 0755); err != nil {
+		t.Fatalf("mkdir alpha: %v", err)
+	}
 	if err := os.Mkdir(filepath.Join(root, "docs"), 0755); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "zeta"), 0755); err != nil {
+		t.Fatalf("mkdir zeta: %v", err)
+	}
+	if err := osWriteFile(filepath.Join(root, "a-small.txt"), []byte("a")); err != nil {
+		t.Fatalf("write small: %v", err)
+	}
+	if err := osWriteFile(filepath.Join(root, "b-large.txt"), []byte("large-file")); err != nil {
+		t.Fatalf("write large: %v", err)
 	}
 	manualPath := filepath.Join(root, "manual.pdf")
 	if err := osWriteFile(manualPath, []byte("manual")); err != nil {
@@ -464,9 +476,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	if err := osWriteFile(filepath.Join(root, ".env"), []byte("secret")); err != nil {
 		t.Fatalf("write env: %v", err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
+	symlinkCreated := os.Symlink(outside, filepath.Join(root, "outside-link")) == nil
 	cfg := testConfig(t.TempDir())
 	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "pick", Name: "可选根", Path: root, AllowSelectFiles: true, AllowSelectDirs: true}}
 	app := New(cfg, st)
@@ -487,7 +497,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	}
 	seenManual := false
 	seenEnv := false
-	seenLinkBlocked := false
+	seenLinkBlocked := !symlinkCreated
 	for _, item := range list.Items {
 		switch item.Name {
 		case "manual.pdf":
@@ -500,6 +510,21 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	}
 	if !seenManual || seenEnv || !seenLinkBlocked {
 		t.Fatalf("unexpected picker items: %+v", list.Items)
+	}
+	if len(list.Items) < 6 || list.Items[0].Name != "alpha" || list.Items[1].Name != "docs" || list.Items[2].Name != "zeta" || list.Items[3].Type != config.ResourceFile {
+		t.Fatalf("expected directories first then files by name, got %+v", list.Items)
+	}
+
+	sizeSortReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&pageSize=10&sort=size&order=desc", nil)
+	sizeSortReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	sizeSortResp, err := app.Test(sizeSortReq)
+	if err != nil {
+		t.Fatalf("size sort picker: %v", err)
+	}
+	var sizeList filePickerListResponse
+	decodeJSON(t, sizeSortResp, &sizeList)
+	if sizeSortResp.StatusCode != http.StatusOK || len(sizeList.Items) < 6 || sizeList.Items[0].Type != config.ResourceDirectory || sizeList.Items[3].Name != "b-large.txt" {
+		t.Fatalf("expected directories first and files sorted by size desc, status=%d items=%+v", sizeSortResp.StatusCode, sizeList.Items)
 	}
 
 	validateReq := httptest.NewRequest(http.MethodPost, "/api/config/file-picker/validate", strings.NewReader(`{"rootId":"pick","path":"/manual.pdf","expectedType":"file"}`))

@@ -140,8 +140,8 @@ export const api = {
   updateUploadPolicy: (payload: UploadPolicyPayload) =>
     request<UploadPolicyPayload>('/api/config/upload-policy', { method: 'PUT', body: JSON.stringify(payload) }),
   filePickerRoots: () => request<FilePickerRoot[]>('/api/config/file-picker/roots'),
-  filePickerList: (rootId: string, path = '', page = 1, pageSize = 100) =>
-    request<FilePickerListResponse>(`/api/config/file-picker/list${query({ rootId, path, page, pageSize })}`),
+  filePickerList: (rootId: string, path = '', page = 1, pageSize = 100, sort = 'name', order = 'asc') =>
+    request<FilePickerListResponse>(`/api/config/file-picker/list${query({ rootId, path, page, pageSize, sort, order })}`),
   validateFilePickerSelection: (rootId: string, path: string, expectedType: 'file' | 'directory') =>
     request<FilePickerSelection>('/api/config/file-picker/validate', {
       method: 'POST',

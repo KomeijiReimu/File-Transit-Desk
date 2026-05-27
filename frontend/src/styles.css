@@ -414,7 +414,7 @@ code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; pa
 .picker-header { display: flex; justify-content: space-between; align-items: start; gap: 18px; }
 .picker-header h2 { margin: 0; font-family: "Songti SC", serif; font-size: clamp(24px, 3vw, 34px); }
 .picker-header p { margin: 8px 0 0; color: var(--muted); line-height: 1.6; }
-.picker-toolbar { display: grid; grid-template-columns: minmax(220px, 360px) auto; gap: 14px; align-items: end; }
+.picker-toolbar { display: grid; grid-template-columns: minmax(220px, 1.2fr) minmax(180px, .75fr) auto; gap: 14px; align-items: end; }
 .picker-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .picker-breadcrumbs { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px; border: 1px solid var(--line); border-radius: 18px; background: rgba(0,0,0,.16); }
 .picker-breadcrumbs button { border: 0; color: var(--accent-2); background: rgba(94,224,198,.12); border-radius: 999px; padding: 8px 11px; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -426,7 +426,7 @@ code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; pa
 .picker-list-head { position: sticky; top: 0; z-index: 1; color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; background: rgba(10,13,24,.96); border-bottom: 1px solid var(--line); }
 .picker-row { width: 100%; color: var(--text); border-bottom: 1px solid rgba(255,255,255,.08); transition: background var(--motion); }
 .picker-row:hover { background: rgba(255,255,255,.055); }
-.picker-row[data-muted="true"] { opacity: .58; }
+.picker-row[data-muted="true"] { opacity: .65; }
 .picker-name { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker-icon { flex: 0 0 auto; }
 .picker-row-actions { display: flex; gap: 8px; justify-content: flex-end; }

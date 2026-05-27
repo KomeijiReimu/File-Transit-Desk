@@ -219,7 +219,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `GET /api/config`：返回共享资源、上传策略、令牌策略和下载票据策略摘要。
 - `PUT /api/config/upload-policy`：修改 `storage.allowed_extensions` 与 `storage.blocked_extensions`；后端会统一小写化、补前导点、去重，拒绝 `*`、重叠项和异常字符。
 - `GET /api/config/file-picker/roots`：返回文件选择器入口。未配置 `file_picker.roots` 时，Linux/macOS 返回系统根目录，Windows 返回可用盘符。
-- `GET /api/config/file-picker/list?rootId=uploads&path=/docs&page=1&pageSize=100`：列出目录；路径使用 `/` 分隔的相对路径并分页返回。
+- `GET /api/config/file-picker/list?rootId=uploads&path=/docs&page=1&pageSize=100&sort=name&order=asc`：列出目录；路径使用 `/` 分隔的相对路径并分页返回，默认目录优先，再按名称排序；`sort` 支持 `name/type/size/modifiedAt`。
 - `POST /api/config/file-picker/validate`：最终选择前校验文件或目录，返回可填入现有资源表单的规范化绝对路径。
 - `POST /api/config/resources`：新增目录或单文件资源，请求示例：`{ "id": "manual", "name": "说明文档", "type": "file", "path": "/data/manual.pdf", "allowDownload": true, "allowUpload": false }`。
 - `PUT /api/config/resources/:id`：修改已有资源。资源 ID 作为配置边界，修改时不允许在表单中变更 ID。

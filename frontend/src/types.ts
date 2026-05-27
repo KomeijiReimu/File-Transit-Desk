@@ -77,6 +77,8 @@ export interface FilePickerListResponse {
   rootId: string
   path: string
   parentPath: string
+  sort: 'name' | 'type' | 'size' | 'modifiedAt'
+  order: 'asc' | 'desc'
   page: number
   pageSize: number
   hasMore: boolean
