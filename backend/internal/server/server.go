@@ -153,10 +153,13 @@ func New(cfg *config.Config, st *store.Store) *fiber.App {
 
 func jsonErrorHandler(c *fiber.Ctx, err error) error {
 	code := fiber.StatusInternalServerError
+	message := "服务暂时不可用，请稍后重试。"
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
+		message = e.Message
 	}
-	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+	// 非业务错误不直接回传底层 err.Error，避免文件路径、SQL 或系统细节出现在客户端。
+	return c.Status(code).JSON(fiber.Map{"error": message})
 }
 
 func (s *Server) routes(app *fiber.App) {
@@ -645,12 +648,23 @@ func (s *Server) createLeaseRecord(lease store.DownloadLease) (store.DownloadLea
 	now := time.Now()
 	// 数据库只保存哈希；plain 只返回给本次响应，用于浏览器跳转下载。
 	lease.Hash = hash
-	lease.ExpiresAt = now.Add(s.downloadLeaseTTL())
+	if lease.ExpiresAt.IsZero() {
+		lease.ExpiresAt = now.Add(s.downloadLeaseTTL())
+	}
 	lease.CreatedAt = now
 	if err := s.store.CreateDownloadLease(&lease); err != nil {
 		return lease, "", err
 	}
 	return lease, plain, nil
+}
+
+func publicLeaseExpiry(now time.Time, ttl time.Duration, tokenExpiresAt sql.NullTime) time.Time {
+	// 公开下载票据不应长于公开 token 自身，避免 token 过期后仍留下不可见的下载授权窗口。
+	expiresAt := now.Add(ttl)
+	if tokenExpiresAt.Valid && tokenExpiresAt.Time.Before(expiresAt) {
+		return tokenExpiresAt.Time
+	}
+	return expiresAt
 }
 
 func (s *Server) downloadLeaseTTL() time.Duration {
@@ -761,13 +775,22 @@ func (s *Server) saveUploads(c *fiber.Ctx, dir config.Dir, rel string, files []*
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return uploadResponse{}, err
 	}
-	// 单个文件逐个落盘，任一失败直接返回，已保存文件保留并由审计记录整体上传结果。
+	if err := fsutil.EnsureInside(dir.Path, targetDir); err != nil {
+		_ = s.store.Audit("illegal_access", s.clientIP(c), fmt.Sprintf("目录 %s 上传路径校验失败", dir.ID))
+		return uploadResponse{}, friendlyPathError(err, "上传目录不存在或不可访问。")
+	}
+	// 单个文件逐个落盘，任一失败会清理本请求已保存文件，保证公开令牌回滚时不会留下未计费文件。
 	resp := uploadResponse{OK: true, Files: make([]uploadedFile, 0, len(files))}
+	saved := make([]string, 0, len(files))
 	for _, fh := range files {
 		dst, err := saveFileUniqueAtomic(targetDir, fh)
 		if err != nil {
+			for _, path := range saved {
+				_ = os.Remove(path)
+			}
 			return uploadResponse{}, err
 		}
+		saved = append(saved, dst)
 		name := filepath.Base(dst)
 		relPath := filepath.ToSlash(filepath.Join(safeRel, name))
 		resp.Files = append(resp.Files, uploadedFile{Name: name, Path: relPath, Size: fh.Size})
@@ -781,6 +804,34 @@ func saveFileUniqueAtomic(dir string, fh *multipart.FileHeader) (string, error) 
 	name := fsutil.SafeName(fh.Filename)
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
+	tmp, err := os.CreateTemp(dir, ".upload-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	in, err := fh.Open()
+	if err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	_, copyErr := io.Copy(tmp, in)
+	closeInErr := in.Close()
+	closeOutErr := tmp.Close()
+	if copyErr != nil || closeInErr != nil || closeOutErr != nil {
+		if copyErr != nil {
+			return "", copyErr
+		}
+		if closeInErr != nil {
+			return "", closeInErr
+		}
+		return "", closeOutErr
+	}
+	if err := os.Chmod(tmpName, 0644); err != nil {
+		return "", err
+	}
+
 	for i := 0; ; i++ {
 		candidateName := name
 		if i > 0 {
@@ -788,36 +839,52 @@ func saveFileUniqueAtomic(dir string, fh *multipart.FileHeader) (string, error) 
 			candidateName = fmt.Sprintf("%s-%d%s", stem, i, ext)
 		}
 		dst := filepath.Join(dir, candidateName)
-		// O_EXCL 保证并发上传时只有一个请求能占用同一个目标名。
-		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-		if errors.Is(err, os.ErrExist) {
+		// 先写入一个同目录临时文件，再把同一个临时文件提交到首个可用文件名，避免并发同名大文件重复写入。
+		done, err := commitTempFile(tmpName, dst)
+		if err != nil {
+			return "", err
+		}
+		if !done {
 			continue
-		}
-		if err != nil {
-			return "", err
-		}
-
-		in, err := fh.Open()
-		if err != nil {
-			_ = out.Close()
-			_ = os.Remove(dst)
-			return "", err
-		}
-		_, copyErr := io.Copy(out, in)
-		closeInErr := in.Close()
-		closeOutErr := out.Close()
-		if copyErr != nil || closeInErr != nil || closeOutErr != nil {
-			_ = os.Remove(dst)
-			if copyErr != nil {
-				return "", copyErr
-			}
-			if closeInErr != nil {
-				return "", closeInErr
-			}
-			return "", closeOutErr
 		}
 		return dst, nil
 	}
+}
+
+func commitTempFile(tmpName, dst string) (bool, error) {
+	if err := os.Link(tmpName, dst); err == nil {
+		return true, nil
+	} else if errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	// 某些 Windows、网络盘或受限挂载不支持硬链接；降级为 O_EXCL 复制，仍保证不覆盖已有文件。
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	in, err := os.Open(tmpName)
+	if err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return false, err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeInErr := in.Close()
+	closeOutErr := out.Close()
+	if copyErr != nil || closeInErr != nil || closeOutErr != nil {
+		_ = os.Remove(dst)
+		if copyErr != nil {
+			return false, copyErr
+		}
+		if closeInErr != nil {
+			return false, closeInErr
+		}
+		return false, closeOutErr
+	}
+	return true, nil
 }
 
 func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error) {
@@ -838,10 +905,11 @@ func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error)
 	maxFileBytes := mbToBytes(s.config.Storage.UploadMaxFileMB)
 	maxRequestBytes := mbToBytes(s.config.Storage.UploadMaxMB)
 	for _, fh := range files {
+		safeName := fsutil.SafeName(fh.Filename)
 		if fh.Size > maxFileBytes {
 			return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单个文件不能超过 %d MB", s.config.Storage.UploadMaxFileMB))
 		}
-		if !s.extensionAllowed(fh.Filename) {
+		if !s.extensionAllowed(safeName) {
 			return nil, 0, fiber.NewError(fiber.StatusForbidden, "该文件扩展名不允许上传")
 		}
 		total += fh.Size
@@ -976,7 +1044,7 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 		fullPath, safePath, err = fsutil.Resolve(dir.Path, in.Path)
 	} else {
 		// 上传令牌允许未来创建子目录，但必须确保最近存在父目录没有符号链接逃逸。
-		_, safePath, err = fsutil.ResolveForCreate(dir.Path, in.Path)
+		fullPath, safePath, err = fsutil.ResolveForCreate(dir.Path, in.Path)
 	}
 	if err != nil {
 		if in.Type == "download" {
@@ -992,6 +1060,8 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 		if info.IsDir() {
 			return fiber.NewError(fiber.StatusBadRequest, "下载令牌需要指向具体文件，不能指向目录。")
 		}
+	} else if err := ensureUploadTokenTarget(fullPath); err != nil {
+		return err
 	}
 	plain, hash, err := security.NewToken()
 	if err != nil {
@@ -1008,6 +1078,30 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 	}
 	_ = s.store.Audit("token_create", s.clientIP(c), fmt.Sprintf("创建%s令牌 #%d", tokenTypeLabel(t.Type), t.ID))
 	return c.JSON(fiber.Map{"id": t.ID, "token": plain, "url": publicURL, "infoUrl": base + "/info"})
+}
+
+func ensureUploadTokenTarget(fullPath string) error {
+	if fullPath == "" {
+		return nil
+	}
+	current := fullPath
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			if info.IsDir() {
+				return nil
+			}
+			return fiber.NewError(fiber.StatusBadRequest, "上传令牌需要指向目录，不能指向已存在文件。")
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return friendlyPathError(err, "上传目录不可访问，请确认路径。")
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+		current = parent
+	}
 }
 
 func tokenExpiry(cfg *config.Config, in tokenRequest) sql.NullTime {
@@ -1205,6 +1299,7 @@ func (s *Server) createPublicDownloadLeaseRecord(c *fiber.Ctx) (store.DownloadLe
 		FileSize:   info.Size(),
 		FileMtime:  normalizedFileMtime(info),
 		FileSHA256: fileSHA256,
+		ExpiresAt:  publicLeaseExpiry(time.Now(), s.downloadLeaseTTL(), reserved.ExpiresAt),
 	})
 	if err != nil {
 		_ = s.store.ReleaseTokenUse(reserved.ID, 0)
@@ -1216,6 +1311,13 @@ func (s *Server) createPublicDownloadLeaseRecord(c *fiber.Ctx) (store.DownloadLe
 }
 
 func (s *Server) publicUpload(c *fiber.Ctx) error {
+	// 公开上传先做轻量令牌校验，再解析 multipart，避免无效 token 也能迫使服务端处理大请求体。
+	if _, _, err := s.lookupPublicToken(c, "upload"); err != nil {
+		return err
+	}
+	if contentLength := int64(c.Request().Header.ContentLength()); contentLength > 0 && contentLength > mbToBytes(s.config.Storage.UploadMaxMB) {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单次上传总量不能超过 %d MB", s.config.Storage.UploadMaxMB))
+	}
 	files, totalBytes, err := s.formFiles(c)
 	if err != nil {
 		return err

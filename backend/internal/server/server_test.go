@@ -224,7 +224,36 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
 		t.Fatalf("create user session: %v", err)
 	}
-	body, contentType := multipartUploadBody(t, "bad.exe", []byte("x"))
+	for _, name := range []string{"bad.exe", "bad.exe ", "bad.exe.\t"} {
+		body, contentType := multipartUploadBody(t, name, []byte("x"))
+		req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
+		req.Header.Set("Content-Type", contentType)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("upload request %q: %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected blocked extension %q to be forbidden, got %d", name, resp.StatusCode)
+		}
+	}
+}
+
+func TestUploadCommitsFinalFileWithReadablePermission(t *testing.T) {
+	// 上传先落临时文件再提交，最终文件仍保持既有 0644 权限，便于同机工具按目录权限读取。
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	app := New(cfg, st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	body, contentType := multipartUploadBody(t, "readable.txt", []byte("ok"))
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
 	req.Header.Set("Content-Type", contentType)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
@@ -232,8 +261,16 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload request: %v", err)
 	}
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected blocked extension to be forbidden, got %d", resp.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected upload ok, got %d", resp.StatusCode)
+	}
+	info, err := os.Stat(filepath.Join(root, "readable.txt"))
+	if err != nil {
+		t.Fatalf("stat uploaded file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("expected uploaded file mode 0644, got %v", got)
 	}
 }
 
@@ -270,6 +307,32 @@ func TestFriendlyMissingPathErrors(t *testing.T) {
 		t.Fatalf("missing token path request: %v", err)
 	}
 	assertErrorContains(t, tokenResp, http.StatusNotFound, "下载文件不存在")
+}
+
+func TestUploadTokenRequiresDirectoryWhenPathExists(t *testing.T) {
+	// 上传令牌可以指向未来目录，但如果路径已经是文件，应在创建时友好拒绝，而不是等公开上传时失败。
+	root := t.TempDir()
+	if err := osWriteFile(filepath.Join(root, "file.txt"), []byte("x")); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	app := New(cfg, st)
+	if err := st.CreateSessionWithIdle("admin-sid", time.Now().Add(time.Hour), time.Now().Add(time.Minute), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/tokens", strings.NewReader(`{"type":"upload","dirId":"default","path":"file.txt","ttlMinutes":30,"maxUses":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("upload token request: %v", err)
+	}
+	assertErrorContains(t, resp, http.StatusBadRequest, "上传令牌需要指向目录")
 }
 
 func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
@@ -661,6 +724,40 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 	deletedLeaseResp.Body.Close()
 	if deletedLeaseResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected deleted token lease to be removed, got %d", deletedLeaseResp.StatusCode)
+	}
+}
+
+func TestPublicDownloadLeaseExpiresNoLaterThanToken(t *testing.T) {
+	// 公开 token 的过期时间是对外授权边界，兑换出的下载票据不能比 token 本身活得更久。
+	root := t.TempDir()
+	if err := osWriteFile(filepath.Join(root, "short.txt"), []byte("short")); err != nil {
+		t.Fatalf("write public file: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	cfg.Downloads.LeaseTTLSeconds = 7200
+	app := New(cfg, st)
+	tokenExpiresAt := time.Now().Add(2 * time.Minute)
+	tok := &store.Token{Hash: security.HashToken("short-token"), Type: "download", DirID: "default", Path: "short.txt", MaxUses: 1, ExpiresAt: sqlNullTime(tokenExpiresAt)}
+	if err := st.CreateToken(tok); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/t/short-token/download-lease", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("public lease request: %v", err)
+	}
+	var lease downloadLeaseResponse
+	decodeJSON(t, resp, &lease)
+	if resp.StatusCode != http.StatusOK || lease.URL == "" {
+		t.Fatalf("expected public lease url, status=%d lease=%+v", resp.StatusCode, lease)
+	}
+	if lease.ExpiresAt.After(tokenExpiresAt.Add(time.Second)) {
+		t.Fatalf("expected lease to expire no later than token: lease=%s token=%s", lease.ExpiresAt, tokenExpiresAt)
 	}
 }
 

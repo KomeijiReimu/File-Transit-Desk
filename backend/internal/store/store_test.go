@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -214,6 +215,40 @@ func TestTokenUploadByteQuota(t *testing.T) {
 	}
 	if released.UploadedBytes != 0 || released.Uses != 0 {
 		t.Fatalf("expected rollback to zero, got bytes=%d uses=%d", released.UploadedBytes, released.Uses)
+	}
+}
+
+func TestExpiredTokenCleanupRemovesDownloadLeasesAndSanitizesAudit(t *testing.T) {
+	// 过期 token 清理和审计详情净化都属于长期运行维护能力，避免隐藏授权和脏数据累积。
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	now := time.Now().UTC()
+	token := &Token{Hash: "expired-hash", Type: "download", DirID: "default", Path: "a.txt", MaxUses: 1, ExpiresAt: sql.NullTime{Time: now.Add(-time.Minute), Valid: true}}
+	if err := st.CreateToken(token); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	lease := &DownloadLease{Hash: "lease-hash", Source: "public_token", TokenID: sql.NullInt64{Int64: token.ID, Valid: true}, DirID: "default", Path: "a.txt", FileSize: 1, FileMtime: now, FileSHA256: sql.NullString{String: "", Valid: true}, ExpiresAt: now.Add(time.Hour)}
+	if err := st.CreateDownloadLease(lease); err != nil {
+		t.Fatalf("create lease: %v", err)
+	}
+	if err := st.DeleteExpiredTokens(now); err != nil {
+		t.Fatalf("delete expired tokens: %v", err)
+	}
+	if _, err := st.DownloadLeaseByHash("lease-hash"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected expired token lease to be deleted, got %v", err)
+	}
+	if err := st.Audit("test", "ip", "第一行\n第二行\x00"+strings.Repeat("长", 600)); err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	logs, err := st.AuditLogs(1)
+	if err != nil {
+		t.Fatalf("audit logs: %v", err)
+	}
+	if len(logs) != 1 || len([]rune(logs[0].Detail)) > 501 || logs[0].Detail == "" {
+		t.Fatalf("expected sanitized bounded audit detail, got %+v", logs)
 	}
 }
 

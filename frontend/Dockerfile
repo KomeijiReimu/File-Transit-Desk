@@ -1,7 +1,8 @@
 FROM oven/bun:1-alpine AS build
 WORKDIR /app
-COPY package.json bun.lock* package-lock.json* ./
-RUN bun install --frozen-lockfile || bun install
+COPY package.json bun.lock ./
+# 生产镜像必须使用锁文件安装，避免构建时悄悄解析出与仓库不一致的依赖版本。
+RUN bun install --frozen-lockfile
 COPY . .
 RUN bun run build
 

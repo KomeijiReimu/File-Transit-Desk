@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -357,8 +358,19 @@ func (s *Store) TouchDownloadLease(hash string, now time.Time) error {
 }
 
 func (s *Store) DeleteExpiredTokens(now time.Time) error {
-	_, err := s.DB.Exec(`DELETE FROM tokens WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, now)
-	return err
+	// 过期公开 token 被清理时，同步删除关联下载票据，避免管理端看不到 token 但旧票据仍可使用。
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM download_leases WHERE token_id IN (SELECT id FROM tokens WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?))`, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM tokens WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Audit(action, ip, detail string) error {
@@ -366,7 +378,7 @@ func (s *Store) Audit(action, ip, detail string) error {
 		`INSERT INTO audit_logs(action, ip, detail, created_at) VALUES(?, ?, ?, ?)`,
 		action,
 		ip,
-		detail,
+		sanitizeAuditDetail(detail),
 		time.Now(),
 	)
 	if err != nil {
@@ -380,6 +392,23 @@ func (s *Store) Audit(action, ip, detail string) error {
 		)
 	}
 	return err
+}
+
+func sanitizeAuditDetail(detail string) string {
+	// 审计详情用于管理端排障，不需要保存超长输入或控制字符，避免日志展示异常和无意泄露大段请求内容。
+	detail = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, detail)
+	detail = strings.TrimSpace(detail)
+	const maxRunes = 500
+	runes := []rune(detail)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return detail
 }
 
 func (s *Store) CreateToken(t *Token) error {

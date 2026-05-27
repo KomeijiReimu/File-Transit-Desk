@@ -14,7 +14,7 @@ auth:
   session_ttl_seconds: 86400
   # 用户无活动超过该时间后视为空闲过期；前端只在可见且有操作时发送心跳续期。
   idle_timeout_seconds: 180
-  # 给页面切换、网络抖动等场景预留的宽限配置，当前用于文档化部署策略。
+  # 心跳恢复宽限期；普通 API 不使用宽限，只有 heartbeat 可在短暂超时后续期。
   idle_grace_seconds: 30
   cookie_secure: false
   admin:

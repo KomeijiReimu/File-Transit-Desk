@@ -34,6 +34,37 @@ func TestResolveAllowsInside(t *testing.T) {
 	}
 }
 
+func TestListHidesUploadTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".upload-abc.tmp"), []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "done.txt"), []byte("ok"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := List(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "done.txt" {
+		t.Fatalf("expected only committed file, got %+v", entries)
+	}
+}
+
+func TestSafeNameTrimsWindowsEquivalentSuffixes(t *testing.T) {
+	// 扩展名策略使用 SafeName 后的结果，尾随空格和点必须先被规范化，避免 bad.exe 这类名称绕过黑名单。
+	cases := map[string]string{
+		"bad.exe ":   "bad.exe",
+		"bad.ps1.\t": "bad.ps1",
+		"\t. ":       "file",
+	}
+	for input, want := range cases {
+		if got := SafeName(input); got != want {
+			t.Fatalf("SafeName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestResolveBlocksSymlinkEscape(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink permissions vary on Windows")

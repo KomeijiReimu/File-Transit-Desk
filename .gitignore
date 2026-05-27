@@ -31,4 +31,6 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 *.local
+__pycache__/
+*.py[cod]
 .DS_Store

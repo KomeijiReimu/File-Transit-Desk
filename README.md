@@ -138,7 +138,6 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 
 ```bash
 cd backend
-go mod tidy
 go run ./cmd/server -config config.yaml
 ```
 
@@ -226,7 +225,7 @@ cd frontend
 bun run dev -- --port 5174
 ```
 
-如果前端端口不是 `5173`，请同步修改 `backend/config.yaml` 的 `cors.allow_origins`，否则 Cookie 登录请求会被浏览器 CORS 策略拦截：
+如果仍然通过 Vite 开发代理访问前端，只改前端端口通常不需要修改后端 CORS；代理会把请求转发为后端同源。只有前端直接跨域请求后端时，才需要同步修改 `backend/config.yaml` 的 `cors.allow_origins`：
 
 ```yaml
 cors:
@@ -379,6 +378,7 @@ downloads:
 
 - `session_ttl_seconds` 是登录态绝对最长有效期。
 - `idle_timeout_seconds` 是页面无活动后的空闲过期时间；前端只在页面可见且用户有操作时发送心跳续期。
+- `idle_grace_seconds` 是心跳恢复宽限期；普通业务请求不会使用宽限期，只有 `/api/auth/heartbeat` 可在短暂超时后恢复会话。
 - `downloads.lease_ttl_seconds` 是下载票据有效期。用户点击下载时先兑换票据，文件传输和 HTTP Range 断点续传使用票据地址，不依赖页面会话继续在线。
 - `downloads.content_hash_max_mb` 控制下载票据内容哈希阈值。默认对 64 MiB 及以下文件记录 SHA-256 并在票据下载前复核；设为 `0` 可对所有文件启用内容哈希，但大文件创建票据和每次 Range 续传前都会读取完整文件。
 - 公开下载令牌在兑换票据时消耗一次 `uses`，同一票据的 Range 续传不会重复扣次数。
@@ -397,6 +397,8 @@ downloads:
 - `storage.blocked_extensions`：扩展名黑名单，优先级高于白名单；
 - `tokens.upload_max_mb`：单个上传令牌累计上传容量，`0` 表示不限制。
 
+上传文件名会先规范化再做扩展名判断，尾随空格、尾随点和控制字符不会绕过黑名单。文件会先写入同目录临时文件，完整写入后再提交为最终文件名；如果同一次多文件上传中途失败，本次已保存文件会被清理，公开上传令牌的次数和容量也会回滚。
+
 ## 安全设计
 
 - TOTP Secret 只保存在后端配置中，不会发送到前端。
@@ -408,7 +410,7 @@ downloads:
 - 文件路径拒绝绝对路径、NUL 字符和任何 `..` 段，并做符号链接逃逸防护。
 - 登录下载和公开下载都会显式检查目标存在且不是目录。
 - 公开令牌信息接口只返回有效令牌的有限元数据；过期、撤销、耗尽、上传容量耗尽的令牌只返回失效原因。
-- 上传采用原子创建避免并发同名覆盖，并受数量、大小、扩展名和令牌累计容量限制。
+- 上传采用临时文件完整写入后提交，避免半成品以最终文件名可见；同时受数量、大小、扩展名和令牌累计容量限制。
 - 审计和登录限速默认使用连接 IP；部署在可信反向代理后可启用 `server.trust_proxy_headers` 获取真实客户端 IP。
 - 普通用户获取目录列表时不会返回服务端真实目录路径；管理员配置概览仍可看到目录根路径。
 

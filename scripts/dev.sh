@@ -75,8 +75,8 @@ wait_for_backend() {
     if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
       wait "${BACKEND_PID}"
     fi
-    # 这里只检查 TCP 端口是否可连接，避免额外依赖 curl；后端监听后 /api/health 会立即可用。
-    if (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
+    # 通过 bash 内置 TCP 发送真实健康检查请求，避免端口被旧进程占用时误判为本项目后端就绪。
+    if (exec 3<>"/dev/tcp/${host}/${port}" && printf 'GET /api/health HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "${host}" >&3 && IFS= read -r -t 1 line <&3 && [[ "${line}" == *" 200 "* ]]) >/dev/null 2>&1; then
       exec 3>&- 3<&- || true
       return
     fi

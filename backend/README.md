@@ -23,7 +23,6 @@ pwsh -File scripts/dev.ps1
 ```bash
 cp config.example.yaml config.yaml
 # 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs 等配置
-go mod tidy
 go run ./cmd/server -config config.yaml
 ```
 
@@ -57,7 +56,7 @@ go run ./cmd/server -config config.yaml
 - `auth.dev_allow_fixed_code`：本地开发固定码开关，默认关闭。
 - `auth.session_ttl_seconds`：会话绝对最长有效期。
 - `auth.idle_timeout_seconds`：空闲过期时间；前端不活跃或页面隐藏超过该时间后，后续 API 会返回 401。
-- `auth.idle_grace_seconds`：空闲策略宽限配置，用于部署策略说明和后续兼容。
+- `auth.idle_grace_seconds`：心跳恢复宽限期；普通业务请求不会使用宽限期，只有 `/api/auth/heartbeat` 可在短暂超时后恢复会话。
 - `auth.cookie_secure`：HTTPS 下启用安全 Cookie。
 - `downloads.lease_ttl_seconds`：下载票据默认有效期，点击下载或公开分享下载时兑换。
 - `downloads.lease_max_ttl_seconds`：下载票据最大有效期上限，防止误配置过长。

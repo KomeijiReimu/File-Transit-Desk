@@ -81,7 +81,7 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1 -BackendPort 9000 -FrontendPort 5174
 ```
 
-前端端口变化后，需要同步更新后端 `cors.allow_origins`，例如加入 `http://localhost:5174`。
+如果仍然经由 Vite 代理访问前端，只改前端端口通常不需要同步更新后端 `cors.allow_origins`；只有前端直接跨域请求后端时，才需要把对应来源加入后端配置。
 
 ## 构建与部署
 
@@ -98,7 +98,7 @@ docker build -t file-trans-frontend .
 docker run --rm -p 8081:80 file-trans-frontend
 ```
 
-镜像基于 `oven/bun:1-alpine` 完成依赖安装与生产构建，再用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:17878`。nginx 已将上传请求体上限设为 `1g`，避免默认 1MiB 限制影响文件上传。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。
+镜像基于 `oven/bun:1-alpine` 使用 `bun install --frozen-lockfile` 完成可复现依赖安装与生产构建，再用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:17878`。nginx 已将上传请求体上限设为 `1g`，避免默认 1MiB 限制影响文件上传；如果后端上传上限调大，需要同步调整 `nginx.conf`。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。
 
 ## 接口约定
 

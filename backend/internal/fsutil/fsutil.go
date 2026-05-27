@@ -29,7 +29,8 @@ func SafeName(name string) string {
 		}
 		return r
 	}, name)
-	name = strings.TrimSpace(name)
+	// Windows 和部分文件系统会忽略尾随空格/点，先规范化再做扩展名校验，避免 bad.exe 之类绕过。
+	name = strings.TrimRight(strings.TrimSpace(name), ". ")
 	if name == "" || name == "." || name == ".." {
 		return "file"
 	}
@@ -93,6 +94,15 @@ func ResolveForCreate(base, rel string) (string, string, error) {
 	return full, safeRel, nil
 }
 
+func EnsureInside(base, target string) error {
+	baseReal, err := realBase(base)
+	if err != nil {
+		return err
+	}
+	// 创建目录之后再次解析真实路径，缩小“检查后被替换为符号链接”的竞态窗口。
+	return ensureRealPathInside(baseReal, target)
+}
+
 func List(base, rel string) ([]Entry, error) {
 	full, safeRel, err := Resolve(base, rel)
 	if err != nil {
@@ -104,6 +114,10 @@ func List(base, rel string) ([]Entry, error) {
 	}
 	out := make([]Entry, 0, len(infos))
 	for _, de := range infos {
+		if strings.HasPrefix(de.Name(), ".upload-") && strings.HasSuffix(de.Name(), ".tmp") {
+			// 上传临时文件不属于已提交文件，避免长上传期间被列表或下载入口提前暴露。
+			continue
+		}
 		info, err := de.Info()
 		if err != nil {
 			return nil, err
