@@ -54,7 +54,7 @@ storage:
   # 管理员也可在前端“配置管理”页维护目录和单文件资源；单文件资源只允许下载。
   shares: []
 file_picker:
-  # 文件选择器只用于管理员在 Web 配置页辅助选择服务端路径；示例仅开放上传目录，避免误开放系统路径。
+  # 文件选择器默认提供系统入口；roots 仅作为常用位置快捷方式。
   roots:
     - id: "uploads"
       name: "上传目录"
@@ -65,9 +65,8 @@ file_picker:
       follow_symlinks: false
   # 单页最多返回的条目数；接口会强制裁剪前端传入的 pageSize。
   max_page_size: 200
-  # 防误选的隐藏名称和模式，过滤在后端执行，不依赖前端隐藏。
-  deny_names: [".git", ".svn", ".hg", ".ssh", ".gnupg", ".kube", "node_modules", "vendor"]
-  deny_patterns: [".env", "*.pem", "*.key", "*.crt", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".upload-*.tmp"]
+  deny_names: []
+  deny_patterns: []
 tokens:
   default_ttl_seconds: 3600
   # 单个上传令牌的累计上传容量；0 表示不限制。

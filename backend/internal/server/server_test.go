@@ -527,6 +527,44 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	}
 }
 
+func TestAdminFilePickerProvidesSystemRootWithoutConfiguredRoots(t *testing.T) {
+	// 文件选择器默认给管理员提供系统入口；配置 roots 只是常用位置快捷方式。
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(t.TempDir())
+	cfg.FilePicker.Roots = nil
+	app := New(cfg, st)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+
+	rootsReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/roots", nil)
+	rootsReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	rootsResp, err := app.Test(rootsReq)
+	if err != nil {
+		t.Fatalf("roots request: %v", err)
+	}
+	var roots []filePickerRootDTO
+	decodeJSON(t, rootsResp, &roots)
+	if rootsResp.StatusCode != http.StatusOK || len(roots) == 0 {
+		t.Fatalf("expected built-in picker roots, status=%d roots=%+v", rootsResp.StatusCode, roots)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId="+url.QueryEscape(roots[0].ID)+"&pageSize=1", nil)
+	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	listResp, err := app.Test(listReq)
+	if err != nil {
+		t.Fatalf("list built-in root: %v", err)
+	}
+	listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected built-in root to be browsable, got %d", listResp.StatusCode)
+	}
+}
+
 func TestUploadCommitsFinalFileWithReadablePermission(t *testing.T) {
 	// 上传先落临时文件再提交，最终文件仍保持既有 0644 权限，便于同机工具按目录权限读取。
 	root := t.TempDir()

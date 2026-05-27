@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -79,9 +80,9 @@ type resolvedPickerPath struct {
 }
 
 func (s *Server) filePickerRoots(c *fiber.Ctx) error {
-	cfg := s.cfg()
-	out := make([]filePickerRootDTO, 0, len(cfg.FilePicker.Roots))
-	for _, root := range cfg.FilePicker.Roots {
+	roots := s.filePickerRootsForRuntime()
+	out := make([]filePickerRootDTO, 0, len(roots))
+	for _, root := range roots {
 		out = append(out, filePickerRootDTO{ID: root.ID, Name: root.Name, AllowSelectFiles: root.AllowSelectFiles, AllowSelectDirs: root.AllowSelectDirs})
 	}
 	return c.JSON(out)
@@ -224,7 +225,7 @@ func (s *Server) pickerItem(resolved resolvedPickerPath, entry os.DirEntry) (fil
 			modifiedAt = targetInfo.ModTime().Format(time.RFC3339)
 		}
 	}
-	selectable := readable && !symlink && (itemType == config.ResourceFile && resolved.root.AllowSelectFiles || itemType == config.ResourceDirectory && resolved.root.AllowSelectDirs)
+	selectable := readable && (!symlink || resolved.root.FollowSymlinks) && (itemType == config.ResourceFile && resolved.root.AllowSelectFiles || itemType == config.ResourceDirectory && resolved.root.AllowSelectDirs)
 	return filePickerItemDTO{Name: name, Path: "/" + rel, Type: itemType, Size: size, ModifiedAt: modifiedAt, Hidden: hidden, Symlink: symlink, Selectable: selectable, Readable: readable}, true
 }
 
@@ -244,9 +245,6 @@ func (s *Server) resolvePickerPath(rootID, virtualPath string) (resolvedPickerPa
 	rootReal, err = filepath.Abs(rootReal)
 	if err != nil {
 		return resolvedPickerPath{}, err
-	}
-	if isDangerousRoot(rootReal) {
-		return resolvedPickerPath{}, fiber.NewError(fiber.StatusBadRequest, "文件选择器根目录不能是系统根目录或关键系统目录。")
 	}
 	rel, err := cleanPickerVirtualPath(virtualPath)
 	if err != nil {
@@ -274,12 +272,42 @@ func (s *Server) resolvePickerPath(rootID, virtualPath string) (resolvedPickerPa
 }
 
 func (s *Server) filePickerRoot(id string) (config.FilePickerRoot, bool) {
-	for _, root := range s.cfg().FilePicker.Roots {
+	for _, root := range s.filePickerRootsForRuntime() {
 		if root.ID == id {
 			return root, true
 		}
 	}
 	return config.FilePickerRoot{}, false
+}
+
+func (s *Server) filePickerRootsForRuntime() []config.FilePickerRoot {
+	// 系统入口是管理员快速选路径的主入口；配置中的 roots 只作为常用位置快捷方式。
+	roots := systemPickerRoots()
+	seen := map[string]struct{}{}
+	for _, root := range roots {
+		seen[root.ID] = struct{}{}
+	}
+	for _, root := range s.cfg().FilePicker.Roots {
+		if _, ok := seen[root.ID]; ok {
+			continue
+		}
+		roots = append(roots, root)
+	}
+	return roots
+}
+
+func systemPickerRoots() []config.FilePickerRoot {
+	if runtime.GOOS == "windows" {
+		roots := make([]config.FilePickerRoot, 0, 26)
+		for drive := 'C'; drive <= 'Z'; drive++ {
+			path := string(drive) + `:\`
+			if _, err := os.Stat(path); err == nil {
+				roots = append(roots, config.FilePickerRoot{ID: "drive_" + strings.ToLower(string(drive)), Name: path, Path: path, AllowSelectFiles: true, AllowSelectDirs: true, ShowHidden: true, FollowSymlinks: true})
+			}
+		}
+		return roots
+	}
+	return []config.FilePickerRoot{{ID: "system_root", Name: "系统根目录", Path: string(os.PathSeparator), AllowSelectFiles: true, AllowSelectDirs: true, ShowHidden: true, FollowSymlinks: true}}
 }
 
 func cleanPickerVirtualPath(input string) (string, error) {
@@ -292,7 +320,7 @@ func cleanPickerVirtualPath(input string) (string, error) {
 			return "", fiber.NewError(fiber.StatusBadRequest, "路径包含非法控制字符。")
 		}
 	}
-	if strings.Contains(input, "\\") || strings.HasPrefix(input, "//") || hasWindowsDrivePrefix(input) {
+	if strings.Contains(input, "\\") || strings.HasPrefix(input, "//") {
 		return "", fiber.NewError(fiber.StatusBadRequest, "文件选择器路径只能使用根内的 / 分隔相对路径。")
 	}
 	for _, part := range strings.Split(strings.Trim(input, "/"), "/") {
@@ -309,10 +337,6 @@ func cleanPickerVirtualPath(input string) (string, error) {
 		return "", fiber.NewError(fiber.StatusBadRequest, "路径不能包含上级目录跳转。")
 	}
 	return rel, nil
-}
-
-func hasWindowsDrivePrefix(value string) bool {
-	return len(value) >= 2 && value[1] == ':' && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z'))
 }
 
 func ensurePathInside(baseReal, target string) error {

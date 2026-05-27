@@ -28,7 +28,7 @@ const loading = ref(false)
 const validating = ref(false)
 const error = ref('')
 
-const rootOptions = computed(() => roots.value.map((root) => ({ label: root.name, value: root.id, hint: root.id })))
+const rootOptions = computed(() => roots.value.map((root) => ({ label: root.name, value: root.id })))
 const currentRoot = computed(() => roots.value.find((root) => root.id === rootId.value))
 const canSelectCurrentDirectory = computed(() => props.mode === 'directory' && Boolean(currentRoot.value?.allowSelectDirs))
 const breadcrumbs = computed(() => {
@@ -108,7 +108,7 @@ async function loadPath(path: string, nextPage = 1, append = false) {
 }
 
 function enter(item: FilePickerItem) {
-  if (item.type === 'directory' && item.readable && !item.symlink) {
+  if (item.type === 'directory' && item.readable) {
     void loadPath(item.path)
   }
 }
@@ -172,18 +172,17 @@ onBeforeUnmount(() => close())
             <div>
               <p class="eyebrow">Server picker</p>
               <h2 id="server-file-picker-title">选择服务端{{ mode === 'file' ? '文件' : '目录' }}</h2>
-              <p>这里浏览的是后端进程可访问的服务器路径，不是当前浏览器所在电脑。</p>
             </div>
             <button class="mini-btn" type="button" @click="close">关闭</button>
           </header>
 
           <div v-if="!rootsLoaded && !error" class="state-block"><span class="loader" /> 正在读取可选根目录…</div>
-          <div v-if="rootsLoaded && !roots.length && !error" class="state-block">尚未配置文件选择器根目录，请先在服务端配置文件中设置 file_picker.roots。</div>
+          <div v-if="rootsLoaded && !roots.length && !error" class="state-block">没有可用位置。</div>
           <div v-if="error" class="alert error">{{ error }}</div>
 
           <template v-if="roots.length">
             <div class="picker-toolbar">
-              <label>根目录
+              <label>位置
                 <GlassSelect v-model="rootId" :options="rootOptions" aria-label="选择服务端文件根目录" />
               </label>
               <div class="picker-actions">
@@ -206,7 +205,7 @@ onBeforeUnmount(() => close())
                 <span>{{ formatSize(item.size) }}</span>
                 <span>{{ item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : '—' }}</span>
                 <span class="picker-row-actions">
-                  <button v-if="item.type === 'directory' && !item.symlink" class="mini-btn" type="button" @click.stop="enter(item)">进入</button>
+                  <button v-if="item.type === 'directory'" class="mini-btn" type="button" @click.stop="enter(item)">进入</button>
                   <button class="mini-btn" type="button" :disabled="!item.selectable || item.type !== mode || validating" @click.stop="selectPath(item.path)">选择</button>
                 </span>
               </div>

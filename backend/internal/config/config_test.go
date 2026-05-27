@@ -42,6 +42,9 @@ func TestDefaultUploadBlacklistIsEmpty(t *testing.T) {
 	if len(c.Storage.BlockedExtensions) != 0 {
 		t.Fatalf("expected default blocked extensions to be empty, got %v", c.Storage.BlockedExtensions)
 	}
+	if len(c.FilePicker.DenyNames) != 0 || len(c.FilePicker.DenyPatterns) != 0 {
+		t.Fatalf("expected default file picker filters to be empty, got names=%v patterns=%v", c.FilePicker.DenyNames, c.FilePicker.DenyPatterns)
+	}
 }
 
 func TestConfigValidatesUploadExtensionFormat(t *testing.T) {

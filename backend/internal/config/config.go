@@ -224,8 +224,6 @@ func Default() *Config {
 	c.Storage.UploadMaxFileMB = 512
 	c.Storage.UploadMaxFiles = 20
 	c.FilePicker.MaxPageSize = 200
-	c.FilePicker.DenyNames = []string{".git", ".svn", ".hg", ".ssh", ".gnupg", ".kube", "node_modules", "vendor"}
-	c.FilePicker.DenyPatterns = []string{".env", "*.pem", "*.key", "*.crt", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".upload-*.tmp"}
 	c.Tokens.DefaultTTLSeconds = 3600
 	c.Tokens.UploadMaxMB = 1024
 	c.Audit.Retain = 1000

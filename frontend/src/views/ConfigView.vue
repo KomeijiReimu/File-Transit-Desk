@@ -319,7 +319,7 @@ onMounted(load)
       <div class="form-title-row">
         <div>
           <h2>上传扩展名策略</h2>
-          <p class="muted-text">白名单留空表示允许所有未被黑名单阻断的扩展名；黑名单优先于白名单。默认黑名单已清空，可按实际需要添加。</p>
+          <p class="muted-text">白名单留空表示不限制；黑名单优先。</p>
         </div>
         <button class="mini-btn" type="button" @click="uploadPolicy.allowedText = ''; uploadPolicy.blockedText = ''">清空策略</button>
       </div>
@@ -327,11 +327,9 @@ onMounted(load)
       <div class="inline-fields">
         <label>允许扩展名白名单
           <textarea v-model="uploadPolicy.allowedText" rows="5" placeholder="例如：&#10;.pdf&#10;.zip&#10;.jpg" />
-          <small>留空表示不限制允许类型；只填写扩展名，不填写文件名。</small>
         </label>
         <label>阻断扩展名黑名单
           <textarea v-model="uploadPolicy.blockedText" rows="5" placeholder="例如：&#10;.exe&#10;.sh&#10;.ps1" />
-          <small>当前默认不预置阻断项；如需收紧上传策略，可在这里添加危险扩展名。</small>
         </label>
       </div>
       <button class="primary-btn" type="button" :disabled="policySaving || !configData.configWritable" @click="submitUploadPolicy">
@@ -356,8 +354,7 @@ onMounted(load)
     <ConfirmDialog
       :open="Boolean(pendingUploadPolicy)"
       title="确认清空阻断黑名单？"
-      message="清空后，上传扩展名将只受白名单限制；如果白名单也为空，所有扩展名都会被允许上传。"
-      detail="这不会处理已经上传的文件，只会影响之后的新上传和公开上传令牌。"
+      message="如果白名单也为空，之后的新上传不会按扩展名限制。"
       :loading="policySaving"
       confirm-label="确认保存"
       @confirm="pendingUploadPolicy && saveUploadPolicy(pendingUploadPolicy)"

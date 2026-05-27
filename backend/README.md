@@ -71,8 +71,8 @@ go run ./cmd/server -config config.yaml
 - `storage.allowed_extensions` / `storage.blocked_extensions`：上传扩展名白名单与黑名单；白名单非空时只允许列出的扩展名，黑名单优先拒绝。默认黑名单为空，可由管理员配置管理页按需维护。
 - `storage.dirs`：开放目录资源，含 `type: directory`、`allow_download/allow_upload`，可由管理员“配置管理”页维护。
 - `storage.shares`：单文件共享资源，含 `type: file`，只允许下载；也可由管理员“配置管理”页维护。
-- `file_picker.roots`：管理员服务端文件选择器的可浏览根目录。选择器仅辅助填写共享资源路径，不提供删除、重命名、移动、上传或编辑能力。
-- `file_picker.max_page_size` / `file_picker.deny_names` / `file_picker.deny_patterns`：文件选择器分页上限和后端隐藏规则，用于避免误选敏感文件。
+- `file_picker.roots`：管理员服务端文件选择器的常用位置快捷入口；未配置也会提供系统入口。选择器仅辅助填写共享资源路径，不提供删除、重命名、移动、上传或编辑能力。
+- `file_picker.max_page_size` / `file_picker.deny_names` / `file_picker.deny_patterns`：文件选择器分页上限和可选隐藏规则。
 - `tokens.default_ttl_seconds`：令牌默认有效期。
 - `tokens.upload_max_mb`：单个上传令牌的累计上传容量；`0` 表示不限制。
 - `audit.retain`：审计日志保留条数。
@@ -218,8 +218,8 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 - `GET /api/config`：返回共享资源、上传策略、令牌策略和下载票据策略摘要。
 - `PUT /api/config/upload-policy`：修改 `storage.allowed_extensions` 与 `storage.blocked_extensions`；后端会统一小写化、补前导点、去重，拒绝 `*`、重叠项和异常字符。
-- `GET /api/config/file-picker/roots`：返回管理员可浏览的文件选择器根目录摘要，不面向普通用户。
-- `GET /api/config/file-picker/list?rootId=uploads&path=/docs&page=1&pageSize=100`：列出根内目录；路径使用 `/` 分隔的虚拟相对路径，接口会拒绝 `..`、盘符、UNC 和默认符号链接进入。
+- `GET /api/config/file-picker/roots`：返回文件选择器入口。未配置 `file_picker.roots` 时，Linux/macOS 返回系统根目录，Windows 返回可用盘符。
+- `GET /api/config/file-picker/list?rootId=uploads&path=/docs&page=1&pageSize=100`：列出目录；路径使用 `/` 分隔的相对路径并分页返回。
 - `POST /api/config/file-picker/validate`：最终选择前校验文件或目录，返回可填入现有资源表单的规范化绝对路径。
 - `POST /api/config/resources`：新增目录或单文件资源，请求示例：`{ "id": "manual", "name": "说明文档", "type": "file", "path": "/data/manual.pdf", "allowDownload": true, "allowUpload": false }`。
 - `PUT /api/config/resources/:id`：修改已有资源。资源 ID 作为配置边界，修改时不允许在表单中变更 ID。
@@ -227,7 +227,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 保存资源时后端会校验 ID 字符集、路径是否存在、目录/文件类型是否匹配、读写权限以及危险系统目录；即使路径来自文件选择器，保存资源时也会再次校验。成功后原子写回 `config.yaml`，保留 `config.yaml.bak`，并热更新内存中的资源列表。目录资源写入 `storage.dirs`，单文件资源写入 `storage.shares`。在线保存会重新序列化 YAML，原配置文件注释和手工排版不会保留。
 
-文件选择器根目录建议只配置业务需要共享的挂载路径，不要配置 `/`、`/etc`、`/root`、`C:\Windows` 等系统目录。容器部署时，选择器看到的是容器内路径；若要选择宿主机目录，必须先以卷挂载方式暴露给容器。
+`file_picker.roots` 只是快捷入口，不是唯一选择范围。容器部署时，选择器看到的是容器内路径；若要选择宿主机目录，必须先以卷挂载方式暴露给容器。
 
 ## Docker
 
