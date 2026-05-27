@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -10,6 +11,7 @@ import { buildShareUrl, copyToClipboard, extractShareToken, formatDate } from '@
 
 const tokens = ref<TokenInfo[]>([])
 const dirs = ref<DirectoryInfo[]>([])
+const route = useRoute()
 const loading = ref(true)
 const saving = ref(false)
 const error = ref('')
@@ -20,6 +22,7 @@ const rowCopyId = ref<string | number | null>(null)
 const pendingDelete = ref<TokenInfo | null>(null)
 const deleteError = ref('')
 const deleting = ref(false)
+let appliedInitialQuery = false
 
 const form = reactive({ type: 'download' as 'download' | 'upload', dirId: '', path: '', ttlMinutes: 60, maxUses: 1 })
 const canSubmit = computed(() => form.dirId && form.ttlMinutes > 0 && form.maxUses > 0)
@@ -27,12 +30,15 @@ const typeOptions = [
   { label: '下载令牌', value: 'download', hint: '外部访客领取文件' },
   { label: '上传令牌', value: 'upload', hint: '外部访客提交文件' },
 ]
-const pathPlaceholder = computed(() => form.type === 'download' ? '必填，填写已存在文件路径，例如 sub/file.zip' : '可选，填写接收目录，例如 inbox/，留空为根目录')
-const pathHelp = computed(() => form.type === 'download' ? '下载令牌必须指向已存在的具体文件。' : '上传令牌会把文件保存到此目录，留空则保存到目录根路径。')
-const dirOptions = computed(() => dirs.value.map((dir) => ({
+const selectedDir = computed(() => dirs.value.find((dir) => dir.id === form.dirId))
+const selectedDirIsFile = computed(() => selectedDir.value?.type === 'file')
+const pathPlaceholder = computed(() => selectedDirIsFile.value ? '单文件资源无需填写路径' : form.type === 'download' ? '必填，填写已存在文件路径，例如 sub/file.zip' : '可选，填写接收目录，例如 inbox/，留空为根目录')
+const pathHelp = computed(() => selectedDirIsFile.value ? '该资源已经绑定到一个具体文件，创建下载令牌时无需再填写相对路径。' : form.type === 'download' ? '下载令牌必须指向已存在的具体文件。' : '上传令牌会把文件保存到此目录，留空则保存到目录根路径。')
+const usableDirs = computed(() => dirs.value.filter((dir) => form.type === 'download' ? dir.canDownload !== false && dir.allowDownload !== false : dir.type !== 'file' && Boolean(dir.canUpload || dir.allowUpload)))
+const dirOptions = computed(() => usableDirs.value.map((dir) => ({
   label: dir.label || dir.name,
   value: dir.id,
-  hint: dir.description || dir.root || dir.id,
+  hint: `${dir.type === 'file' ? '单文件' : '目录'} · ${dir.description || dir.root || dir.id}`,
 })))
 
 function tokenType(token: TokenInfo) {
@@ -52,6 +58,8 @@ function tokenStatusLabel(token: TokenInfo) {
     if (token.reason === 'expired') return '已过期'
     if (token.reason === 'exhausted') return '已用尽'
     if (token.reason === 'upload_quota_exhausted') return '容量已满'
+    if (token.reason === 'resource_unavailable') return '资源已移除'
+    if (token.reason === 'permission_disabled') return '权限已关闭'
     return '不可用'
   }
   return '可用'
@@ -76,6 +84,18 @@ const deleteDialogMessage = computed(() => pendingDelete.value && canRevoke(pend
   : '这条令牌已经不可用。删除后只会从管理列表中移除历史记录。')
 const deleteDialogDetail = computed(() => pendingDelete.value ? `${tokenType(pendingDelete.value) === 'upload' ? '上传' : '下载'} · ${pendingDelete.value.dirName || pendingDelete.value.dirId || pendingDelete.value.dir || '未知目录'} · ${pendingDelete.value.path || '/'}` : '')
 
+function applyRouteQuery(force = false) {
+  if (!force && appliedInitialQuery) return
+  const queryType = route.query.type === 'upload' ? 'upload' : route.query.type === 'download' ? 'download' : ''
+  if (queryType) form.type = queryType
+  const queryDir = String(route.query.dirId || '')
+  if (queryDir && usableDirs.value.some((dir) => dir.id === queryDir)) form.dirId = queryDir
+  else if (!form.dirId || !usableDirs.value.some((dir) => dir.id === form.dirId)) form.dirId = usableDirs.value[0]?.id || ''
+  if ('path' in route.query) form.path = String(route.query.path || '')
+  if (selectedDirIsFile.value) form.path = ''
+  appliedInitialQuery = true
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -83,7 +103,7 @@ async function load() {
     const [dirList, tokenList] = await Promise.all([api.dirs(), api.tokens()])
     dirs.value = dirList
     tokens.value = tokenList
-    form.dirId ||= dirList[0]?.id || ''
+    applyRouteQuery(false)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '令牌数据加载失败。'
   } finally {
@@ -100,14 +120,14 @@ async function createToken() {
     error.value = '请填写目录、有效期和最大使用次数。'
     return
   }
-  if (form.type === 'download' && !form.path) {
+  if (form.type === 'download' && !form.path && !selectedDirIsFile.value) {
     // 下载令牌必须绑定具体文件；上传令牌才允许留空表示目录根路径。
     error.value = '下载令牌需要填写具体文件路径，例如 sub/file.zip。'
     return
   }
   saving.value = true
   try {
-    const token = await api.createToken({ ...form })
+    const token = await api.createToken({ ...form, path: selectedDirIsFile.value ? '' : form.path })
     createdToken.value = token.token || extractShareToken(token.url || token.link || '')
     createdLink.value = shareUrlFor(token)
     await load()
@@ -124,6 +144,12 @@ async function copyCreated() {
   copyState.value = ok ? 'ok' : 'err'
   window.setTimeout(() => { copyState.value = 'idle' }, 2200)
 }
+
+watch(() => form.type, () => {
+  if (!usableDirs.value.some((dir) => dir.id === form.dirId)) form.dirId = usableDirs.value[0]?.id || ''
+  if (selectedDirIsFile.value) form.path = ''
+})
+watch(() => route.fullPath, () => applyRouteQuery(true))
 
 async function copyRow(token: TokenInfo) {
   const url = shareUrlFor(token)
@@ -195,7 +221,7 @@ onMounted(load)
           <GlassSelect v-model="form.dirId" :options="dirOptions" aria-label="选择目录" placeholder="选择目录" />
         </label>
         <label>路径
-          <input v-model.trim="form.path" :placeholder="pathPlaceholder" />
+          <input v-model.trim="form.path" :disabled="selectedDirIsFile" :placeholder="pathPlaceholder" />
           <small>{{ pathHelp }}</small>
         </label>
         <div class="inline-fields">

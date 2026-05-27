@@ -7,6 +7,8 @@ import type {
   DirectoryInfo,
   DownloadLeaseResponse,
   ListFilesResponse,
+  ResourcePayload,
+  SafeConfig,
   TokenInfo,
   UserInfo,
 } from '@/types'
@@ -130,6 +132,13 @@ export const api = {
     request<{ ok: boolean }>(`/api/tokens/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
   auditLogs: (filter: AuditFilter = {}) =>
     request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status })}`),
+  safeConfig: () => request<SafeConfig>('/api/config'),
+  createResource: (payload: ResourcePayload) =>
+    request<DirectoryInfo>('/api/config/resources', { method: 'POST', body: JSON.stringify(payload) }),
+  updateResource: (id: string, payload: ResourcePayload) =>
+    request<DirectoryInfo>(`/api/config/resources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteResource: (id: string) =>
+    request<{ ok: boolean }>(`/api/config/resources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // 公开分享接口不带登录态要求，全部依赖 token 或下载票据授权。
   publicTokenInfo: (token: string) =>
     request<TokenInfo>(`/t/${encodeURIComponent(token)}/info`),

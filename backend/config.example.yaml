@@ -47,9 +47,12 @@ storage:
   dirs:
     - id: "default"
       name: "Default"
+      type: "directory"
       path: "./uploads"
       allow_download: true
       allow_upload: true
+  # 管理员也可在前端“配置管理”页维护目录和单文件资源；单文件资源只允许下载。
+  shares: []
 tokens:
   default_ttl_seconds: 3600
   # 单个上传令牌的累计上传容量；0 表示不限制。

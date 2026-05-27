@@ -52,7 +52,7 @@ async function handleLogout() {
           </RouterLink>
           <RouterLink to="/config">
             <span class="nav-ico nav-config" aria-hidden="true" />
-            <span>配置概览</span>
+            <span>配置管理</span>
           </RouterLink>
         </template>
       </nav>

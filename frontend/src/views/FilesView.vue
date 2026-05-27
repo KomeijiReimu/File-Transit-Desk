@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
+import { isAdmin } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
@@ -29,7 +30,19 @@ const dirOptions = computed(() => dirs.value.map((dir) => ({
 })))
 const canUpload = computed(() => responseCanUpload.value ?? Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const canDownload = computed(() => responseCanDownload.value ?? (selectedDir.value ? selectedDir.value.canDownload !== false && selectedDir.value.allowDownload !== false : false))
+const selectedIsFileResource = computed(() => selectedDir.value?.type === 'file')
 const crumbs = computed(() => [{ name: selectedDir.value?.name || '目录', path: '' }, ...currentPath.value.split('/').filter(Boolean).map((part, index, arr) => ({ name: part, path: arr.slice(0, index + 1).join('/') }))])
+
+function tokenQuery(type: 'download' | 'upload', entry?: FileEntry) {
+  const path = entry ? (entry.path || joinPath(currentPath.value, entry.name)) : currentPath.value
+  return { type, dirId: selectedDirId.value, path }
+}
+
+function hasEntryAction(entry: FileEntry) {
+  if (!entryIsDir(entry) && canDownload.value) return true
+  if (isAdmin.value && entryIsDir(entry) && canUpload.value) return true
+  return false
+}
 
 function entryIsDir(entry: FileEntry) {
   return entry.isDir || entry.type === 'dir' || entry.type === 'directory'
@@ -129,6 +142,7 @@ onMounted(loadDirs)
           <p>{{ selectedDir.description || selectedDir.root || '已配置目录' }}</p>
         </div>
         <div class="pill-row">
+          <span class="pill" :class="selectedIsFileResource ? 'ok' : ''">{{ selectedIsFileResource ? '单文件' : '目录' }}</span>
           <span class="pill" :class="canDownload ? 'ok' : 'muted'">{{ canDownload ? '允许下载' : '禁止下载' }}</span>
           <span class="pill" :class="canUpload ? 'ok' : 'muted'">{{ canUpload ? '允许上传' : '禁止上传' }}</span>
         </div>
@@ -142,6 +156,7 @@ onMounted(loadDirs)
         </nav>
         <div class="toolbar-actions">
           <RouterLink v-if="canUpload" class="ghost-btn" :to="{ name: 'upload', query: { dirId: selectedDirId, path: currentPath } }">上传到此处</RouterLink>
+          <RouterLink v-if="isAdmin && canUpload" class="ghost-btn" :to="{ name: 'tokens', query: tokenQuery('upload') }">创建上传分享</RouterLink>
           <button class="ghost-btn" :disabled="!currentPath" @click="currentPath = parentPath(currentPath)">返回上级</button>
         </div>
       </div>
@@ -164,10 +179,14 @@ onMounted(loadDirs)
               <td data-label="大小">{{ entryIsDir(entry) ? '目录' : formatBytes(entry.size) }}</td>
               <td data-label="修改时间">{{ formatDate(entry.modifiedAt || entry.mtime) }}</td>
               <td data-label="操作">
-                <button v-if="!entryIsDir(entry) && canDownload" class="mini-btn" type="button" :disabled="Boolean(downloadingPath)" @click="startDownload(entry)">
-                  {{ downloadingPath === (entry.path || joinPath(currentPath, entry.name)) ? '准备中…' : '下载' }}
-                </button>
-                <span v-else class="muted-text">—</span>
+                <div class="row-actions">
+                  <button v-if="!entryIsDir(entry) && canDownload" class="mini-btn" type="button" :disabled="Boolean(downloadingPath)" @click="startDownload(entry)">
+                    {{ downloadingPath === (entry.path || joinPath(currentPath, entry.name)) ? '准备中…' : '下载' }}
+                  </button>
+                  <RouterLink v-if="isAdmin && !entryIsDir(entry) && canDownload" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('download', entry) }">创建分享</RouterLink>
+                  <RouterLink v-if="isAdmin && entryIsDir(entry) && canUpload" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('upload', entry) }">上传分享</RouterLink>
+                  <span v-if="!hasEntryAction(entry)" class="muted-text">—</span>
+                </div>
               </td>
             </tr>
           </tbody>

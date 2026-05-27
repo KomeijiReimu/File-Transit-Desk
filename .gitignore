@@ -1,5 +1,7 @@
 # 运行数据和本地配置
 backend/config.yaml
+backend/config.yaml.bak
+backend/config/
 backend/data/
 backend/uploads/
 backend/*.db

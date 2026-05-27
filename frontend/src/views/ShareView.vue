@@ -46,6 +46,8 @@ const reasonLabel = computed(() => {
   if (reason === 'expired') return '该分享链接已超过有效期。'
   if (reason === 'exhausted') return '该分享链接已达到使用次数上限。'
   if (reason === 'upload_quota_exhausted') return '该上传链接已达到累计上传容量上限。'
+  if (reason === 'resource_unavailable') return '该分享对应的资源已被移除。'
+  if (reason === 'permission_disabled') return '该分享对应的权限已关闭。'
   return '该分享链接当前不可用。'
 })
 

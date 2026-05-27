@@ -37,7 +37,7 @@
 └── README.md         # 项目总说明、开发、部署和维护文档
 ```
 
-运行数据、本地配置、依赖目录和构建产物不纳入 Git：`backend/config.yaml`、`backend/data/`、`backend/uploads/`、`frontend/node_modules/`、`frontend/dist/` 等均由根 `.gitignore` 排除。
+运行数据、本地配置、依赖目录和构建产物不纳入 Git：`backend/config.yaml`、`backend/config/`、`backend/data/`、`backend/uploads/`、`frontend/node_modules/`、`frontend/dist/` 等均由根 `.gitignore` 排除。
 
 ## 快速开始
 
@@ -63,9 +63,11 @@ storage:
   dirs:
     - id: "default"
       name: "Default"
+      type: "directory"
       path: "./uploads"
       allow_download: true
       allow_upload: true
+  shares: [] # 可选：单文件资源写在这里，或由管理员在配置管理页添加
 
 downloads:
   lease_ttl_seconds: 7200
@@ -73,7 +75,7 @@ downloads:
   content_hash_max_mb: 64
 ```
 
-`session_ttl_seconds` 是登录态绝对最长有效期，`idle_timeout_seconds` 是用户无活动后的空闲过期时间。前端只在页面可见且检测到点击、键盘、滚动、触摸等操作时发送心跳，因此用户离开页面后会在较短时间内变成未登录。下载不直接依赖长期页面会话；点击下载会先创建短期 `download lease`，已开始的下载和同一文件的 Range 续传在票据有效期内继续可用。`content_hash_max_mb` 默认让 64 MiB 及以下文件做 SHA-256 内容绑定；如需所有文件都做内容级校验，可设为 `0`，但大文件下载和续传前会增加完整读盘成本。
+`storage.dirs` 用于目录资源，`storage.shares` 可用于单文件资源；管理员登录后也可以在“配置管理”页新增、修改、删除目录和单文件资源，保存成功后会写回当前启动参数指定的配置文件，并在同目录生成 `.bak` 备份，对新请求立即生效。`session_ttl_seconds` 是登录态绝对最长有效期，`idle_timeout_seconds` 是用户无活动后的空闲过期时间。前端只在页面可见且检测到点击、键盘、滚动、触摸等操作时发送心跳，因此用户离开页面后会在较短时间内变成未登录。下载不直接依赖长期页面会话；点击下载会先创建短期 `download lease`，已开始的下载和同一文件的 Range 续传在票据有效期内继续可用。`content_hash_max_mb` 默认让 64 MiB 及以下文件做 SHA-256 内容绑定；如需所有文件都做内容级校验，可设为 `0`，但大文件下载和续传前会增加完整读盘成本。
 
 生成 TOTP Secret：
 
@@ -294,7 +296,8 @@ rm -rf backend/uploads/*
 | `storage.upload_max_file_mb` | 单个文件大小限制 |
 | `storage.upload_max_files` | 单次请求最多文件数量 |
 | `storage.allowed_extensions` / `storage.blocked_extensions` | 上传扩展名白名单与黑名单 |
-| `storage.dirs` | 开放目录列表及上传/下载权限 |
+| `storage.dirs` | 开放目录资源列表及上传/下载权限，可由管理员配置管理页维护 |
+| `storage.shares` | 单文件共享资源列表，单文件资源只允许下载，可由管理员配置管理页维护 |
 | `tokens.default_ttl_seconds` | 临时令牌默认有效期 |
 | `tokens.upload_max_mb` | 单个上传令牌累计上传容量，`0` 表示不限制 |
 | `audit.retain` | 审计日志保留条数 |
@@ -307,8 +310,9 @@ rm -rf backend/uploads/*
 
 ```bash
 cd backend
-cp config.example.yaml config.yaml
-# 必须修改 auth.totp_secret、auth.admin，并确认 storage.dirs 指向需要开放的目录
+mkdir -p config
+cp config.example.yaml config/config.yaml
+# 必须修改 auth.totp_secret、auth.admin，并确认 storage.dirs / storage.shares 指向需要开放的资源
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
@@ -318,7 +322,7 @@ docker compose -f docker-compose.example.yml up -d --build
 http://服务器地址:17878
 ```
 
-前端 nginx 容器会代理 `/api` 和 `/t` 到后端容器。此方式要求 `backend/` 和 `frontend/` 保持同级目录；后端容器使用非 root 用户运行，请确保挂载的 `data/` 和上传目录对容器用户可写。
+前端 nginx 容器会代理 `/api` 和 `/t` 到后端容器。此方式要求 `backend/` 和 `frontend/` 保持同级目录；后端容器使用非 root 用户运行，请确保挂载的 `config/`、`data/` 和上传目录对容器用户可写。配置管理页依赖目录挂载来原子写回 `config/config.yaml`；若希望禁止管理员页面在线写回配置，可把配置目录改成只读挂载。
 
 如需修改 Docker 对外访问端口，调整 `backend/docker-compose.example.yml` 中的左侧端口即可：
 
@@ -398,6 +402,17 @@ downloads:
 - `tokens.upload_max_mb`：单个上传令牌累计上传容量，`0` 表示不限制。
 
 上传文件名会先规范化再做扩展名判断，尾随空格、尾随点和控制字符不会绕过黑名单。文件会先写入同目录临时文件，完整写入后再提交为最终文件名；如果同一次多文件上传中途失败，本次已保存文件会被清理，公开上传令牌的次数和容量也会回滚。
+
+### 管理员可视化配置
+
+管理员登录后可进入“配置管理”页面维护共享资源：
+
+- **目录资源**：写入 `storage.dirs`，可分别控制下载和上传权限；允许上传时后端会校验目录可写。
+- **单文件资源**：写入 `storage.shares`，只允许下载；文件浏览页会把它显示为一个单文件入口，令牌页可直接为它生成下载分享。
+- 保存时后端只接收安全字段，不会把 `auth.totp_secret`、`auth.admin.password_sha256`、`database.path` 等敏感配置返回给前端。
+- 后端会校验资源 ID、路径类型、读写权限和危险系统目录；写入采用同目录临时文件替换，并在当前配置文件旁保留 `.bak` 作为最近一次备份。
+- 配置写回成功后会热更新内存中的资源列表，新请求立即可见；监听端口、数据库路径、认证密钥等仍需手动修改配置文件并重启服务。
+- 在线保存会由后端重新序列化配置文件，原 YAML 注释和手工排版不会保留；如需保留人工注释，请先备份并在保存后按需整理。
 
 ## 安全设计
 

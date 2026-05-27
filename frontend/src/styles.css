@@ -385,9 +385,25 @@ code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; pa
 .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: clamp(18px, 2vw, 24px); }
 .config-card { border: 1px solid var(--line); border-radius: 26px; padding: var(--space-card); background: var(--panel); display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 18px; }
 .config-icon { width: 58px; height: 58px; border-radius: 20px; display: grid; place-items: center; background: linear-gradient(135deg, var(--accent-2), #4388ff); color: #071316; font-weight: 800; font-size: 24px; font-family: "Songti SC", serif; }
+.config-icon[data-type="file"] { background: linear-gradient(135deg, var(--accent), #ff704d); color: #1d1209; }
 .config-card h2 { margin: 0 0 6px; font-family: "Songti SC", serif; }
 .config-card p { color: var(--muted); line-height: 1.6; }
 .config-card code { display: inline-block; max-width: 100%; overflow-wrap: anywhere; margin-bottom: 14px; }
+.config-page .resource-form { gap: 20px; }
+.form-title-row, .resource-head { display: flex; justify-content: space-between; gap: 14px; align-items: start; }
+.form-title-row p, .resource-head p { margin: 6px 0 0; }
+.permission-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.switch-line { width: auto; display: inline-flex; align-items: center; gap: 8px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 14px; color: var(--text); background: rgba(255,255,255,.04); }
+.switch-line input { width: auto; accent-color: var(--accent); }
+.resource-card { box-shadow: var(--shadow); transition: transform var(--motion), border-color var(--motion); }
+.resource-card:hover { transform: translateY(-2px); border-color: rgba(255,255,255,.22); }
+.resource-card-body { display: grid; gap: 12px; min-width: 0; }
+.policy-panel { padding: var(--space-card); display: grid; gap: 16px; }
+.policy-panel h2 { margin: 0; font-family: "Songti SC", serif; }
+.policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.policy-grid div { padding: 14px; border-radius: 16px; background: rgba(0,0,0,.18); border: 1px solid var(--line); display: grid; gap: 6px; }
+.policy-grid span { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.policy-grid strong { font-size: 18px; }
 
 /* ---------------- Share page ---------------- */
 .share-page { min-height: 100vh; padding: clamp(28px, 5vw, 56px) 20px 64px; display: flex; justify-content: center; }

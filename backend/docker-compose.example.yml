@@ -5,7 +5,7 @@ services:
     container_name: file-trans-backend
     restart: unless-stopped
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config:/app/config
       - ./data:/app/data
       - ./uploads:/app/uploads
     expose:

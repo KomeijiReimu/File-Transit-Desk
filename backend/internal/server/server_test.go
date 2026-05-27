@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -120,6 +122,147 @@ func TestDirsHidePathForUserAndShowRootForAdmin(t *testing.T) {
 	}
 	if adminResp.StatusCode != http.StatusOK || adminDirs[0]["root"] != root {
 		t.Fatalf("expected admin root %q, status=%d dirs=%v", root, adminResp.StatusCode, adminDirs)
+	}
+}
+
+func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
+	// 管理员可视化配置只暴露安全字段，目录和单文件资源写回配置后要立即对新请求生效。
+	base := t.TempDir()
+	dirRoot := filepath.Join(base, "shared")
+	filePath := filepath.Join(base, "manual.pdf")
+	if err := os.MkdirAll(dirRoot, 0755); err != nil {
+		t.Fatalf("mkdir shared: %v", err)
+	}
+	if err := osWriteFile(filePath, []byte("manual")); err != nil {
+		t.Fatalf("write manual: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(filepath.Join(base, "uploads"))
+	cfg.Auth.DevAllowFixedCode = true
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.SaveAtomic(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	app := NewWithConfigPath(cfg, st, cfgPath)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	adminReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	adminResp, err := app.Test(adminReq)
+	if err != nil {
+		t.Fatalf("safe config request: %v", err)
+	}
+	var safe map[string]any
+	decodeJSON(t, adminResp, &safe)
+	if adminResp.StatusCode != http.StatusOK || strings.Contains(fmt.Sprint(safe), "password_sha256") || strings.Contains(fmt.Sprint(safe), "totp_secret") {
+		t.Fatalf("safe config leaked sensitive fields or failed: status=%d body=%v", adminResp.StatusCode, safe)
+	}
+
+	createDir := httptest.NewRequest(http.MethodPost, "/api/config/resources", strings.NewReader(fmt.Sprintf(`{"id":"photos","name":"照片","type":"directory","path":%q,"allowDownload":true,"allowUpload":true}`, dirRoot)))
+	createDir.Header.Set("Content-Type", "application/json")
+	createDir.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	createDirResp, err := app.Test(createDir)
+	if err != nil {
+		t.Fatalf("create dir resource: %v", err)
+	}
+	if createDirResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(createDirResp.Body)
+		t.Fatalf("create dir status=%d body=%s", createDirResp.StatusCode, body)
+	}
+	createDirResp.Body.Close()
+
+	createFile := httptest.NewRequest(http.MethodPost, "/api/config/resources", strings.NewReader(fmt.Sprintf(`{"id":"manual","name":"说明文档","type":"file","path":%q,"allowDownload":true,"allowUpload":true}`, filePath)))
+	createFile.Header.Set("Content-Type", "application/json")
+	createFile.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	createFileResp, err := app.Test(createFile)
+	if err != nil {
+		t.Fatalf("create file resource: %v", err)
+	}
+	if createFileResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(createFileResp.Body)
+		t.Fatalf("create file status=%d body=%s", createFileResp.StatusCode, body)
+	}
+	createFileResp.Body.Close()
+
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	userDirsReq := httptest.NewRequest(http.MethodGet, "/api/dirs", nil)
+	userDirsReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	userDirsResp, err := app.Test(userDirsReq)
+	if err != nil {
+		t.Fatalf("user dirs request: %v", err)
+	}
+	var dirs []map[string]any
+	decodeJSON(t, userDirsResp, &dirs)
+	if len(dirs) != 3 || fmt.Sprint(dirs[2]["type"]) != "file" {
+		t.Fatalf("expected hot-updated file resource without root leak, got %+v", dirs)
+	}
+	if _, ok := dirs[2]["root"]; ok {
+		t.Fatalf("user resource leaked root: %+v", dirs[2])
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=manual", nil)
+	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	listResp, err := app.Test(listReq)
+	if err != nil {
+		t.Fatalf("file resource list: %v", err)
+	}
+	var list fileListResponse
+	decodeJSON(t, listResp, &list)
+	if listResp.StatusCode != http.StatusOK || len(list.Entries) != 1 || list.Entries[0].Name != "manual.pdf" || list.CanUpload {
+		t.Fatalf("unexpected file resource list: status=%d list=%+v", listResp.StatusCode, list)
+	}
+
+	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"manual","path":"manual.pdf"}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("file resource lease: %v", err)
+	}
+	var lease downloadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.URL == "" {
+		t.Fatalf("expected lease for file resource, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+
+	manualToken := &store.Token{Hash: "manual-token", Type: "download", DirID: "manual", Path: "", MaxUses: 10}
+	if err := st.CreateToken(manualToken); err != nil {
+		t.Fatalf("create manual token: %v", err)
+	}
+	manualLease := &store.DownloadLease{Hash: "manual-lease", Source: "public_token", TokenID: sql.NullInt64{Int64: manualToken.ID, Valid: true}, DirID: "manual", Path: "", FileSize: 6, FileMtime: time.Now(), FileSHA256: sql.NullString{String: "", Valid: true}, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := st.CreateDownloadLease(manualLease); err != nil {
+		t.Fatalf("create manual lease: %v", err)
+	}
+	newFilePath := filepath.Join(base, "manual-v2.pdf")
+	if err := osWriteFile(newFilePath, []byte("manual-v2")); err != nil {
+		t.Fatalf("write new manual: %v", err)
+	}
+	updateFile := httptest.NewRequest(http.MethodPut, "/api/config/resources/manual", strings.NewReader(fmt.Sprintf(`{"id":"manual","name":"说明文档","type":"file","path":%q,"allowDownload":true,"allowUpload":false}`, newFilePath)))
+	updateFile.Header.Set("Content-Type", "application/json")
+	updateFile.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	updateFileResp, err := app.Test(updateFile)
+	if err != nil {
+		t.Fatalf("update file resource: %v", err)
+	}
+	if updateFileResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(updateFileResp.Body)
+		t.Fatalf("update file status=%d body=%s", updateFileResp.StatusCode, body)
+	}
+	updateFileResp.Body.Close()
+	revoked, err := st.TokenByHash("manual-token")
+	if err != nil || !revoked.Revoked {
+		t.Fatalf("expected token for changed resource to be revoked, token=%+v err=%v", revoked, err)
+	}
+	if _, err := st.DownloadLeaseByHash("manual-lease"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected lease for changed resource to be deleted, got %v", err)
 	}
 }
 

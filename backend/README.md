@@ -22,7 +22,7 @@ pwsh -File scripts/dev.ps1
 
 ```bash
 cp config.example.yaml config.yaml
-# 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs 等配置
+# 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs/storage.shares 等配置
 go run ./cmd/server -config config.yaml
 ```
 
@@ -69,7 +69,8 @@ go run ./cmd/server -config config.yaml
 - `storage.upload_max_file_mb`：单个文件大小限制，必须小于等于 `storage.upload_max_mb`。
 - `storage.upload_max_files`：单次 multipart 请求最多允许的文件数量。
 - `storage.allowed_extensions` / `storage.blocked_extensions`：上传扩展名白名单与黑名单；白名单非空时只允许列出的扩展名，黑名单优先拒绝危险类型。
-- `storage.dirs`：开放目录，含 `allow_download/allow_upload`。
+- `storage.dirs`：开放目录资源，含 `type: directory`、`allow_download/allow_upload`，可由管理员“配置管理”页维护。
+- `storage.shares`：单文件共享资源，含 `type: file`，只允许下载；也可由管理员“配置管理”页维护。
 - `tokens.default_ttl_seconds`：令牌默认有效期。
 - `tokens.upload_max_mb`：单个上传令牌的累计上传容量；`0` 表示不限制。
 - `audit.retain`：审计日志保留条数。
@@ -138,7 +139,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 ### 目录与文件
 
-- `GET /api/dirs`：返回目录数组，普通用户字段为 `id/name/allowDownload/allowUpload/canDownload/canUpload`；管理员响应额外包含 `root` 便于配置概览展示。普通用户不会收到服务端真实目录路径。
+- `GET /api/dirs`：返回共享资源数组，普通用户字段为 `id/name/type/allowDownload/allowUpload/canDownload/canUpload`；管理员响应额外包含 `root` 便于配置管理展示。普通用户不会收到服务端真实路径。
 - `GET /api/files/list?dirId=default&path=subdir`：返回：
 
 ```json
@@ -154,6 +155,8 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 ```
 
   如果 `path` 不存在会返回 `404` 和中文提示，例如 `{"error":"路径不存在，请检查路径或返回上级目录。"}`；如果路径包含绝对路径或 `..` 等非法片段，会返回 `400` 和 `路径不合法` 提示。
+
+  对 `type: file` 的单文件资源，`GET /api/files/list?dirId=manual` 会返回一个文件条目；下载票据可使用空路径或返回条目的 `path`。
 
 - `POST /api/files/download-lease`：登录态下载前兑换短期票据，请求 `{ "dirId": "default", "path": "a.txt" }`，返回 `{ "url": "/api/files/download-by-lease?lease=...", "expiresAt": "..." }`。
 - `GET /api/files/download-by-lease?lease=...`：使用下载票据下载文件，支持 HTTP Range 断点续传；不要求页面会话仍然有效，但会校验票据未过期、目录仍允许下载、文件大小、修改时间和可用内容哈希未变化。
@@ -193,7 +196,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 - `POST /api/tokens/:id/revoke`：撤销令牌，让尚未过期且未用尽的链接立即失效，并同步清理该令牌已兑换的下载票据。用于应急止血或提前结束分享。
 - `DELETE /api/tokens/:id`：删除令牌记录。删除也会让令牌失效并清理相关下载票据，但主要语义是移除管理列表中的历史记录。
-- `GET /t/:token/info`：公开令牌信息。无效时返回 `{ "valid": false, "reason": "expired|revoked|exhausted|upload_quota_exhausted|not_found" }`；有效时返回 `{ "valid": true, "type": "download", "path": "a.txt", "expiresAt": "...", "maxUses": 1, "uses": 0, "uploadedBytes": 0, "uploadMaxBytes": 1073741824 }`，不会暴露目录 ID。
+- `GET /t/:token/info`：公开令牌信息。无效时返回 `{ "valid": false, "reason": "expired|revoked|exhausted|upload_quota_exhausted|resource_unavailable|permission_disabled|not_found" }`；有效时返回 `{ "valid": true, "type": "download", "path": "a.txt", "expiresAt": "...", "maxUses": 1, "uses": 0, "uploadedBytes": 0, "uploadMaxBytes": 1073741824 }`，不会暴露目录 ID。
 - `POST /t/:token/download-lease`：公开下载令牌兑换短期下载票据，兑换时原子消耗一次使用次数。
 - `GET /t/download-by-lease?lease=...`：公开票据下载，支持 Range 续传且不重复消耗令牌次数。
 - `GET /t/:token/download`：兼容保留，会显示确认下载页；用户主动点击后才 `POST` 兑换票据，避免链接预览或安全扫描提前消耗一次性下载次数。
@@ -207,29 +210,42 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `GET /api/audit/logs?limit=100`：仅管理员可访问，`limit` 被限制在 `1..500`，字段为 `id/action/actionLabel/ip/detail/createdAt`。
 - `GET /api/health`：返回 `{ "ok": true }`。
 
+### 配置管理
+
+以下 `/api/config` 接口仅管理员可访问，返回和接收的都是安全配置视图，不包含 TOTP Secret、管理员密码摘要、数据库路径等敏感字段。
+
+- `GET /api/config`：返回共享资源、上传策略、令牌策略和下载票据策略摘要。
+- `POST /api/config/resources`：新增目录或单文件资源，请求示例：`{ "id": "manual", "name": "说明文档", "type": "file", "path": "/data/manual.pdf", "allowDownload": true, "allowUpload": false }`。
+- `PUT /api/config/resources/:id`：修改已有资源。资源 ID 作为配置边界，修改时不允许在表单中变更 ID。
+- `DELETE /api/config/resources/:id`：删除资源。已有令牌不会被删除，但后续会因资源不存在而不可继续使用。
+
+保存资源时后端会校验 ID 字符集、路径是否存在、目录/文件类型是否匹配、读写权限以及危险系统目录；成功后原子写回 `config.yaml`，保留 `config.yaml.bak`，并热更新内存中的资源列表。目录资源写入 `storage.dirs`，单文件资源写入 `storage.shares`。在线保存会重新序列化 YAML，原配置文件注释和手工排版不会保留。
+
 ## Docker
 
-镜像不会把示例配置复制成生产配置；运行时必须挂载 `/app/config.yaml`。
+镜像不会把示例配置复制成生产配置；运行时必须把配置目录挂载到 `/app/config`，并提供 `/app/config/config.yaml`。配置管理页使用原子重命名写回配置，单文件挂载通常不支持这种写法。
 
 ```bash
 docker build -t filetrans-backend .
+mkdir -p config
+cp config.example.yaml config/config.yaml
 docker run --rm \
   -p 17878:17878 \
-  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  -v "$PWD/config:/app/config" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/uploads:/app/uploads" \
   filetrans-backend
 ```
 
 镜像内包含 `wget`，Dockerfile 已配置 `HEALTHCHECK` 调用 `/api/health`。
-最终镜像使用非 root 用户 `filetrans` 运行。若挂载宿主机目录，请确保容器用户对 `data`、上传目录有读写权限。
+最终镜像使用非 root 用户 `filetrans` 运行。若挂载宿主机目录，请确保容器用户对 `config/`、`data`、上传目录有读写权限；如果希望完全禁止管理员页面写回配置，可把配置目录挂载为只读，此时配置管理页的保存操作会失败但只读查看不受影响。
 Dockerfile 使用受支持的 Go/Alpine 基础镜像，并在依赖下载阶段复制 `go.mod` 与 `go.sum` 进行校验。
 
 如果希望前后端分容器运行，可以先准备 `config.yaml`，再使用仓库内的示例编排文件：
 
 ```bash
 cp config.example.yaml config.yaml
-# 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs 等配置
+# 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs/storage.shares 等配置
 docker compose -f docker-compose.example.yml up -d --build
 ```
 

@@ -18,6 +18,7 @@ export interface AdminLoginPayload {
 export interface DirectoryInfo {
   id: string
   name: string
+  type?: 'directory' | 'file' | string
   label?: string
   root?: string
   description?: string
@@ -26,6 +27,35 @@ export interface DirectoryInfo {
   readonly?: boolean
   allowUpload?: boolean
   allowDownload?: boolean
+}
+
+export interface SafeConfig {
+  resources: DirectoryInfo[]
+  storage: {
+    uploadMaxMB: number
+    uploadMaxFileMB: number
+    uploadMaxFiles: number
+    allowedExtensions: string[]
+    blockedExtensions: string[]
+  }
+  tokens: {
+    defaultTTLSeconds: number
+    uploadMaxMB: number
+  }
+  downloads: {
+    leaseTTLSeconds: number
+    contentHashMaxMB: number
+  }
+  configWritable: boolean
+}
+
+export interface ResourcePayload {
+  id: string
+  name: string
+  type: 'directory' | 'file'
+  path: string
+  allowDownload: boolean
+  allowUpload: boolean
 }
 
 // 文件列表同样兼容 isDir 与 type 字段，便于不同接口版本共用同一表格组件。

@@ -545,6 +545,24 @@ func (s *Store) RevokeTokenAndLeases(id string) error {
 	return tx.Commit()
 }
 
+func (s *Store) RevokeTokensByDirIDsAndLeases(dirIDs []string) error {
+	// 共享资源路径、类型或权限变化后，旧令牌不能继续复用同一个 dir_id 指向新位置。
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, dirID := range dirIDs {
+		if _, err := tx.Exec(`UPDATE tokens SET revoked = 1 WHERE dir_id = ?`, dirID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM download_leases WHERE dir_id = ? OR token_id IN (SELECT id FROM tokens WHERE dir_id = ?)`, dirID, dirID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteToken(id string) error {
 	return s.DeleteTokenAndLeases(id)
 }

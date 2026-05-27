@@ -29,9 +29,12 @@ import (
 )
 
 type Server struct {
-	config       *config.Config
-	store        *store.Store
-	loginLimiter *loginLimiter
+	configMu      sync.RWMutex
+	configWriteMu sync.Mutex
+	config        *config.Config
+	configPath    string
+	store         *store.Store
+	loginLimiter  *loginLimiter
 }
 
 type fileListResponse struct {
@@ -95,11 +98,41 @@ type tokenDTO struct {
 type dirDTO struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
+	Type          string `json:"type"`
 	Root          string `json:"root,omitempty"`
 	AllowDownload bool   `json:"allowDownload"`
 	AllowUpload   bool   `json:"allowUpload"`
 	CanDownload   bool   `json:"canDownload"`
 	CanUpload     bool   `json:"canUpload"`
+}
+
+type safeConfigDTO struct {
+	Resources []dirDTO `json:"resources"`
+	Storage   struct {
+		UploadMaxMB       int      `json:"uploadMaxMB"`
+		UploadMaxFileMB   int      `json:"uploadMaxFileMB"`
+		UploadMaxFiles    int      `json:"uploadMaxFiles"`
+		AllowedExtensions []string `json:"allowedExtensions"`
+		BlockedExtensions []string `json:"blockedExtensions"`
+	} `json:"storage"`
+	Tokens struct {
+		DefaultTTLSeconds int64 `json:"defaultTTLSeconds"`
+		UploadMaxMB       int   `json:"uploadMaxMB"`
+	} `json:"tokens"`
+	Downloads struct {
+		LeaseTTLSeconds  int64 `json:"leaseTTLSeconds"`
+		ContentHashMaxMB int   `json:"contentHashMaxMB"`
+	} `json:"downloads"`
+	ConfigWritable bool `json:"configWritable"`
+}
+
+type resourceRequest struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	Path          string `json:"path"`
+	AllowDownload bool   `json:"allowDownload"`
+	AllowUpload   bool   `json:"allowUpload"`
 }
 
 type auditDTO struct {
@@ -129,7 +162,11 @@ const (
 )
 
 func New(cfg *config.Config, st *store.Store) *fiber.App {
-	s := &Server{config: cfg, store: st, loginLimiter: newLoginLimiter()}
+	return NewWithConfigPath(cfg, st, "")
+}
+
+func NewWithConfigPath(cfg *config.Config, st *store.Store, configPath string) *fiber.App {
+	s := &Server{config: cfg, configPath: configPath, store: st, loginLimiter: newLoginLimiter()}
 	// 启动时先做一次轻量清理，避免旧会话、旧令牌和旧票据继续影响新进程。
 	_ = st.DeleteExpiredSessions(time.Now())
 	_ = st.DeleteExpiredTokens(time.Now())
@@ -149,6 +186,18 @@ func New(cfg *config.Config, st *store.Store) *fiber.App {
 	s.routes(app)
 	s.static(app)
 	return app
+}
+
+func (s *Server) cfg() *config.Config {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.config
+}
+
+func (s *Server) replaceConfig(next *config.Config) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	s.config = next
 }
 
 func jsonErrorHandler(c *fiber.Ctx, err error) error {
@@ -181,6 +230,10 @@ func (s *Server) routes(app *fiber.App) {
 	app.Post("/api/tokens/:id/revoke", s.adminOnly(s.revokeToken))
 	app.Delete("/api/tokens/:id", s.adminOnly(s.deleteToken))
 	app.Get("/api/audit/logs", s.adminOnly(s.auditLogs))
+	app.Get("/api/config", s.adminOnly(s.safeConfig))
+	app.Post("/api/config/resources", s.adminOnly(s.createResource))
+	app.Put("/api/config/resources/:id", s.adminOnly(s.updateResource))
+	app.Delete("/api/config/resources/:id", s.adminOnly(s.deleteResource))
 	app.Get("/t/:token/info", s.publicTokenInfo)
 	app.Get("/t/:token/upload", s.publicUploadPage)
 	app.Post("/t/:token/download-lease", s.createPublicDownloadLease)
@@ -201,7 +254,7 @@ func (s *Server) csrfOriginGuard(c *fiber.Ctx) error {
 	if origin == requestOrigin(c) {
 		return c.Next()
 	}
-	for _, allowed := range s.config.CORS.AllowOrigins {
+	for _, allowed := range s.cfg().CORS.AllowOrigins {
 		if origin == strings.TrimSpace(allowed) {
 			return c.Next()
 		}
@@ -231,19 +284,20 @@ func isUnsafeMethod(method string) bool {
 }
 
 func (s *Server) static(app *fiber.App) {
-	if s.config.Web.StaticDir == "" {
+	if s.cfg().Web.StaticDir == "" {
 		return
 	}
-	if _, err := os.Stat(s.config.Web.StaticDir); err != nil {
+	staticDir := s.cfg().Web.StaticDir
+	if _, err := os.Stat(staticDir); err != nil {
 		return
 	}
-	app.Static("/", s.config.Web.StaticDir)
+	app.Static("/", staticDir)
 	app.Get("/*", func(c *fiber.Ctx) error {
 		// SPA 回退不能吞掉后端接口，否则错误路径会被前端 index.html 掩盖。
 		if strings.HasPrefix(c.Path(), "/api") || strings.HasPrefix(c.Path(), "/t/") {
 			return fiber.ErrNotFound
 		}
-		return c.SendFile(filepath.Join(s.config.Web.StaticDir, "index.html"))
+		return c.SendFile(filepath.Join(staticDir, "index.html"))
 	})
 }
 
@@ -252,7 +306,7 @@ func (s *Server) auth(next fiber.Handler) fiber.Handler {
 		id := c.Cookies("sid")
 		sess, err := s.store.Session(id)
 		now := time.Now()
-		grace := time.Duration(s.config.Auth.IdleGraceSeconds) * time.Second
+		grace := time.Duration(s.cfg().Auth.IdleGraceSeconds) * time.Second
 		idleValid := err == nil && now.Before(sess.IdleExpiresAt)
 		withinIdleGrace := err == nil && !idleValid && grace > 0 && now.Before(sess.IdleExpiresAt.Add(grace))
 		if withinIdleGrace && c.Path() == "/api/auth/heartbeat" {
@@ -321,7 +375,7 @@ func (s *Server) login(c *fiber.Ctx) error {
 		return err
 	}
 	now := time.Now()
-	expiresAt := now.Add(time.Duration(s.config.Auth.SessionTTLSeconds) * time.Second)
+	expiresAt := now.Add(time.Duration(s.cfg().Auth.SessionTTLSeconds) * time.Second)
 	idleExpiresAt := s.sessionIdleExpiresAt(now, expiresAt)
 	if err := s.store.CreateSessionWithIdle(id, expiresAt, idleExpiresAt, "user", ""); err != nil {
 		return err
@@ -358,7 +412,7 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 		return err
 	}
 	now := time.Now()
-	expiresAt := now.Add(time.Duration(s.config.Auth.SessionTTLSeconds) * time.Second)
+	expiresAt := now.Add(time.Duration(s.cfg().Auth.SessionTTLSeconds) * time.Second)
 	idleExpiresAt := s.sessionIdleExpiresAt(now, expiresAt)
 	if err := s.store.CreateSessionWithIdle(id, expiresAt, idleExpiresAt, "admin", in.Username); err != nil {
 		return err
@@ -370,11 +424,11 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 
 func (s *Server) validateAdminLogin(username, password string) bool {
 	// 用户名和密码哈希都使用常量时间比较，降低可观测时序差异。
-	if subtle.ConstantTimeCompare([]byte(username), []byte(s.config.Auth.Admin.Username)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(username), []byte(s.cfg().Auth.Admin.Username)) != 1 {
 		return false
 	}
 	sum := sha256.Sum256([]byte(password))
-	expected, err := hex.DecodeString(s.config.Auth.Admin.PasswordSHA256)
+	expected, err := hex.DecodeString(s.cfg().Auth.Admin.PasswordSHA256)
 	if err != nil {
 		return false
 	}
@@ -383,11 +437,11 @@ func (s *Server) validateAdminLogin(username, password string) bool {
 
 func (s *Server) validateLoginCode(code string) bool {
 	code = normalizeLoginCode(code)
-	if s.config.Auth.TOTPSecret == "" {
+	if s.cfg().Auth.TOTPSecret == "" {
 		// 固定验证码只允许显式开发开关开启，生产配置校验会阻止空 Secret。
-		return s.config.Auth.DevAllowFixedCode && code == "000000"
+		return s.cfg().Auth.DevAllowFixedCode && code == "000000"
 	}
-	ok, err := totp.ValidateCustom(code, s.config.Auth.TOTPSecret, time.Now(), totp.ValidateOpts{
+	ok, err := totp.ValidateCustom(code, s.cfg().Auth.TOTPSecret, time.Now(), totp.ValidateOpts{
 		Period:    30,
 		Skew:      1,
 		Digits:    otp.DigitsSix,
@@ -407,7 +461,7 @@ func normalizeLoginCode(code string) string {
 }
 
 func (s *Server) clientIP(c *fiber.Ctx) string {
-	if s.config.Server.TrustProxyHeaders {
+	if s.cfg().Server.TrustProxyHeaders {
 		// 只有部署在可信代理后才读取这些头，避免直连场景客户端伪造审计 IP。
 		if xff := strings.TrimSpace(c.Get("X-Forwarded-For")); xff != "" {
 			parts := strings.Split(xff, ",")
@@ -428,7 +482,7 @@ func (s *Server) setSessionCookie(c *fiber.Ctx, value string, expiresAt time.Tim
 		Value:    value,
 		Path:     "/",
 		HTTPOnly: true,
-		Secure:   s.config.Auth.CookieSecure,
+		Secure:   s.cfg().Auth.CookieSecure,
 		SameSite: "Lax",
 		Expires:  expiresAt,
 	})
@@ -440,7 +494,7 @@ func (s *Server) clearSessionCookie(c *fiber.Ctx) {
 		Value:    "",
 		Path:     "/",
 		HTTPOnly: true,
-		Secure:   s.config.Auth.CookieSecure,
+		Secure:   s.cfg().Auth.CookieSecure,
 		SameSite: "Lax",
 		Expires:  time.Unix(0, 0),
 	})
@@ -487,7 +541,7 @@ func (s *Server) logout(c *fiber.Ctx) error {
 }
 
 func (s *Server) sessionIdleExpiresAt(now, absoluteExpiresAt time.Time) time.Time {
-	idleExpiresAt := now.Add(time.Duration(s.config.Auth.IdleTimeoutSeconds) * time.Second)
+	idleExpiresAt := now.Add(time.Duration(s.cfg().Auth.IdleTimeoutSeconds) * time.Second)
 	if idleExpiresAt.After(absoluteExpiresAt) {
 		return absoluteExpiresAt
 	}
@@ -497,29 +551,317 @@ func (s *Server) sessionIdleExpiresAt(now, absoluteExpiresAt time.Time) time.Tim
 func (s *Server) dirs(c *fiber.Ctx) error {
 	_ = s.store.Audit("dirs", s.clientIP(c), "查看目录配置")
 	includeRoot := c.Locals("role") == "admin"
-	out := make([]dirDTO, 0, len(s.config.Storage.Dirs))
-	for _, dir := range s.config.Storage.Dirs {
-		item := dirDTO{
-			ID:            dir.ID,
-			Name:          dir.Name,
-			AllowDownload: dir.AllowDownload,
-			AllowUpload:   dir.AllowUpload,
-			CanDownload:   dir.AllowDownload,
-			CanUpload:     dir.AllowUpload,
-		}
-		if includeRoot {
-			// 真实根路径只给管理员看，普通用户只拿到逻辑目录 ID 和权限标记。
-			item.Root = dir.Path
-		}
-		out = append(out, item)
+	resources := s.cfg().Resources()
+	out := make([]dirDTO, 0, len(resources))
+	for _, dir := range resources {
+		out = append(out, dirToDTO(dir, includeRoot))
 	}
 	return c.JSON(out)
+}
+
+func dirToDTO(dir config.Dir, includeRoot bool) dirDTO {
+	item := dirDTO{
+		ID:            dir.ID,
+		Name:          dir.Name,
+		Type:          dir.Type,
+		AllowDownload: dir.AllowDownload,
+		AllowUpload:   dir.AllowUpload,
+		CanDownload:   dir.AllowDownload,
+		CanUpload:     dir.AllowUpload,
+	}
+	if includeRoot {
+		// 真实根路径只给管理员看，普通用户只拿到逻辑资源 ID 和权限标记。
+		item.Root = dir.Path
+	}
+	return item
+}
+
+func (s *Server) safeConfig(c *fiber.Ctx) error {
+	cfg := s.cfg()
+	out := safeConfigDTO{Resources: make([]dirDTO, 0, len(cfg.Resources())), ConfigWritable: s.configPath != ""}
+	for _, dir := range cfg.Resources() {
+		out.Resources = append(out.Resources, dirToDTO(dir, true))
+	}
+	out.Storage.UploadMaxMB = cfg.Storage.UploadMaxMB
+	out.Storage.UploadMaxFileMB = cfg.Storage.UploadMaxFileMB
+	out.Storage.UploadMaxFiles = cfg.Storage.UploadMaxFiles
+	out.Storage.AllowedExtensions = append([]string{}, cfg.Storage.AllowedExtensions...)
+	out.Storage.BlockedExtensions = append([]string{}, cfg.Storage.BlockedExtensions...)
+	out.Tokens.DefaultTTLSeconds = cfg.Tokens.DefaultTTLSeconds
+	out.Tokens.UploadMaxMB = cfg.Tokens.UploadMaxMB
+	out.Downloads.LeaseTTLSeconds = cfg.Downloads.LeaseTTLSeconds
+	out.Downloads.ContentHashMaxMB = cfg.Downloads.ContentHashMaxMB
+	_ = s.store.Audit("config_view", s.clientIP(c), "查看可视化配置")
+	return c.JSON(out)
+}
+
+func (s *Server) createResource(c *fiber.Ctx) error {
+	var in resourceRequest
+	if err := c.BodyParser(&in); err != nil {
+		return fiber.ErrBadRequest
+	}
+	resource, err := resourceFromRequest(in)
+	if err != nil {
+		return err
+	}
+	if err := validateResourcePath(resource); err != nil {
+		return err
+	}
+	if err := s.updateConfigResources(func(resources []config.Dir) ([]config.Dir, error) {
+		for _, existing := range resources {
+			if existing.ID == resource.ID {
+				return nil, fiber.NewError(fiber.StatusConflict, "资源 ID 已存在。")
+			}
+		}
+		return append(resources, resource), nil
+	}); err != nil {
+		return err
+	}
+	_ = s.store.Audit("config_resource_create", s.clientIP(c), fmt.Sprintf("新增%s资源 %s", resourceTypeLabel(resource.Type), resource.ID))
+	return c.JSON(dirToDTO(resource, true))
+}
+
+func (s *Server) updateResource(c *fiber.Ctx) error {
+	var in resourceRequest
+	if err := c.BodyParser(&in); err != nil {
+		return fiber.ErrBadRequest
+	}
+	in.ID = c.Params("id")
+	resource, err := resourceFromRequest(in)
+	if err != nil {
+		return err
+	}
+	if err := validateResourcePath(resource); err != nil {
+		return err
+	}
+	if err := s.updateConfigResources(func(resources []config.Dir) ([]config.Dir, error) {
+		for i, existing := range resources {
+			if existing.ID == resource.ID {
+				resources[i] = resource
+				return resources, nil
+			}
+		}
+		return nil, fiber.ErrNotFound
+	}); err != nil {
+		return err
+	}
+	_ = s.store.Audit("config_resource_update", s.clientIP(c), fmt.Sprintf("修改%s资源 %s", resourceTypeLabel(resource.Type), resource.ID))
+	return c.JSON(dirToDTO(resource, true))
+}
+
+func (s *Server) deleteResource(c *fiber.Ctx) error {
+	id := strings.TrimSpace(c.Params("id"))
+	if id == "" {
+		return fiber.ErrBadRequest
+	}
+	if err := s.updateConfigResources(func(resources []config.Dir) ([]config.Dir, error) {
+		out := make([]config.Dir, 0, len(resources))
+		found := false
+		for _, existing := range resources {
+			if existing.ID == id {
+				found = true
+				continue
+			}
+			out = append(out, existing)
+		}
+		if !found {
+			return nil, fiber.ErrNotFound
+		}
+		return out, nil
+	}); err != nil {
+		return err
+	}
+	_ = s.store.Audit("config_resource_delete", s.clientIP(c), "删除资源 "+id)
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+func (s *Server) updateConfigResources(mutator func([]config.Dir) ([]config.Dir, error)) error {
+	if s.configPath == "" {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "当前服务未记录配置文件路径，不能在线写回配置。")
+	}
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
+	next := s.cfg().Clone()
+	oldResources := next.Resources()
+	resources, err := mutator(next.Resources())
+	if err != nil {
+		return err
+	}
+	next.SetResources(resources)
+	changedIDs := changedResourceIDs(oldResources, next.Resources())
+	if err := config.SaveAtomic(s.configPath, next); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "配置写入失败："+err.Error())
+	}
+	// 写回成功后再替换内存配置，新请求立即看到新的共享目录或单文件资源。
+	s.replaceConfig(next)
+	if len(changedIDs) > 0 {
+		// 资源根路径、类型或权限变化后，旧令牌不能自动指向新位置；统一撤销相关令牌并清理下载票据。
+		if err := s.store.RevokeTokensByDirIDsAndLeases(changedIDs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func changedResourceIDs(oldResources, newResources []config.Dir) []string {
+	newByID := map[string]config.Dir{}
+	for _, resource := range newResources {
+		newByID[resource.ID] = resource
+	}
+	changed := make([]string, 0)
+	for _, old := range oldResources {
+		current, ok := newByID[old.ID]
+		if !ok || !sameResourceAuthorization(old, current) {
+			changed = append(changed, old.ID)
+		}
+	}
+	return changed
+}
+
+func sameResourceAuthorization(left, right config.Dir) bool {
+	return left.ID == right.ID && left.Type == right.Type && left.Path == right.Path && left.AllowDownload == right.AllowDownload && left.AllowUpload == right.AllowUpload
+}
+
+func resourceFromRequest(in resourceRequest) (config.Dir, error) {
+	resource := config.Dir{
+		ID:            strings.TrimSpace(in.ID),
+		Name:          strings.TrimSpace(in.Name),
+		Type:          strings.ToLower(strings.TrimSpace(in.Type)),
+		Path:          strings.TrimSpace(in.Path),
+		AllowDownload: in.AllowDownload,
+		AllowUpload:   in.AllowUpload,
+	}
+	if resource.Type == "" || resource.Type == "dir" || resource.Type == "folder" {
+		resource.Type = config.ResourceDirectory
+	}
+	if resource.Type == config.ResourceFile {
+		resource.AllowDownload = true
+		resource.AllowUpload = false
+	}
+	if resource.Name == "" {
+		resource.Name = resource.ID
+	}
+	if resource.ID == "" || resource.Path == "" {
+		return resource, fiber.NewError(fiber.StatusBadRequest, "资源 ID 和路径不能为空。")
+	}
+	if !validAPIResourceID(resource.ID) {
+		return resource, fiber.NewError(fiber.StatusBadRequest, "资源 ID 只能包含字母、数字、短横线和下划线。")
+	}
+	if resource.Type != config.ResourceDirectory && resource.Type != config.ResourceFile {
+		return resource, fiber.NewError(fiber.StatusBadRequest, "资源类型只能是目录或单文件。")
+	}
+	if !resource.AllowDownload && !resource.AllowUpload {
+		return resource, fiber.NewError(fiber.StatusBadRequest, "至少需要允许下载或上传其中一项。")
+	}
+	return resource, nil
+}
+
+func validAPIResourceID(id string) bool {
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return id != ""
+}
+
+func validateResourcePath(resource config.Dir) error {
+	realPath, err := resolvedAbsPath(resource.Path)
+	if err != nil {
+		return friendlyPathError(err, "路径不存在，请先确认服务端路径。")
+	}
+	if isDangerousRoot(realPath) {
+		return fiber.NewError(fiber.StatusBadRequest, "不能把系统根目录或关键系统目录加入共享。")
+	}
+	info, err := os.Stat(resource.Path)
+	if err != nil {
+		return friendlyPathError(err, "路径不存在，请先确认服务端路径。")
+	}
+	if resource.Type == config.ResourceFile {
+		if info.IsDir() {
+			return fiber.NewError(fiber.StatusBadRequest, "单文件资源必须指向具体文件，不能指向目录。")
+		}
+		file, err := os.Open(resource.Path)
+		if err != nil {
+			return friendlyPathError(err, "文件不可读取，请检查服务端权限。")
+		}
+		_ = file.Close()
+		return nil
+	}
+	if !info.IsDir() {
+		return fiber.NewError(fiber.StatusBadRequest, "目录资源必须指向目录，不能指向文件。")
+	}
+	if resource.AllowDownload {
+		dir, err := os.Open(resource.Path)
+		if err != nil {
+			return friendlyPathError(err, "目录不可读取，请检查服务端权限。")
+		}
+		_ = dir.Close()
+	}
+	if resource.AllowUpload {
+		test, err := os.CreateTemp(resource.Path, ".write-test-*.tmp")
+		if err != nil {
+			return friendlyPathError(err, "目录不可写入，请检查服务端权限。")
+		}
+		name := test.Name()
+		_ = test.Close()
+		_ = os.Remove(name)
+	}
+	return nil
+}
+
+func isDangerousRoot(path string) bool {
+	clean, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		clean = filepath.Clean(path)
+	}
+	if clean == string(filepath.Separator) {
+		return true
+	}
+	lower := strings.ToLower(clean)
+	dangerous := []string{"/etc", "/bin", "/sbin", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/usr/bin", "/usr/sbin", `c:\`, `c:\windows`, `c:\program files`}
+	for _, value := range dangerous {
+		value = filepath.Clean(strings.ToLower(value))
+		if lower == value || strings.HasPrefix(lower, value+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvedAbsPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	// 使用真实路径做危险目录判断，避免相对路径或符号链接绕过配置管理页面的安全护栏。
+	return filepath.EvalSymlinks(abs)
+}
+
+func resourceTypeLabel(value string) string {
+	if value == config.ResourceFile {
+		return "单文件"
+	}
+	return "目录"
 }
 
 func (s *Server) listFiles(c *fiber.Ctx) error {
 	dir, err := s.dirFromQuery(c)
 	if err != nil {
 		return err
+	}
+	if isFileResource(dir) {
+		if err := validateFileResourceListPath(dir, c.Query("path")); err != nil {
+			_ = s.store.Audit("illegal_access", s.clientIP(c), err.Error())
+			return err
+		}
+		entry, err := fileResourceEntry(dir)
+		if err != nil {
+			return err
+		}
+		_ = s.store.Audit("file_list", s.clientIP(c), fmt.Sprintf("单文件资源 %s", dir.ID))
+		return c.JSON(fileListResponse{Dir: dir.ID, Path: "", Entries: []fsutil.Entry{entry}, CanUpload: false, CanDownload: dir.AllowDownload})
 	}
 	entries, err := fsutil.List(dir.Path, c.Query("path"))
 	if err != nil {
@@ -539,14 +881,11 @@ func (s *Server) downloadFile(c *fiber.Ctx) error {
 	if !dir.AllowDownload {
 		return fiber.ErrForbidden
 	}
-	full, safePath, err := fsutil.Resolve(dir.Path, c.Query("path"))
+	full, safePath, info, err := s.resolveDownloadFile(dir, c.Query("path"))
 	if err != nil {
-		_ = s.store.Audit("illegal_access", s.clientIP(c), err.Error())
-		return friendlyPathError(err, "文件路径不存在，请刷新文件列表后重试。")
+		return err
 	}
-	if info, err := os.Stat(full); err != nil || info.IsDir() {
-		return fiber.ErrNotFound
-	}
+	_ = info
 	_ = s.store.Audit("download", s.clientIP(c), fmt.Sprintf("目录 %s，文件 %s", dir.ID, displayPath(safePath)))
 	return c.Download(full)
 }
@@ -609,7 +948,7 @@ func (s *Server) downloadByLease(c *fiber.Ctx) error {
 		_ = s.store.DeleteExpiredDownloadLeases(time.Now())
 		return fiber.ErrUnauthorized
 	}
-	dir, ok := s.config.Dir(lease.DirID)
+	dir, ok := s.cfg().Dir(lease.DirID)
 	if !ok || !dir.AllowDownload {
 		return fiber.ErrForbidden
 	}
@@ -668,8 +1007,8 @@ func publicLeaseExpiry(now time.Time, ttl time.Duration, tokenExpiresAt sql.Null
 }
 
 func (s *Server) downloadLeaseTTL() time.Duration {
-	ttl := time.Duration(s.config.Downloads.LeaseTTLSeconds) * time.Second
-	maxTTL := time.Duration(s.config.Downloads.LeaseMaxTTLSeconds) * time.Second
+	ttl := time.Duration(s.cfg().Downloads.LeaseTTLSeconds) * time.Second
+	maxTTL := time.Duration(s.cfg().Downloads.LeaseMaxTTLSeconds) * time.Second
 	// 二次夹紧可防止旧配置或手工构造的 Config 绕过 config.normalize。
 	if maxTTL > 0 && ttl > maxTTL {
 		return maxTTL
@@ -700,10 +1039,10 @@ func (s *Server) downloadLeaseFileHash(full string, info os.FileInfo) (sql.NullS
 }
 
 func (s *Server) downloadLeaseHashMaxBytes() int64 {
-	if s.config.Downloads.ContentHashMaxMB <= 0 {
+	if s.cfg().Downloads.ContentHashMaxMB <= 0 {
 		return 0
 	}
-	return int64(s.config.Downloads.ContentHashMaxMB) * 1024 * 1024
+	return int64(s.cfg().Downloads.ContentHashMaxMB) * 1024 * 1024
 }
 
 func fileSHA256Hex(path string) (string, error) {
@@ -720,6 +1059,21 @@ func fileSHA256Hex(path string) (string, error) {
 }
 
 func (s *Server) resolveDownloadFile(dir config.Dir, rel string) (string, string, os.FileInfo, error) {
+	if isFileResource(dir) {
+		safeRel, err := fsutil.CleanRel(rel)
+		if err != nil {
+			return "", "", nil, friendlyPathError(err, "文件路径不存在，请刷新文件列表后重试。")
+		}
+		name := filepath.Base(dir.Path)
+		if safeRel != "" && safeRel != name {
+			return "", "", nil, fiber.ErrNotFound
+		}
+		info, err := os.Stat(dir.Path)
+		if err != nil || info.IsDir() {
+			return "", "", nil, fiber.ErrNotFound
+		}
+		return dir.Path, "", info, nil
+	}
 	full, safePath, err := fsutil.Resolve(dir.Path, rel)
 	if err != nil {
 		return "", "", nil, friendlyPathError(err, "文件路径不存在，请刷新文件列表后重试。")
@@ -729,6 +1083,30 @@ func (s *Server) resolveDownloadFile(dir config.Dir, rel string) (string, string
 		return "", "", nil, fiber.ErrNotFound
 	}
 	return full, safePath, info, nil
+}
+
+func isFileResource(dir config.Dir) bool {
+	return dir.Type == config.ResourceFile
+}
+
+func fileResourceEntry(dir config.Dir) (fsutil.Entry, error) {
+	info, err := os.Stat(dir.Path)
+	if err != nil || info.IsDir() {
+		return fsutil.Entry{}, fiber.ErrNotFound
+	}
+	name := filepath.Base(dir.Path)
+	return fsutil.Entry{Name: name, IsDir: false, Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), Path: name}, nil
+}
+
+func validateFileResourceListPath(dir config.Dir, rel string) error {
+	safeRel, err := fsutil.CleanRel(rel)
+	if err != nil {
+		return friendlyPathError(err, "路径不存在，请检查路径或返回上级目录。")
+	}
+	if safeRel == "" || safeRel == filepath.Base(dir.Path) {
+		return nil
+	}
+	return fiber.NewError(fiber.StatusNotFound, "单文件资源没有子目录，请返回资源根路径。")
 }
 
 func friendlyPathError(err error, missingMessage string) error {
@@ -898,16 +1276,17 @@ func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error)
 	if len(files) == 0 {
 		return nil, 0, fiber.ErrBadRequest
 	}
-	if len(files) > s.config.Storage.UploadMaxFiles {
-		return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("一次最多上传 %d 个文件", s.config.Storage.UploadMaxFiles))
+	cfg := s.cfg()
+	if len(files) > cfg.Storage.UploadMaxFiles {
+		return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("一次最多上传 %d 个文件", cfg.Storage.UploadMaxFiles))
 	}
 	var total int64
-	maxFileBytes := mbToBytes(s.config.Storage.UploadMaxFileMB)
-	maxRequestBytes := mbToBytes(s.config.Storage.UploadMaxMB)
+	maxFileBytes := mbToBytes(cfg.Storage.UploadMaxFileMB)
+	maxRequestBytes := mbToBytes(cfg.Storage.UploadMaxMB)
 	for _, fh := range files {
 		safeName := fsutil.SafeName(fh.Filename)
 		if fh.Size > maxFileBytes {
-			return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单个文件不能超过 %d MB", s.config.Storage.UploadMaxFileMB))
+			return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单个文件不能超过 %d MB", cfg.Storage.UploadMaxFileMB))
 		}
 		if !s.extensionAllowed(safeName) {
 			return nil, 0, fiber.NewError(fiber.StatusForbidden, "该文件扩展名不允许上传")
@@ -915,7 +1294,7 @@ func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error)
 		total += fh.Size
 	}
 	if total > maxRequestBytes {
-		return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单次上传总量不能超过 %d MB", s.config.Storage.UploadMaxMB))
+		return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单次上传总量不能超过 %d MB", cfg.Storage.UploadMaxMB))
 	}
 	return files, total, nil
 }
@@ -923,15 +1302,16 @@ func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error)
 func (s *Server) extensionAllowed(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
 	// 黑名单优先级高于白名单，确保危险扩展名不会因白名单误配而放行。
-	for _, blocked := range s.config.Storage.BlockedExtensions {
+	cfg := s.cfg()
+	for _, blocked := range cfg.Storage.BlockedExtensions {
 		if ext == blocked {
 			return false
 		}
 	}
-	if len(s.config.Storage.AllowedExtensions) == 0 {
+	if len(cfg.Storage.AllowedExtensions) == 0 {
 		return true
 	}
-	for _, allowed := range s.config.Storage.AllowedExtensions {
+	for _, allowed := range cfg.Storage.AllowedExtensions {
 		if ext == allowed {
 			return true
 		}
@@ -1012,7 +1392,18 @@ func (s *Server) listTokens(c *fiber.Ctx) error {
 	now := time.Now()
 	uploadMaxBytes := s.tokenUploadMaxBytes()
 	for _, t := range tokens {
-		out = append(out, tokenToDTO(t, now, uploadMaxBytes))
+		dto := tokenToDTO(t, now, uploadMaxBytes)
+		if dto.Valid {
+			dir, ok := s.cfg().Dir(t.DirID)
+			if !ok {
+				dto.Valid = false
+				dto.Reason = "resource_unavailable"
+			} else if t.Type == "download" && !dir.AllowDownload || t.Type == "upload" && !dir.AllowUpload {
+				dto.Valid = false
+				dto.Reason = "permission_disabled"
+			}
+		}
+		out = append(out, dto)
 	}
 	return c.JSON(out)
 }
@@ -1023,7 +1414,7 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 		return fiber.ErrBadRequest
 	}
 	dirID := firstNonEmpty(in.DirID, in.DirIDSnake)
-	dir, ok := s.config.Dir(dirID)
+	dir, ok := s.cfg().Dir(dirID)
 	if !ok {
 		return fiber.ErrBadRequest
 	}
@@ -1039,7 +1430,9 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 	var safePath string
 	var fullPath string
 	var err error
-	if in.Type == "download" {
+	if in.Type == "download" && isFileResource(dir) {
+		fullPath, safePath, _, err = s.resolveDownloadFile(dir, in.Path)
+	} else if in.Type == "download" {
 		// 下载令牌必须提前确认具体文件存在，避免对外发出不可用链接。
 		fullPath, safePath, err = fsutil.Resolve(dir.Path, in.Path)
 	} else {
@@ -1067,7 +1460,7 @@ func (s *Server) createToken(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	t := &store.Token{Hash: hash, Type: in.Type, DirID: dirID, Path: safePath, MaxUses: maxInt(in.MaxUses, in.MaxUsesOld), ExpiresAt: tokenExpiry(s.config, in)}
+	t := &store.Token{Hash: hash, Type: in.Type, DirID: dirID, Path: safePath, MaxUses: maxInt(in.MaxUses, in.MaxUsesOld), ExpiresAt: tokenExpiry(s.cfg(), in)}
 	if err := s.store.CreateToken(t); err != nil {
 		return err
 	}
@@ -1175,6 +1568,16 @@ func (s *Server) publicTokenInfo(c *fiber.Ctx) error {
 		if maxBytes := s.tokenUploadMaxBytes(); maxBytes > 0 && t.UploadedBytes >= maxBytes {
 			valid = false
 			reason = "upload_quota_exhausted"
+		}
+	}
+	if valid {
+		dir, ok := s.cfg().Dir(t.DirID)
+		if !ok {
+			valid = false
+			reason = "resource_unavailable"
+		} else if t.Type == "download" && !dir.AllowDownload || t.Type == "upload" && !dir.AllowUpload {
+			valid = false
+			reason = "permission_disabled"
 		}
 	}
 	if !valid {
@@ -1315,8 +1718,8 @@ func (s *Server) publicUpload(c *fiber.Ctx) error {
 	if _, _, err := s.lookupPublicToken(c, "upload"); err != nil {
 		return err
 	}
-	if contentLength := int64(c.Request().Header.ContentLength()); contentLength > 0 && contentLength > mbToBytes(s.config.Storage.UploadMaxMB) {
-		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单次上传总量不能超过 %d MB", s.config.Storage.UploadMaxMB))
+	if contentLength := int64(c.Request().Header.ContentLength()); contentLength > 0 && contentLength > mbToBytes(s.cfg().Storage.UploadMaxMB) {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单次上传总量不能超过 %d MB", s.cfg().Storage.UploadMaxMB))
 	}
 	files, totalBytes, err := s.formFiles(c)
 	if err != nil {
@@ -1353,7 +1756,7 @@ func (s *Server) reservePublicToken(c *fiber.Ctx, tokenType string, uploadBytes 
 		}
 		return t, config.Dir{}, err
 	}
-	dir, ok := s.config.Dir(t.DirID)
+	dir, ok := s.cfg().Dir(t.DirID)
 	if !ok {
 		return t, dir, fiber.ErrForbidden
 	}
@@ -1382,7 +1785,7 @@ func (s *Server) lookupPublicToken(c *fiber.Ctx, tokenType string) (store.Token,
 			return t, config.Dir{}, fiber.ErrForbidden
 		}
 	}
-	dir, ok := s.config.Dir(t.DirID)
+	dir, ok := s.cfg().Dir(t.DirID)
 	if !ok {
 		return t, dir, fiber.ErrForbidden
 	}
@@ -1405,7 +1808,7 @@ func (s *Server) dirFromQuery(c *fiber.Ctx) (config.Dir, error) {
 }
 
 func (s *Server) dirByID(dirID string) (config.Dir, error) {
-	dir, ok := s.config.Dir(dirID)
+	dir, ok := s.cfg().Dir(dirID)
 	if !ok {
 		return dir, fiber.ErrNotFound
 	}
@@ -1427,7 +1830,7 @@ func tokenToDTO(t store.Token, now time.Time, uploadMaxBytes int64) tokenDTO {
 }
 
 func (s *Server) tokenUploadMaxBytes() int64 {
-	return mbToBytes(s.config.Tokens.UploadMaxMB)
+	return mbToBytes(s.cfg().Tokens.UploadMaxMB)
 }
 
 func mbToBytes(value int) int64 {
@@ -1476,6 +1879,10 @@ func actionLabel(action string) string {
 		"public_download_lease_create": "创建公开下载票据",
 		"download_lease_use":           "使用下载票据",
 		"download_lease_file_changed":  "下载票据文件变化",
+		"config_view":                  "查看配置",
+		"config_resource_create":       "新增共享资源",
+		"config_resource_update":       "修改共享资源",
+		"config_resource_delete":       "删除共享资源",
 	}
 	if label, ok := labels[action]; ok {
 		return label

@@ -26,7 +26,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	app := server.New(cfg, st)
+	app := server.NewWithConfigPath(cfg, st, *cfgPath)
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	// Fiber 会阻塞监听；退出时把错误交给 log.Fatal 统一打印。
 	log.Fatal(app.Listen(addr))

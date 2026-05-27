@@ -124,8 +124,8 @@ onBeforeUnmount(() => {
       <span class="glass-select-arrow" aria-hidden="true" />
     </button>
 
-    <Transition name="select-pop">
-      <div v-if="open" :id="listId" class="glass-select-menu" role="listbox">
+      <Transition name="select-pop">
+      <div v-if="open" :id="listId" class="glass-select-menu" role="listbox" @click.stop>
         <button
           v-for="(option, index) in options"
           :key="String(option.value)"

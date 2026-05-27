@@ -4,6 +4,7 @@ import (
 	"encoding/base32"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -68,6 +69,7 @@ type StorageConfig struct {
 	AllowedExtensions []string `yaml:"allowed_extensions"`
 	BlockedExtensions []string `yaml:"blocked_extensions"`
 	Dirs              []Dir    `yaml:"dirs"`
+	Shares            []Dir    `yaml:"shares,omitempty"`
 }
 
 type TokensConfig struct {
@@ -82,10 +84,16 @@ type AuditConfig struct {
 type Dir struct {
 	ID            string `yaml:"id" json:"id"`
 	Name          string `yaml:"name" json:"name"`
+	Type          string `yaml:"type,omitempty" json:"type"`
 	Path          string `yaml:"path" json:"path"`
 	AllowDownload bool   `yaml:"allow_download" json:"allowDownload"`
 	AllowUpload   bool   `yaml:"allow_upload" json:"allowUpload"`
 }
+
+const (
+	ResourceDirectory = "directory"
+	ResourceFile      = "file"
+)
 
 func Load(path string) (*Config, error) {
 	// 先加载默认值，再让 YAML 覆盖，保证新增配置项对旧配置文件保持兼容。
@@ -102,6 +110,77 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+func SaveAtomic(path string, c *Config) error {
+	next := c.Clone()
+	next.normalize()
+	if err := next.validate(); err != nil {
+		return err
+	}
+	b, err := yaml.Marshal(next)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	if old, err := os.ReadFile(path); err == nil {
+		// 写回前保留一份备份，便于管理员误操作后手工恢复敏感配置和目录列表。
+		if err := writeFileAtomic(path+".bak", old, 0600); err != nil {
+			return err
+		}
+	}
+	return writeFileAtomic(path, b, 0600)
+}
+
+func writeFileAtomic(path string, content []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.yaml.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	_ = syncDir(dir)
+	return nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+func (c *Config) Clone() *Config {
+	var out Config
+	b, err := yaml.Marshal(c)
+	if err != nil || yaml.Unmarshal(b, &out) != nil {
+		return Default()
+	}
+	return &out
 }
 
 func Default() *Config {
@@ -168,6 +247,8 @@ func (c *Config) normalize() {
 	}
 	c.Storage.AllowedExtensions = normalizeExtensions(c.Storage.AllowedExtensions)
 	c.Storage.BlockedExtensions = normalizeExtensions(c.Storage.BlockedExtensions)
+	c.Storage.Dirs = normalizeResources(c.Storage.Dirs, ResourceDirectory)
+	c.Storage.Shares = normalizeResources(c.Storage.Shares, "")
 	if c.Tokens.DefaultTTLSeconds <= 0 {
 		c.Tokens.DefaultTTLSeconds = 3600
 	}
@@ -248,19 +329,79 @@ func (c *Config) validate() error {
 		}
 	}
 	seenDirs := map[string]struct{}{}
-	for _, dir := range c.Storage.Dirs {
+	for _, dir := range c.Resources() {
 		if strings.TrimSpace(dir.ID) == "" {
-			return fmt.Errorf("storage.dirs contains an empty id")
+			return fmt.Errorf("storage resources contains an empty id")
+		}
+		if !validResourceID(dir.ID) {
+			return fmt.Errorf("storage resource id %q may only contain letters, numbers, underscore and hyphen", dir.ID)
 		}
 		if strings.TrimSpace(dir.Path) == "" {
-			return fmt.Errorf("storage.dirs[%s].path must not be empty", dir.ID)
+			return fmt.Errorf("storage resource %s path must not be empty", dir.ID)
 		}
 		if _, ok := seenDirs[dir.ID]; ok {
-			return fmt.Errorf("storage.dirs contains duplicate id %q", dir.ID)
+			return fmt.Errorf("storage resources contains duplicate id %q", dir.ID)
+		}
+		if dir.Type != ResourceDirectory && dir.Type != ResourceFile {
+			return fmt.Errorf("storage resource %s type must be directory or file", dir.ID)
+		}
+		if dir.Type == ResourceFile && dir.AllowUpload {
+			return fmt.Errorf("storage file resource %s cannot allow upload", dir.ID)
+		}
+		if !dir.AllowDownload && !dir.AllowUpload {
+			return fmt.Errorf("storage resource %s must allow download or upload", dir.ID)
 		}
 		seenDirs[dir.ID] = struct{}{}
 	}
 	return nil
+}
+
+func normalizeResources(values []Dir, defaultType string) []Dir {
+	out := make([]Dir, 0, len(values))
+	for _, dir := range values {
+		dir.ID = strings.TrimSpace(dir.ID)
+		dir.Name = strings.TrimSpace(dir.Name)
+		dir.Path = strings.TrimSpace(dir.Path)
+		dir.Type = normalizeResourceType(dir.Type, defaultType)
+		if dir.Name == "" {
+			dir.Name = dir.ID
+		}
+		if dir.Type == ResourceFile {
+			dir.AllowUpload = false
+			if !dir.AllowDownload {
+				dir.AllowDownload = true
+			}
+		}
+		out = append(out, dir)
+	}
+	return out
+}
+
+func normalizeResourceType(value, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "dir" || value == "folder" || value == "" && fallback == ResourceDirectory {
+		return ResourceDirectory
+	}
+	if value == "" && fallback != "" {
+		return fallback
+	}
+	if value == ResourceFile {
+		return ResourceFile
+	}
+	return value
+}
+
+func validResourceID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func normalizeTOTPSecret(secret string) string {
@@ -325,10 +466,41 @@ func intersectExtensions(left, right []string) string {
 
 func (c *Config) Dir(id string) (Dir, bool) {
 	// 目录 ID 是所有文件、令牌和审计操作的权限边界，禁止用前端传入的真实路径查找。
-	for _, d := range c.Storage.Dirs {
+	for _, d := range c.Resources() {
 		if d.ID == id {
 			return d, true
 		}
 	}
 	return Dir{}, false
+}
+
+func (c *Config) Resources() []Dir {
+	resources := make([]Dir, 0, len(c.Storage.Dirs)+len(c.Storage.Shares))
+	for _, dir := range c.Storage.Dirs {
+		if dir.Type == "" {
+			dir.Type = ResourceDirectory
+		}
+		resources = append(resources, dir)
+	}
+	for _, share := range c.Storage.Shares {
+		if share.Type == "" {
+			share.Type = ResourceFile
+		}
+		resources = append(resources, share)
+	}
+	return resources
+}
+
+func (c *Config) SetResources(resources []Dir) {
+	dirs := make([]Dir, 0, len(resources))
+	shares := make([]Dir, 0, len(resources))
+	for _, resource := range normalizeResources(resources, ResourceDirectory) {
+		if resource.Type == ResourceFile {
+			shares = append(shares, resource)
+			continue
+		}
+		dirs = append(dirs, resource)
+	}
+	c.Storage.Dirs = dirs
+	c.Storage.Shares = shares
 }
