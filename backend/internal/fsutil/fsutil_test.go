@@ -51,6 +51,17 @@ func TestListHidesUploadTempFiles(t *testing.T) {
 	}
 }
 
+func TestListDoesNotCreateMissingBase(t *testing.T) {
+	// 浏览是只读操作，配置目录不存在时应返回错误，不能顺手在磁盘上创建目录。
+	base := filepath.Join(t.TempDir(), "missing")
+	if _, err := List(base, ""); err == nil {
+		t.Fatalf("expected missing base to fail")
+	}
+	if _, err := os.Stat(base); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected missing base to remain absent, stat error=%v", err)
+	}
+}
+
 func TestSafeNameTrimsWindowsEquivalentSuffixes(t *testing.T) {
 	// 扩展名策略使用 SafeName 后的结果，尾随空格和点必须先被规范化，避免 bad.exe 这类名称绕过黑名单。
 	cases := map[string]string{

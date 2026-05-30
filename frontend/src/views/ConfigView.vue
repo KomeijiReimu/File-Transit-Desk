@@ -309,6 +309,7 @@ onMounted(load)
         <div><span>单文件</span><strong>{{ storage?.uploadMaxFileMB }} MB</strong></div>
         <div><span>单次文件数</span><strong>{{ storage?.uploadMaxFiles }}</strong></div>
         <div><span>令牌默认有效期</span><strong>{{ Math.round((tokens?.defaultTTLSeconds || 0) / 60) }} 分钟</strong></div>
+        <div><span>令牌最长有效期</span><strong>{{ Math.round((tokens?.maxTTLSeconds || 0) / 3600) }} 小时</strong></div>
         <div><span>下载票据</span><strong>{{ Math.round((downloads?.leaseTTLSeconds || 0) / 60) }} 分钟</strong></div>
         <div><span>内容哈希阈值</span><strong>{{ downloads?.contentHashMaxMB }} MB</strong></div>
       </div>

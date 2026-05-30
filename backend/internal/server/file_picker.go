@@ -101,7 +101,7 @@ func (s *Server) filePickerList(c *fiber.Ctx) error {
 	order := normalizePickerOrder(c.Query("order", "asc"))
 	resolved, err := s.resolvePickerPath(rootID, c.Query("path"))
 	if err != nil {
-		_ = s.store.Audit("file_picker_denied", s.clientIP(c), rootID+":"+c.Query("path"))
+		_ = s.store.Audit("file_picker_denied", s.clientIP(c), fmt.Sprintf("根 %s 路径校验失败", rootID))
 		return err
 	}
 	info, err := os.Stat(resolved.absolutePath)
@@ -125,7 +125,7 @@ func (s *Server) filePickerValidate(c *fiber.Ctx) error {
 	}
 	resolved, err := s.resolvePickerPath(in.RootID, in.Path)
 	if err != nil {
-		_ = s.store.Audit("file_picker_denied", s.clientIP(c), in.RootID+":"+in.Path)
+		_ = s.store.Audit("file_picker_denied", s.clientIP(c), fmt.Sprintf("根 %s 选择校验失败", in.RootID))
 		return err
 	}
 	info, err := os.Stat(resolved.absolutePath)

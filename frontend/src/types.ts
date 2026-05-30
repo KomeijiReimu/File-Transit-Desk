@@ -40,6 +40,7 @@ export interface SafeConfig {
   }
   tokens: {
     defaultTTLSeconds: number
+    maxTTLSeconds: number
     uploadMaxMB: number
   }
   downloads: {

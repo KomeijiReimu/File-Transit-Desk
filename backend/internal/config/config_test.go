@@ -71,6 +71,20 @@ func TestConfigValidatesFilePickerRoots(t *testing.T) {
 	}
 }
 
+func TestConfigNormalizesTokenTTLUpperBound(t *testing.T) {
+	// 令牌默认有效期不能超过最长有效期，避免旧配置或手工 YAML 写出长期公开链接。
+	c := validTestConfig()
+	c.Tokens.DefaultTTLSeconds = 172800
+	c.Tokens.MaxTTLSeconds = 86400
+	next, err := c.NormalizedClone()
+	if err != nil {
+		t.Fatalf("expected token ttl normalization to pass: %v", err)
+	}
+	if next.Tokens.DefaultTTLSeconds != next.Tokens.MaxTTLSeconds {
+		t.Fatalf("expected default ttl to be clamped to max ttl, got default=%d max=%d", next.Tokens.DefaultTTLSeconds, next.Tokens.MaxTTLSeconds)
+	}
+}
+
 func validTestConfig() *Config {
 	c := Default()
 	c.Auth.DevAllowFixedCode = true

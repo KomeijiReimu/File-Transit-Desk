@@ -502,6 +502,29 @@ func (s *Store) ReleaseTokenUse(id int64, uploadBytes int64) error {
 	return err
 }
 
+func (s *Store) AdjustTokenUploadedBytes(id int64, delta int64, uploadMaxBytes int64) error {
+	if delta == 0 {
+		return nil
+	}
+	if delta < 0 {
+		rollback := -delta
+		_, err := s.DB.Exec(`UPDATE tokens SET uploaded_bytes = CASE WHEN uploaded_bytes >= ? THEN uploaded_bytes - ? ELSE 0 END WHERE id = ?`, rollback, rollback, id)
+		return err
+	}
+	res, err := s.DB.Exec(`UPDATE tokens SET uploaded_bytes = uploaded_bytes + ? WHERE id = ? AND (? <= 0 OR uploaded_bytes + ? <= ?)`, delta, id, uploadMaxBytes, delta, uploadMaxBytes)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrTokenUploadLimitExceeded
+	}
+	return nil
+}
+
 func (s *Store) Revoke(id string) error {
 	res, err := s.DB.Exec(`UPDATE tokens SET revoked = 1 WHERE id = ?`, id)
 	if err != nil {

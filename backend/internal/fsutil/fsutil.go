@@ -2,7 +2,6 @@ package fsutil
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,27 +133,7 @@ func List(base, rel string) ([]Entry, error) {
 	return out, nil
 }
 
-func UniquePath(dir, filename string) string {
-	name := SafeName(filename)
-	candidate := filepath.Join(dir, name)
-	if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
-		return candidate
-	}
-	ext := filepath.Ext(name)
-	stem := strings.TrimSuffix(name, ext)
-	for i := 1; ; i++ {
-		// 同名文件自动追加 -1、-2，配合 O_EXCL 写入可避免并发上传互相覆盖。
-		candidate = filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
-		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
-			return candidate
-		}
-	}
-}
-
 func realBase(base string) (string, error) {
-	if err := os.MkdirAll(base, 0755); err != nil {
-		return "", err
-	}
 	real, err := filepath.EvalSymlinks(base)
 	if err != nil {
 		return "", err

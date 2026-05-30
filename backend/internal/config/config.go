@@ -92,6 +92,7 @@ type FilePickerRoot struct {
 
 type TokensConfig struct {
 	DefaultTTLSeconds int64 `yaml:"default_ttl_seconds"`
+	MaxTTLSeconds     int64 `yaml:"max_ttl_seconds"`
 	UploadMaxMB       int   `yaml:"upload_max_mb"`
 }
 
@@ -225,6 +226,7 @@ func Default() *Config {
 	c.Storage.UploadMaxFiles = 20
 	c.FilePicker.MaxPageSize = 200
 	c.Tokens.DefaultTTLSeconds = 3600
+	c.Tokens.MaxTTLSeconds = int64((24 * time.Hour) / time.Second)
 	c.Tokens.UploadMaxMB = 1024
 	c.Audit.Retain = 1000
 	c.CORS.AllowOrigins = []string{"http://localhost:5173"}
@@ -284,6 +286,12 @@ func (c *Config) normalize() {
 	c.FilePicker.DenyPatterns = normalizeNames(c.FilePicker.DenyPatterns)
 	if c.Tokens.DefaultTTLSeconds <= 0 {
 		c.Tokens.DefaultTTLSeconds = 3600
+	}
+	if c.Tokens.MaxTTLSeconds <= 0 {
+		c.Tokens.MaxTTLSeconds = int64((24 * time.Hour) / time.Second)
+	}
+	if c.Tokens.DefaultTTLSeconds > c.Tokens.MaxTTLSeconds {
+		c.Tokens.DefaultTTLSeconds = c.Tokens.MaxTTLSeconds
 	}
 	if c.Audit.Retain <= 0 {
 		c.Audit.Retain = 1000
@@ -355,6 +363,9 @@ func (c *Config) validate() error {
 	}
 	if c.Tokens.DefaultTTLSeconds < 60 {
 		return fmt.Errorf("tokens.default_ttl_seconds must be at least 60")
+	}
+	if c.Tokens.MaxTTLSeconds < c.Tokens.DefaultTTLSeconds {
+		return fmt.Errorf("tokens.max_ttl_seconds must be greater than or equal to tokens.default_ttl_seconds")
 	}
 	secret := c.Auth.TOTPSecret
 	if secret == "" && !c.Auth.DevAllowFixedCode {

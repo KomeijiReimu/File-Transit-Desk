@@ -590,8 +590,8 @@ func TestAdminFilePickerProvidesSystemRootWithoutConfiguredRoots(t *testing.T) {
 	}
 }
 
-func TestUploadCommitsFinalFileWithReadablePermission(t *testing.T) {
-	// 上传先落临时文件再提交，最终文件仍保持既有 0644 权限，便于同机工具按目录权限读取。
+func TestUploadCommitsFinalFileWithOwnerOnlyPermission(t *testing.T) {
+	// 上传文件默认只允许服务端运行用户读取，避免共享主机上其他系统用户直接读到内容。
 	root := t.TempDir()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
@@ -619,8 +619,37 @@ func TestUploadCommitsFinalFileWithReadablePermission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat uploaded file: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0644 {
-		t.Fatalf("expected uploaded file mode 0644, got %v", got)
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected uploaded file mode 0600, got %v", got)
+	}
+}
+
+func TestUploadRejectsActualFileSizeOverLimit(t *testing.T) {
+	// 单文件大小限制在实际写入时再次执行，不能只依赖 multipart 头里的声明值。
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	cfg.Storage.UploadMaxMB = 2
+	cfg.Storage.UploadMaxFileMB = 1
+	app := New(cfg, st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	body, contentType := multipartUploadBody(t, "too-large.bin", bytes.Repeat([]byte("a"), 1024*1024+1))
+	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
+	req.Header.Set("Content-Type", contentType)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("upload request: %v", err)
+	}
+	assertErrorContains(t, resp, http.StatusRequestEntityTooLarge, "单个文件")
+	if _, err := os.Stat(filepath.Join(root, "too-large.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected rejected upload not to leave final file, stat=%v", err)
 	}
 }
 
@@ -1128,6 +1157,58 @@ func TestValidateLoginCodeAcceptsAdjacentTOTPWindow(t *testing.T) {
 	}
 	if !s.validateLoginCode(" " + code[:3] + " " + code[3:] + " ") {
 		t.Fatalf("expected formatted totp to be normalized and accepted")
+	}
+}
+
+func TestTokenExpiryClampsToConfiguredMaxTTL(t *testing.T) {
+	// 管理员误填过长有效期时，后端仍把公开令牌夹紧到配置上限。
+	cfg := testConfig(t.TempDir())
+	cfg.Tokens.DefaultTTLSeconds = 3600
+	cfg.Tokens.MaxTTLSeconds = 7200
+	farFuture := time.Now().Add(365 * 24 * time.Hour)
+	got := tokenExpiry(cfg, tokenRequest{ExpiresAt: &farFuture})
+	if !got.Valid {
+		t.Fatalf("expected valid expiry")
+	}
+	if time.Until(got.Time) > 7200*time.Second+time.Second {
+		t.Fatalf("expected explicit expiry to be clamped to max ttl, got %s", got.Time)
+	}
+	got = tokenExpiry(cfg, tokenRequest{TTLSeconds: 999999})
+	if time.Until(got.Time) > 7200*time.Second+time.Second {
+		t.Fatalf("expected ttl seconds to be clamped to max ttl, got %s", got.Time)
+	}
+}
+
+func TestDangerousRootRejectsBroadAndSensitiveSystemPaths(t *testing.T) {
+	// 配置管理保存资源时拦截系统顶层目录和常见凭据目录，但不禁止正常业务子目录。
+	blocked := []string{"/", "/home", "/var", "/usr/lib", "/home/alice/.ssh", "/srv/app/.kube", `C:\`, `C:\Windows\System32`, `C:\Users`}
+	for _, value := range blocked {
+		if !isDangerousRoot(value) {
+			t.Fatalf("expected %q to be dangerous", value)
+		}
+	}
+	allowed := []string{"/home/alice/share", "/mnt/data", `D:\data`}
+	for _, value := range allowed {
+		if isDangerousRoot(value) {
+			t.Fatalf("expected %q to be allowed", value)
+		}
+	}
+}
+
+func TestLoginLimiterReservesAttemptsAtomically(t *testing.T) {
+	// 限速检查和次数消耗在同一把锁内完成，避免窗口边界并发请求全部放行。
+	limiter := newLoginLimiter()
+	for i := 0; i < loginMaxFailures; i++ {
+		if !limiter.reserve("ip") {
+			t.Fatalf("attempt %d should be allowed", i+1)
+		}
+	}
+	if limiter.reserve("ip") {
+		t.Fatalf("expected attempt after max failures to be rate limited")
+	}
+	limiter.reset("ip")
+	if !limiter.reserve("ip") {
+		t.Fatalf("expected reset limiter to allow new attempt")
 	}
 }
 

@@ -69,6 +69,8 @@ file_picker:
   deny_patterns: []
 tokens:
   default_ttl_seconds: 3600
+  # 管理员创建令牌时允许的最长有效期，防止误创建长期公开链接。
+  max_ttl_seconds: 86400
   # 单个上传令牌的累计上传容量；0 表示不限制。
   upload_max_mb: 1024
 audit:

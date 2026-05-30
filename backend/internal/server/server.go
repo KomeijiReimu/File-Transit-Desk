@@ -117,6 +117,7 @@ type safeConfigDTO struct {
 	} `json:"storage"`
 	Tokens struct {
 		DefaultTTLSeconds int64 `json:"defaultTTLSeconds"`
+		MaxTTLSeconds     int64 `json:"maxTTLSeconds"`
 		UploadMaxMB       int   `json:"uploadMaxMB"`
 	} `json:"tokens"`
 	Downloads struct {
@@ -156,9 +157,10 @@ type loginAttempt struct {
 }
 
 const (
-	loginLimitWindow = 3 * time.Minute
-	loginBlockFor    = 90 * time.Second
-	loginMaxFailures = 10
+	loginLimitWindow      = 3 * time.Minute
+	loginBlockFor         = 90 * time.Second
+	loginMaxFailures      = 10
+	maxUploadNameAttempts = 10000
 )
 
 func New(cfg *config.Config, st *store.Store) *fiber.App {
@@ -353,7 +355,7 @@ func (s *Server) login(c *fiber.Ctx) error {
 	// 登录入口顺手清理过期状态，减少后台定时任务依赖。
 	_ = s.store.DeleteExpiredSessions(time.Now())
 	_ = s.store.DeleteExpiredTokens(time.Now())
-	if !s.loginLimiter.allow(ip) {
+	if !s.loginLimiter.reserve(ip) {
 		_ = s.store.Audit("login_rate_limited", ip, "")
 		c.Set("Retry-After", strconv.Itoa(int(s.loginLimiter.retryAfter(ip).Seconds())))
 		return fiber.NewError(fiber.StatusTooManyRequests, "尝试次数较多，请稍候再试。")
@@ -369,7 +371,6 @@ func (s *Server) login(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "请输入 6 位动态验证码。")
 	}
 	if !s.validateLoginCode(in.Code) {
-		s.loginLimiter.recordFailure(ip)
 		_ = s.store.Audit("login_failed", ip, "")
 		return fiber.NewError(fiber.StatusUnauthorized, "动态验证码无效，请确认设备时间已同步后重试。")
 	}
@@ -393,7 +394,7 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 	ip := s.clientIP(c)
 	_ = s.store.DeleteExpiredSessions(time.Now())
 	_ = s.store.DeleteExpiredTokens(time.Now())
-	if !s.loginLimiter.allow(ip) {
+	if !s.loginLimiter.reserve(ip) {
 		_ = s.store.Audit("login_rate_limited", ip, "管理员登录")
 		c.Set("Retry-After", strconv.Itoa(int(s.loginLimiter.retryAfter(ip).Seconds())))
 		return fiber.NewError(fiber.StatusTooManyRequests, "尝试次数较多，请稍候再试。")
@@ -406,7 +407,6 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 		return fiber.ErrBadRequest
 	}
 	if !s.validateAdminLogin(in.Username, in.Password) {
-		s.loginLimiter.recordFailure(ip)
 		_ = s.store.Audit("login_failed", ip, "管理员登录")
 		return fiber.ErrUnauthorized
 	}
@@ -592,6 +592,7 @@ func (s *Server) safeConfig(c *fiber.Ctx) error {
 	out.Storage.AllowedExtensions = append([]string{}, cfg.Storage.AllowedExtensions...)
 	out.Storage.BlockedExtensions = append([]string{}, cfg.Storage.BlockedExtensions...)
 	out.Tokens.DefaultTTLSeconds = cfg.Tokens.DefaultTTLSeconds
+	out.Tokens.MaxTTLSeconds = cfg.Tokens.MaxTTLSeconds
 	out.Tokens.UploadMaxMB = cfg.Tokens.UploadMaxMB
 	out.Downloads.LeaseTTLSeconds = cfg.Downloads.LeaseTTLSeconds
 	out.Downloads.ContentHashMaxMB = cfg.Downloads.ContentHashMaxMB
@@ -852,6 +853,11 @@ func validateResourcePath(resource config.Dir) error {
 }
 
 func isDangerousRoot(path string) bool {
+	original := strings.TrimSpace(strings.ToLower(path))
+	winOriginal := strings.TrimRight(strings.ReplaceAll(original, "\\", "/"), "/")
+	if len(winOriginal) == 2 && winOriginal[1] == ':' || winOriginal == "c:/users" || strings.HasPrefix(winOriginal, "c:/windows") || strings.HasPrefix(winOriginal, "c:/program files") || strings.HasPrefix(winOriginal, "c:/programdata") {
+		return true
+	}
 	clean, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
 		clean = filepath.Clean(path)
@@ -860,10 +866,27 @@ func isDangerousRoot(path string) bool {
 		return true
 	}
 	lower := strings.ToLower(clean)
-	dangerous := []string{"/etc", "/bin", "/sbin", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/usr/bin", "/usr/sbin", `c:\`, `c:\windows`, `c:\program files`}
-	for _, value := range dangerous {
+	winLower := strings.TrimRight(strings.ReplaceAll(lower, "\\", "/"), "/")
+	prefixDangerous := []string{"/etc", "/bin", "/sbin", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/usr", "/lib", "/lib64", `c:\windows`, `c:\program files`, `c:\program files (x86)`, `c:\programdata`}
+	for _, value := range prefixDangerous {
 		value = filepath.Clean(strings.ToLower(value))
-		if lower == value || strings.HasPrefix(lower, value+string(filepath.Separator)) {
+		winValue := strings.TrimRight(strings.ReplaceAll(value, "\\", "/"), "/")
+		if lower == value || strings.HasPrefix(lower, value+string(filepath.Separator)) || strings.HasPrefix(lower, value+`\`) || winLower == winValue || strings.HasPrefix(winLower, winValue+"/") {
+			return true
+		}
+	}
+	// /home、/var、/mnt 等顶层位置可包含合法业务目录，但直接共享整个顶层目录过宽，先拦截根本身。
+	exactDangerous := []string{"/home", "/var", "/opt", "/tmp", "/srv", "/mnt", "/media", `c:\`, `d:\`, `e:\`, `c:\users`}
+	for _, value := range exactDangerous {
+		value = filepath.Clean(strings.ToLower(value))
+		winValue := strings.TrimRight(strings.ReplaceAll(value, "\\", "/"), "/")
+		if lower == value || winLower == winValue {
+			return true
+		}
+	}
+	for _, part := range strings.FieldsFunc(lower, func(r rune) bool { return r == '/' || r == '\\' }) {
+		switch part {
+		case ".ssh", ".gnupg", ".kube":
 			return true
 		}
 	}
@@ -893,7 +916,7 @@ func (s *Server) listFiles(c *fiber.Ctx) error {
 	}
 	if isFileResource(dir) {
 		if err := validateFileResourceListPath(dir, c.Query("path")); err != nil {
-			_ = s.store.Audit("illegal_access", s.clientIP(c), err.Error())
+			_ = s.store.Audit("illegal_access", s.clientIP(c), fmt.Sprintf("单文件资源 %s 路径校验失败", dir.ID))
 			return err
 		}
 		entry, err := fileResourceEntry(dir)
@@ -905,7 +928,7 @@ func (s *Server) listFiles(c *fiber.Ctx) error {
 	}
 	entries, err := fsutil.List(dir.Path, c.Query("path"))
 	if err != nil {
-		_ = s.store.Audit("illegal_access", s.clientIP(c), err.Error())
+		_ = s.store.Audit("illegal_access", s.clientIP(c), fmt.Sprintf("目录 %s 列表路径校验失败", dir.ID))
 		return friendlyPathError(err, "路径不存在，请检查路径或返回上级目录。")
 	}
 	_, safePath, _ := fsutil.Resolve(dir.Path, c.Query("path"))
@@ -1185,9 +1208,13 @@ func (s *Server) saveUploads(c *fiber.Ctx, dir config.Dir, rel string, files []*
 	if !dir.AllowUpload {
 		return uploadResponse{}, fiber.ErrForbidden
 	}
+	// 上传路径允许在首次使用时创建资源根目录；普通浏览仍保持只读，不会隐式创建目录。
+	if err := os.MkdirAll(dir.Path, 0755); err != nil {
+		return uploadResponse{}, friendlyPathError(err, "上传目录不存在或不可访问。")
+	}
 	targetDir, safeRel, err := fsutil.ResolveForCreate(dir.Path, rel)
 	if err != nil {
-		_ = s.store.Audit("illegal_access", s.clientIP(c), err.Error())
+		_ = s.store.Audit("illegal_access", s.clientIP(c), fmt.Sprintf("目录 %s 上传路径校验失败", dir.ID))
 		return uploadResponse{}, fiber.ErrBadRequest
 	}
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -1201,7 +1228,7 @@ func (s *Server) saveUploads(c *fiber.Ctx, dir config.Dir, rel string, files []*
 	resp := uploadResponse{OK: true, Files: make([]uploadedFile, 0, len(files))}
 	saved := make([]string, 0, len(files))
 	for _, fh := range files {
-		dst, err := saveFileUniqueAtomic(targetDir, fh)
+		dst, size, err := saveFileUniqueAtomic(targetDir, fh, mbToBytes(s.cfg().Storage.UploadMaxFileMB))
 		if err != nil {
 			for _, path := range saved {
 				_ = os.Remove(path)
@@ -1211,20 +1238,20 @@ func (s *Server) saveUploads(c *fiber.Ctx, dir config.Dir, rel string, files []*
 		saved = append(saved, dst)
 		name := filepath.Base(dst)
 		relPath := filepath.ToSlash(filepath.Join(safeRel, name))
-		resp.Files = append(resp.Files, uploadedFile{Name: name, Path: relPath, Size: fh.Size})
+		resp.Files = append(resp.Files, uploadedFile{Name: name, Path: relPath, Size: size})
 	}
 	resp.Uploaded = len(resp.Files)
 	_ = s.store.Audit("upload", s.clientIP(c), fmt.Sprintf("目录 %s，路径 %s，上传 %d 个文件", dir.ID, displayPath(safeRel), resp.Uploaded))
 	return resp, nil
 }
 
-func saveFileUniqueAtomic(dir string, fh *multipart.FileHeader) (string, error) {
+func saveFileUniqueAtomic(dir string, fh *multipart.FileHeader, maxBytes int64) (string, int64, error) {
 	name := fsutil.SafeName(fh.Filename)
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
 	tmp, err := os.CreateTemp(dir, ".upload-*.tmp")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
@@ -1232,25 +1259,29 @@ func saveFileUniqueAtomic(dir string, fh *multipart.FileHeader) (string, error) 
 	in, err := fh.Open()
 	if err != nil {
 		_ = tmp.Close()
-		return "", err
+		return "", 0, err
 	}
-	_, copyErr := io.Copy(tmp, in)
+	// FileHeader.Size 由解析器填充，但落盘时仍按实际读取字节数二次限流，避免任何解析差异绕过单文件上限。
+	written, copyErr := io.Copy(tmp, io.LimitReader(in, maxBytes+1))
 	closeInErr := in.Close()
 	closeOutErr := tmp.Close()
 	if copyErr != nil || closeInErr != nil || closeOutErr != nil {
 		if copyErr != nil {
-			return "", copyErr
+			return "", 0, copyErr
 		}
 		if closeInErr != nil {
-			return "", closeInErr
+			return "", 0, closeInErr
 		}
-		return "", closeOutErr
+		return "", 0, closeOutErr
 	}
-	if err := os.Chmod(tmpName, 0644); err != nil {
-		return "", err
+	if written > maxBytes {
+		return "", 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, "单个文件超过大小限制。")
+	}
+	if err := os.Chmod(tmpName, 0600); err != nil {
+		return "", 0, err
 	}
 
-	for i := 0; ; i++ {
+	for i := 0; i < maxUploadNameAttempts; i++ {
 		candidateName := name
 		if i > 0 {
 			// 同名文件使用递增后缀，不覆盖已有文件。
@@ -1260,13 +1291,14 @@ func saveFileUniqueAtomic(dir string, fh *multipart.FileHeader) (string, error) 
 		// 先写入一个同目录临时文件，再把同一个临时文件提交到首个可用文件名，避免并发同名大文件重复写入。
 		done, err := commitTempFile(tmpName, dst)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		if !done {
 			continue
 		}
-		return dst, nil
+		return dst, written, nil
 	}
+	return "", 0, fiber.NewError(fiber.StatusConflict, "同名文件过多，请更换文件名后重试。")
 }
 
 func commitTempFile(tmpName, dst string) (bool, error) {
@@ -1276,7 +1308,7 @@ func commitTempFile(tmpName, dst string) (bool, error) {
 		return false, nil
 	}
 	// 某些 Windows、网络盘或受限挂载不支持硬链接；降级为 O_EXCL 复制，仍保证不覆盖已有文件。
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if errors.Is(err, os.ErrExist) {
 		return false, nil
 	}
@@ -1363,18 +1395,28 @@ func newLoginLimiter() *loginLimiter {
 	return &loginLimiter{attempts: map[string]loginAttempt{}}
 }
 
-func (l *loginLimiter) allow(key string) bool {
+func (l *loginLimiter) reserve(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
+	l.cleanupLocked(now)
 	attempt := l.attempts[key]
 	if !attempt.blockedTil.IsZero() && now.Before(attempt.blockedTil) {
 		return false
 	}
-	if now.Sub(attempt.windowFrom) > loginLimitWindow {
+	if attempt.windowFrom.IsZero() || now.Sub(attempt.windowFrom) > loginLimitWindow {
 		// 旧窗口外的失败次数不再参与限速，避免偶发错误长期影响登录。
-		delete(l.attempts, key)
+		attempt = loginAttempt{windowFrom: now}
 	}
+	attempt.count++
+	if attempt.count > loginMaxFailures {
+		attempt.blockedTil = now.Add(loginBlockFor)
+		attempt.count = 0
+		attempt.windowFrom = now
+		l.attempts[key] = attempt
+		return false
+	}
+	l.attempts[key] = attempt
 	return true
 }
 
@@ -1386,24 +1428,6 @@ func (l *loginLimiter) retryAfter(key string) time.Duration {
 		return time.Second
 	}
 	return remaining
-}
-
-func (l *loginLimiter) recordFailure(key string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := time.Now()
-	l.cleanupLocked(now)
-	attempt := l.attempts[key]
-	if attempt.windowFrom.IsZero() || now.Sub(attempt.windowFrom) > loginLimitWindow {
-		attempt = loginAttempt{windowFrom: now}
-	}
-	attempt.count++
-	if attempt.count >= loginMaxFailures {
-		attempt.blockedTil = now.Add(loginBlockFor)
-		attempt.count = 0
-		attempt.windowFrom = now
-	}
-	l.attempts[key] = attempt
 }
 
 func (l *loginLimiter) cleanupLocked(now time.Time) {
@@ -1539,11 +1563,16 @@ func ensureUploadTokenTarget(fullPath string) error {
 
 func tokenExpiry(cfg *config.Config, in tokenRequest) sql.NullTime {
 	// 兼容新旧字段优先级：显式过期时间 > ttl_seconds/ttlMinutes > 默认 TTL。
+	now := time.Now()
+	maxExpiresAt := now.Add(time.Duration(cfg.Tokens.MaxTTLSeconds) * time.Second)
 	expiresAt := in.ExpiresAt
 	if expiresAt == nil {
 		expiresAt = in.ExpiresOld
 	}
 	if expiresAt != nil {
+		if cfg.Tokens.MaxTTLSeconds > 0 && expiresAt.After(maxExpiresAt) {
+			return sql.NullTime{Time: maxExpiresAt, Valid: true}
+		}
 		return sql.NullTime{Time: *expiresAt, Valid: true}
 	}
 	ttlSeconds := in.TTLSeconds
@@ -1553,7 +1582,10 @@ func tokenExpiry(cfg *config.Config, in tokenRequest) sql.NullTime {
 	if ttlSeconds <= 0 {
 		ttlSeconds = cfg.Tokens.DefaultTTLSeconds
 	}
-	return sql.NullTime{Time: time.Now().Add(time.Duration(ttlSeconds) * time.Second), Valid: true}
+	if cfg.Tokens.MaxTTLSeconds > 0 && ttlSeconds > cfg.Tokens.MaxTTLSeconds {
+		ttlSeconds = cfg.Tokens.MaxTTLSeconds
+	}
+	return sql.NullTime{Time: now.Add(time.Duration(ttlSeconds) * time.Second), Valid: true}
 }
 
 func (s *Server) revokeToken(c *fiber.Ctx) error {
@@ -1775,8 +1807,35 @@ func (s *Server) publicUpload(c *fiber.Ctx) error {
 		_ = s.store.Audit("token_upload_failed", s.clientIP(c), fmt.Sprint(t.ID))
 		return err
 	}
+	actualBytes := uploadResponseBytes(resp)
+	if err := s.store.AdjustTokenUploadedBytes(t.ID, actualBytes-totalBytes, s.tokenUploadMaxBytes()); err != nil {
+		cleanupUploadedResponse(dir, resp)
+		_ = s.store.ReleaseTokenUse(t.ID, totalBytes)
+		_ = s.store.Audit("token_upload_failed", s.clientIP(c), fmt.Sprint(t.ID))
+		if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
+			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "upload token quota exceeded")
+		}
+		return err
+	}
 	_ = s.store.Audit("token_use", s.clientIP(c), fmt.Sprint(t.ID))
 	return c.JSON(resp)
+}
+
+func uploadResponseBytes(resp uploadResponse) int64 {
+	var total int64
+	for _, file := range resp.Files {
+		total += file.Size
+	}
+	return total
+}
+
+func cleanupUploadedResponse(dir config.Dir, resp uploadResponse) {
+	for _, file := range resp.Files {
+		full, _, err := fsutil.Resolve(dir.Path, file.Path)
+		if err == nil {
+			_ = os.Remove(full)
+		}
+	}
 }
 
 func (s *Server) reservePublicToken(c *fiber.Ctx, tokenType string, uploadBytes int64) (store.Token, config.Dir, error) {
@@ -1787,7 +1846,7 @@ func (s *Server) reservePublicToken(c *fiber.Ctx, tokenType string, uploadBytes 
 	}
 	t, err := s.store.ReserveTokenUse(hash, tokenType, time.Now(), uploadBytes, s.tokenUploadMaxBytes())
 	if err != nil {
-		_ = s.store.Audit("token_denied", s.clientIP(c), err.Error())
+		_ = s.store.Audit("token_denied", s.clientIP(c), "公开令牌不可用或已超出限制")
 		if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
 			return t, config.Dir{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "upload token quota exceeded")
 		}

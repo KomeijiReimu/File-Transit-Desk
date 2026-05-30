@@ -205,6 +205,19 @@ func TestTokenUploadByteQuota(t *testing.T) {
 	if _, err := st.ReserveTokenUse("hash", "upload", time.Now(), 500, 1000); !errors.Is(err, ErrTokenUploadLimitExceeded) {
 		t.Fatalf("expected upload quota error, got %v", err)
 	}
+	if err := st.AdjustTokenUploadedBytes(reserved.ID, 500, 1000); !errors.Is(err, ErrTokenUploadLimitExceeded) {
+		t.Fatalf("expected adjustment over quota to fail, got %v", err)
+	}
+	if err := st.AdjustTokenUploadedBytes(reserved.ID, -100, 1000); err != nil {
+		t.Fatalf("adjust token bytes down: %v", err)
+	}
+	adjusted, err := st.TokenByHash("hash")
+	if err != nil {
+		t.Fatalf("reload adjusted token: %v", err)
+	}
+	if adjusted.UploadedBytes != 500 || adjusted.Uses != 1 {
+		t.Fatalf("expected byte adjustment without use rollback, got bytes=%d uses=%d", adjusted.UploadedBytes, adjusted.Uses)
+	}
 
 	if err := st.ReleaseTokenUse(reserved.ID, 600); err != nil {
 		t.Fatalf("release token: %v", err)

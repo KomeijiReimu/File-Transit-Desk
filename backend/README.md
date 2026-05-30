@@ -74,6 +74,7 @@ go run ./cmd/server -config config.yaml
 - `file_picker.roots`：管理员服务端文件选择器的常用位置快捷入口；未配置也会提供系统入口。选择器仅辅助填写共享资源路径，不提供删除、重命名、移动、上传或编辑能力。
 - `file_picker.max_page_size` / `file_picker.deny_names` / `file_picker.deny_patterns`：文件选择器分页上限和可选隐藏规则。
 - `tokens.default_ttl_seconds`：令牌默认有效期。
+- `tokens.max_ttl_seconds`：令牌最长有效期，管理员传入更长的 `expiresAt` 或 `ttlSeconds` 会被夹紧到该上限。
 - `tokens.upload_max_mb`：单个上传令牌的累计上传容量；`0` 表示不限制。
 - `audit.retain`：审计日志保留条数。
 
@@ -228,6 +229,8 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 保存资源时后端会校验 ID 字符集、路径是否存在、目录/文件类型是否匹配、读写权限以及危险系统目录；即使路径来自文件选择器，保存资源时也会再次校验。成功后原子写回 `config.yaml`，保留 `config.yaml.bak`，并热更新内存中的资源列表。目录资源写入 `storage.dirs`，单文件资源写入 `storage.shares`。在线保存会重新序列化 YAML，原配置文件注释和手工排版不会保留。
 
 `file_picker.roots` 只是快捷入口，不是唯一选择范围。容器部署时，选择器看到的是容器内路径；若要选择宿主机目录，必须先以卷挂载方式暴露给容器。
+
+下载带宽限制建议在 Nginx、Caddy、Traefik 等反向代理层统一配置，应用层保持对 HTTP Range 和长连接下载的稳定支持。
 
 ## Docker
 

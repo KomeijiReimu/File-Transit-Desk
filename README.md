@@ -311,6 +311,7 @@ rm -rf backend/uploads/*
 | `file_picker.roots` | 管理员服务端文件选择器的常用位置快捷入口；未配置也会提供系统入口 |
 | `file_picker.max_page_size` | 文件选择器单页最大返回条目数 |
 | `tokens.default_ttl_seconds` | 临时令牌默认有效期 |
+| `tokens.max_ttl_seconds` | 临时令牌最长有效期，管理员输入更长时间会被夹紧到该上限 |
 | `tokens.upload_max_mb` | 单个上传令牌累计上传容量，`0` 表示不限制 |
 | `audit.retain` | 审计日志保留条数 |
 
@@ -370,6 +371,8 @@ go run ./cmd/server -config config.yaml
 
 登录失败限速和审计日志都会使用后端解析出的客户端 IP。
 
+大文件下载限速建议放在反向代理层统一处理，例如 Nginx 可按部署场景配置 `limit_rate`、`limit_conn` 或更细的下载 location 策略，避免应用进程自行节流影响 HTTP Range 续传和静态文件发送效率。
+
 ### Cookie 与跨站请求防护
 
 - HTTPS 生产部署时应将 `auth.cookie_secure` 设置为 `true`，确保浏览器只通过安全连接发送会话 Cookie。
@@ -411,6 +414,7 @@ downloads:
 - `storage.upload_max_files`：单次请求文件数量；
 - `storage.allowed_extensions`：扩展名白名单，空数组表示不限制；
 - `storage.blocked_extensions`：扩展名黑名单，优先级高于白名单；默认清空，可在管理页按需添加；
+- `tokens.max_ttl_seconds`：临时令牌最长有效期，避免误创建长期公开链接。
 - `tokens.upload_max_mb`：单个上传令牌累计上传容量，`0` 表示不限制。
 
 上传文件名会先规范化再做扩展名判断，尾随空格、尾随点和控制字符不会绕过策略。扩展名策略只是准入规则，不等同于内容安全检测；策略修改后只影响之后的新上传和公开上传令牌。文件会先写入同目录临时文件，完整写入后再提交为最终文件名；如果同一次多文件上传中途失败，本次已保存文件会被清理，公开上传令牌的次数和容量也会回滚。
