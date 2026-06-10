@@ -77,6 +77,49 @@ async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T>
   }
 }
 
+function uploadForm<T>(url: string, form: FormData, onProgress?: (progress: { loaded: number; total: number; percent: number }) => void, suppressAuthRedirect = false): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url)
+    xhr.withCredentials = true
+    xhr.upload.onprogress = (event) => {
+      const total = event.lengthComputable && event.total > 0 ? event.total : 0
+      const loaded = event.loaded || 0
+      const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+      onProgress?.({ loaded, total, percent })
+    }
+    xhr.onerror = () => reject(new ApiError('无法连接服务器，请检查后端服务或网络连接。', 0))
+    xhr.onload = () => {
+      const contentType = xhr.getResponseHeader('content-type') || ''
+      const text = xhr.responseText || ''
+      const payload = contentType.includes('application/json') && text ? safeJSON(text) : text
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const message =
+          (payload && typeof payload === 'object' && ('message' in payload || 'error' in payload)
+            ? String((payload as { message?: string; error?: string }).message || (payload as { error?: string }).error)
+            : '') || `请求失败（${xhr.status}）`
+        if (!suppressAuthRedirect && xhr.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
+          window.dispatchEvent(new Event('ft:auth-expired'))
+          router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
+        }
+        reject(new ApiError(message, xhr.status, payload))
+        return
+      }
+      onProgress?.({ loaded: 1, total: 1, percent: 100 })
+      resolve((payload || {}) as T)
+    }
+    xhr.send(form)
+  })
+}
+
+function safeJSON(text: string) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
+}
+
 const query = (params: Record<string, string | number | undefined>) => {
   // 忽略空值，避免 path='' 这类根路径被序列化成多余查询参数。
   const search = new URLSearchParams()
@@ -114,13 +157,13 @@ export const api = {
     Array.from(files).forEach((file) => form.append('files', file))
     return request<{ ok: boolean; uploaded?: number }>('/api/files/upload', { method: 'POST', body: form })
   },
-  uploadOne: (dirId: string, path: string, file: File) => {
+  uploadOne: (dirId: string, path: string, file: File, onProgress?: (progress: { loaded: number; total: number; percent: number }) => void) => {
     // 单文件上传用于队列逐项重试，失败时不会影响队列中其他文件的状态。
     const form = new FormData()
     form.set('dirId', dirId)
     form.set('path', path)
     form.append('files', file)
-    return request<{ ok: boolean; uploaded?: number }>('/api/files/upload', { method: 'POST', body: form })
+    return uploadForm<{ ok: boolean; uploaded?: number }>('/api/files/upload', form, onProgress)
   },
   createDownloadLease: (dirId: string, path: string) =>
     request<DownloadLeaseResponse>('/api/files/download-lease', {
@@ -156,13 +199,10 @@ export const api = {
   // 公开分享接口不带登录态要求，全部依赖 token 或下载票据授权。
   publicTokenInfo: (token: string) =>
     request<TokenInfo>(`/t/${encodeURIComponent(token)}/info`),
-  publicUpload: (token: string, file: File) => {
+  publicUpload: (token: string, file: File, onProgress?: (progress: { loaded: number; total: number; percent: number }) => void) => {
     const form = new FormData()
     form.append('files', file)
-    return request<{ ok: boolean; uploaded?: number }>(`/t/${encodeURIComponent(token)}/upload`, {
-      method: 'POST',
-      body: form,
-    })
+    return uploadForm<{ ok: boolean; uploaded?: number }>(`/t/${encodeURIComponent(token)}/upload`, form, onProgress, true)
   },
   createPublicDownloadLease: (token: string) =>
     request<DownloadLeaseResponse>(`/t/${encodeURIComponent(token)}/download-lease`, { method: 'POST' }),

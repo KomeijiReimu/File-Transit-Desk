@@ -19,6 +19,7 @@ const rootsLoaded = ref(false)
 const dialogRef = ref<HTMLElement | null>(null)
 const rootId = ref('')
 const currentPath = ref('/')
+const addressInput = ref('/')
 const parentPath = ref('')
 const items = ref<FilePickerItem[]>([])
 const page = ref(1)
@@ -28,6 +29,7 @@ const loading = ref(false)
 const validating = ref(false)
 const error = ref('')
 const sortValue = ref('name:asc')
+const suppressRootWatch = ref(false)
 
 const rootOptions = computed(() => roots.value.map((root) => ({ label: root.name, value: root.id })))
 const sortOptions = [
@@ -107,6 +109,7 @@ async function loadPath(path: string, nextPage = 1, append = false) {
     const [sort, order] = sortValue.value.split(':')
     const result = await api.filePickerList(rootId.value, path, nextPage, pageSize, sort, order)
     currentPath.value = result.path || '/'
+    addressInput.value = displayAddress(currentRoot.value, currentPath.value)
     parentPath.value = result.parentPath || ''
     sortValue.value = `${result.sort}:${result.order}`
     page.value = result.page
@@ -117,6 +120,85 @@ async function loadPath(path: string, nextPage = 1, append = false) {
   } finally {
     loading.value = false
   }
+}
+
+async function loadPathInRoot(nextRootId: string, path: string) {
+  if (!nextRootId) return
+  if (nextRootId !== rootId.value) {
+    suppressRootWatch.value = true
+    rootId.value = nextRootId
+    await nextTick()
+    suppressRootWatch.value = false
+  }
+  await loadPath(path)
+}
+
+function jumpToAddress() {
+  const target = parseAddress(addressInput.value)
+  if (!target) return
+  void loadPathInRoot(target.rootId, target.path)
+}
+
+function selectAddressInput(event: FocusEvent) {
+  ;(event.target as HTMLInputElement | null)?.select()
+}
+
+function parseAddress(rawValue: string): { rootId: string; path: string } | null {
+  const raw = rawValue.trim()
+  if (!raw) return { rootId: rootId.value, path: '/' }
+  const windowsDrive = raw.match(/^([a-zA-Z]):[\\/]?(.*)$/)
+  if (windowsDrive) {
+    const drive = windowsDrive[1].toLowerCase()
+    const root = roots.value.find((item) => rootDrive(item) === drive || item.id === `drive_${drive}`)
+    if (!root) {
+      error.value = `当前服务器没有 ${drive.toUpperCase()}: 入口。`
+      return null
+    }
+    return { rootId: root.id, path: toVirtualPath(windowsDrive[2] || '') }
+  }
+  if (raw.startsWith('/') || raw.startsWith('\\')) {
+    const systemRoot = roots.value.find((item) => rootComparablePath(item) === '' || item.id === 'system_root')
+    if (systemRoot) return { rootId: systemRoot.id, path: toVirtualPath(raw) }
+    const matched = roots.value
+      .map((item) => ({ item, base: rootComparablePath(item) }))
+      .filter(({ base }) => base && normalizedPath(raw).startsWith(base))
+      .sort((a, b) => b.base.length - a.base.length)[0]
+    if (matched) {
+      const rest = normalizedPath(raw).slice(matched.base.length)
+      return { rootId: matched.item.id, path: toVirtualPath(rest) }
+    }
+  }
+  return { rootId: rootId.value, path: toVirtualPath(raw) }
+}
+
+function toVirtualPath(value: string) {
+  const cleaned = value.replace(/\\/g, '/').replace(/^\/+/, '')
+  return cleaned ? `/${cleaned}` : '/'
+}
+
+function normalizedPath(value: string) {
+  return value.trim().replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase()
+}
+
+function rootComparablePath(root?: FilePickerRoot) {
+  if (!root) return ''
+  const raw = root.path || root.name || ''
+  if (raw === '/') return ''
+  return normalizedPath(raw)
+}
+
+function rootDrive(root?: FilePickerRoot) {
+  const raw = (root?.path || root?.name || '').trim()
+  const match = raw.match(/^([a-zA-Z]):[\\/]?$/)
+  return match?.[1].toLowerCase() || ''
+}
+
+function displayAddress(root: FilePickerRoot | undefined, path: string) {
+  const base = root?.path || root?.name || ''
+  const rel = path.replace(/^\//, '')
+  if (/^[a-zA-Z]:[\\/]?$/.test(base)) return rel ? `${base.replace(/[\\/]?$/, '\\')}${rel.replace(/\//g, '\\')}` : base
+  if (base === '/' || !base) return path || '/'
+  return rel ? `${base.replace(/[\\/]$/, '')}/${rel}` : base
 }
 
 function enter(item: FilePickerItem) {
@@ -157,7 +239,9 @@ function itemTypeLabel(item: FilePickerItem) {
 }
 
 watch(rootId, () => {
+  if (suppressRootWatch.value) return
   currentPath.value = '/'
+  addressInput.value = displayAddress(currentRoot.value, '/')
   items.value = []
   if (props.open && rootId.value) void loadPath('/')
 })
@@ -204,28 +288,36 @@ onBeforeUnmount(() => close())
               <label>排序
                 <GlassSelect v-model="sortValue" :options="sortOptions" aria-label="选择排序方式" />
               </label>
-              <div class="picker-actions">
-                <button class="ghost-btn" type="button" :disabled="!parentPath || loading" @click="loadPath(parentPath || '/')">返回上级</button>
-                <button class="ghost-btn" type="button" :disabled="loading" @click="loadPath(currentPath)">刷新</button>
-              </div>
             </div>
+
+            <form class="picker-address" @submit.prevent="jumpToAddress">
+              <label>路径
+                <input v-model.trim="addressInput" autocomplete="off" spellcheck="false" placeholder="输入路径后回车跳转" :disabled="loading" @focus="selectAddressInput" />
+              </label>
+              <div class="picker-actions">
+                <button class="ghost-btn" type="button" :disabled="!parentPath || loading" @click="loadPath(parentPath || '/')">上级</button>
+                <button class="ghost-btn" type="button" :disabled="loading" @click="loadPath(currentPath)">刷新</button>
+                <button class="primary-btn" type="submit" :disabled="loading">跳转</button>
+              </div>
+            </form>
 
             <nav class="picker-breadcrumbs" aria-label="当前位置">
               <button v-for="crumb in breadcrumbs" :key="crumb.path" type="button" @click="loadPath(crumb.path)">{{ crumb.name }}</button>
             </nav>
 
-            <div class="picker-list" :aria-busy="loading">
-              <div class="picker-list-head">
-                <span>名称</span><span>类型</span><span>大小</span><span>修改时间</span><span>操作</span>
-              </div>
-              <div v-for="item in items" :key="item.path" class="picker-row" :data-muted="!item.readable || item.symlink" @dblclick="enter(item)">
-                <span class="picker-name"><span class="picker-icon">{{ item.type === 'directory' ? '📁' : item.symlink ? '↪' : '📄' }}</span>{{ item.name }}</span>
-                <span>{{ itemTypeLabel(item) }}</span>
-                <span>{{ formatSize(item.size) }}</span>
-                <span>{{ item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : '—' }}</span>
-                <span class="picker-row-actions">
-                  <button v-if="item.type === 'directory'" class="mini-btn" type="button" @click.stop="enter(item)">进入</button>
-                  <button class="mini-btn" type="button" :disabled="!item.selectable || item.type !== mode || validating" @click.stop="selectPath(item.path)">选择</button>
+            <div class="picker-browser" :aria-busy="loading">
+              <div v-for="item in items" :key="item.path" class="picker-card" :data-muted="!item.readable || item.symlink" :data-kind="item.type">
+                <span class="picker-card-open" :role="item.type === 'directory' ? 'button' : undefined" :tabindex="item.type === 'directory' ? 0 : -1" @click="enter(item)" @keydown.enter.prevent="enter(item)" @keydown.space.prevent="enter(item)">
+                  <span class="picker-card-icon" aria-hidden="true">{{ item.type === 'directory' ? '📁' : item.symlink ? '↪' : '📄' }}</span>
+                  <span class="picker-card-main">
+                    <strong>{{ item.name }}</strong>
+                    <small>{{ itemTypeLabel(item) }} · {{ formatSize(item.size) }}</small>
+                    <small>{{ item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : '—' }}</small>
+                  </span>
+                </span>
+                <span class="picker-card-actions" @click.stop>
+                  <button v-if="item.type === 'directory'" class="mini-btn" type="button" @click="enter(item)">打开</button>
+                  <button class="mini-btn" type="button" :disabled="!item.selectable || item.type !== mode || validating" @click="selectPath(item.path)">选择</button>
                 </span>
               </div>
               <div v-if="loading" class="state-block compact"><span class="loader" /> 正在读取目录…</div>
@@ -240,7 +332,7 @@ onBeforeUnmount(() => close())
               <div class="picker-actions">
                 <button v-if="hasMore" class="ghost-btn" type="button" :disabled="loading" @click="loadPath(currentPath, page + 1, true)">加载更多</button>
                 <button class="ghost-btn" type="button" @click="close">取消</button>
-                <button class="primary-btn" type="button" :disabled="!canSelectCurrentDirectory || validating" @click="selectPath(currentPath)">选择当前目录</button>
+                <button v-if="mode === 'directory'" class="primary-btn" type="button" :disabled="!canSelectCurrentDirectory || validating" @click="selectPath(currentPath)">选择当前目录</button>
               </div>
             </footer>
           </template>

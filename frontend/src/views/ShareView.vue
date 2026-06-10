@@ -11,6 +11,9 @@ interface UploadItem {
   id: string
   file: File
   status: 'queued' | 'uploading' | 'success' | 'error'
+  progress: number
+  loaded: number
+  total: number
   error?: string
 }
 
@@ -60,8 +63,8 @@ const headline = computed(() => {
 const subline = computed(() => {
   if (!info.value || !validFlag.value) return reasonLabel.value
   return isUpload.value
-    ? '把文件拖到下方，或选择文件，即可上传到对方指定的位置。'
-    : '点击下方按钮即可开始下载，链接将根据规则自动到期或失效。'
+    ? '把文件拖到下方，或选择文件即可上传。'
+    : '点击下方按钮即可开始下载。'
 })
 
 const usesLabel = computed(() => {
@@ -109,6 +112,10 @@ let counter = 0
 const nextId = () => `up-${Date.now()}-${++counter}`
 const uploading = computed(() => queue.value.some((item) => item.status === 'uploading'))
 const hasPendingUploads = computed(() => queue.value.some((item) => item.status === 'queued' || item.status === 'error'))
+const totalBytes = computed(() => queue.value.reduce((sum, item) => sum + item.file.size, 0))
+const finishedBytes = computed(() => queue.value.reduce((sum, item) => sum + (item.status === 'success' ? item.file.size : item.status === 'uploading' ? item.loaded : 0), 0))
+const finishedCount = computed(() => queue.value.filter((item) => item.status === 'success').length)
+const overallProgress = computed(() => totalBytes.value > 0 ? Math.min(100, Math.round((finishedBytes.value / totalBytes.value) * 100)) : 0)
 
 function pickFiles() {
   if (uploading.value) return
@@ -120,7 +127,7 @@ function addFiles(files: FileList | File[]) {
   const list = Array.from(files || [])
   for (const file of list) {
     // 使用本地唯一 ID 跟踪状态，避免同名文件在队列中互相覆盖。
-    queue.value.push({ id: nextId(), file, status: 'queued' })
+    queue.value.push({ id: nextId(), file, status: 'queued', progress: 0, loaded: 0, total: file.size })
   }
 }
 
@@ -149,9 +156,18 @@ function removeItem(id: string) {
 async function uploadItem(item: UploadItem) {
   if (item.status === 'uploading' || item.status === 'success') return
   item.status = 'uploading'
+  item.progress = 0
+  item.loaded = 0
+  item.total = item.file.size
   item.error = undefined
   try {
-    await api.publicUpload(tokenParam.value, item.file)
+    await api.publicUpload(tokenParam.value, item.file, (progress) => {
+      item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
+      item.total = progress.total || item.file.size
+      item.progress = progress.percent
+    })
+    item.progress = 100
+    item.loaded = item.file.size
     item.status = 'success'
   } catch (err) {
     item.status = 'error'
@@ -219,7 +235,7 @@ onMounted(loadInfo)
         <template v-if="isDownload">
           <div v-if="validFlag" class="share-actions">
             <button class="primary-btn big" type="button" :disabled="downloading" @click="startPublicDownload">{{ downloading ? '准备下载…' : '⇩ 立即下载' }}</button>
-            <small>下载会先兑换短期票据，断点续传不会重复消耗使用次数。</small>
+            <small>下载链接会自动处理长文件传输。</small>
           </div>
           <div v-else class="alert error">{{ reasonLabel }}</div>
         </template>
@@ -230,10 +246,15 @@ onMounted(loadInfo)
             <div
               class="dropzone"
               :class="{ over: dragOver }"
+              role="button"
+              tabindex="0"
+              :aria-disabled="uploading"
               @click="pickFiles"
               @dragover="onDragOver"
               @dragleave="dragOver = false"
               @drop="onDrop"
+              @keydown.enter.prevent="pickFiles"
+              @keydown.space.prevent="pickFiles"
             >
               <div class="dropzone-symbol" aria-hidden="true"><span /></div>
               <strong>把文件拖到这里</strong>
@@ -253,10 +274,14 @@ onMounted(loadInfo)
                   <strong>{{ item.file.name }}</strong>
                   <small>{{ formatBytes(item.file.size) }} · <span class="q-status">{{
                     item.status === 'queued' ? '待上传'
-                    : item.status === 'uploading' ? '上传中…'
+                    : item.status === 'uploading' ? item.progress >= 100 ? '处理中…' : `上传中 ${item.progress}%`
                     : item.status === 'success' ? '已完成'
                     : item.error || '失败'
                   }}</span></small>
+                  <div class="upload-progress" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
+                    <span :style="{ width: `${item.status === 'success' ? 100 : item.progress}%` }" />
+                  </div>
+                  <small v-if="item.status === 'uploading'" class="upload-progress-text">{{ formatBytes(item.loaded) }} / {{ formatBytes(item.total || item.file.size) }}</small>
                 </div>
                 <div class="q-actions">
                   <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="retryItem(item)">重试</button>
@@ -266,6 +291,13 @@ onMounted(loadInfo)
             </ul>
 
             <div class="share-actions">
+              <div v-if="queue.length" class="upload-summary share-upload-summary">
+                <div>
+                  <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${queue.length}` }}</strong>
+                  <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}</small>
+                </div>
+                <div class="upload-progress wide" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
+              </div>
               <button class="primary-btn big" type="button" :disabled="!hasPendingUploads || uploading" @click="uploadAll">
                 {{ uploading ? '上传中…' : '开始上传' }}
               </button>
@@ -281,7 +313,7 @@ onMounted(loadInfo)
       </article>
 
       <footer class="share-foot">
-        <small>由文件传输台为你安全分发 · 所有访问都会被记录</small>
+        <small>由文件传输台提供临时分享</small>
       </footer>
     </div>
   </main>

@@ -12,6 +12,9 @@ interface UploadItem {
   id: string
   file: File
   status: 'queued' | 'uploading' | 'success' | 'error'
+  progress: number
+  loaded: number
+  total: number
   error?: string
 }
 
@@ -36,6 +39,10 @@ const dirOptions = computed(() => dirs.value.map((dir) => ({
 const canUpload = computed(() => Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const hasPendingUploads = computed(() => uploadQueue.value.some((item) => item.status === 'queued' || item.status === 'error'))
 const uploading = computed(() => uploadQueue.value.some((item) => item.status === 'uploading'))
+const totalBytes = computed(() => uploadQueue.value.reduce((sum, item) => sum + item.file.size, 0))
+const finishedBytes = computed(() => uploadQueue.value.reduce((sum, item) => sum + (item.status === 'success' ? item.file.size : item.status === 'uploading' ? item.loaded : 0), 0))
+const finishedCount = computed(() => uploadQueue.value.filter((item) => item.status === 'success').length)
+const overallProgress = computed(() => totalBytes.value > 0 ? Math.min(100, Math.round((finishedBytes.value / totalBytes.value) * 100)) : 0)
 // 返回浏览页时带回当前目录和上传路径，用户可直接检查刚上传的位置。
 const filesRoute = computed(() => ({ name: 'files', query: { dirId: selectedDirId.value, path: targetPath.value } }))
 let restoringInitialQuery = true
@@ -66,7 +73,7 @@ function addUploadFiles(files: FileList | File[]) {
     return
   }
   Array.from(files).forEach((file) => {
-    uploadQueue.value.push({ id: `local-${Date.now()}-${++uploadCounter}`, file, status: 'queued' })
+    uploadQueue.value.push({ id: `local-${Date.now()}-${++uploadCounter}`, file, status: 'queued', progress: 0, loaded: 0, total: file.size })
   })
 }
 
@@ -93,12 +100,20 @@ async function uploadItem(item: UploadItem) {
   if (!selectedDirId.value) return
   if (item.status === 'uploading' || item.status === 'success' || uploading.value) return
   item.status = 'uploading'
+  item.progress = 0
+  item.loaded = 0
+  item.total = item.file.size
   item.error = undefined
   try {
     // 队列逐个调用单文件接口，失败项可以单独重试，不影响已完成项。
-    await api.uploadOne(selectedDirId.value, targetPath.value, item.file)
+    await api.uploadOne(selectedDirId.value, targetPath.value, item.file, (progress) => {
+      item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
+      item.total = progress.total || item.file.size
+      item.progress = progress.percent
+    })
+    item.progress = 100
+    item.loaded = item.file.size
     item.status = 'success'
-    notice.value = `已上传 ${item.file.name}`
   } catch (err) {
     item.status = 'error'
     item.error = err instanceof ApiError ? err.message : '上传失败，可稍后重试。'
@@ -107,8 +122,12 @@ async function uploadItem(item: UploadItem) {
 
 async function uploadAll() {
   if (uploading.value) return
+  notice.value = ''
   for (const item of uploadQueue.value.filter((item) => item.status === 'queued' || item.status === 'error')) {
     await uploadItem(item)
+  }
+  if (!uploadQueue.value.some((item) => item.status === 'error') && uploadQueue.value.some((item) => item.status === 'success')) {
+    notice.value = '上传完成。'
   }
 }
 
@@ -136,7 +155,7 @@ onMounted(loadDirs)
       <div>
         <p class="eyebrow">Upload</p>
         <h1>文件上传</h1>
-        <p>上传操作独立在这里完成，文件浏览页会保持更清爽的列表视图。</p>
+        <p>选择目标位置后添加文件，上传进度会在队列中实时显示。</p>
       </div>
       <div class="header-actions">
         <RouterLink class="ghost-btn" :to="filesRoute">查看此目录文件</RouterLink>
@@ -167,6 +186,7 @@ onMounted(loadDirs)
           :class="{ over: dragOver }"
           role="button"
           tabindex="0"
+          :aria-disabled="uploading || !canUpload"
           @dragover.prevent="dragOver = !uploading"
           @dragleave="dragOver = false"
           @drop="onDrop"
@@ -191,7 +211,11 @@ onMounted(loadDirs)
           <li v-for="item in uploadQueue" :key="item.id" :data-status="item.status">
             <div class="q-file">
               <strong>{{ item.file.name }}</strong>
-              <small>{{ formatBytes(item.file.size) }} · {{ item.status === 'queued' ? '待上传' : item.status === 'uploading' ? '上传中…' : item.status === 'success' ? '已完成' : item.error }}</small>
+              <small>{{ formatBytes(item.file.size) }} · {{ item.status === 'queued' ? '待上传' : item.status === 'uploading' ? item.progress >= 100 ? '处理中…' : `上传中 ${item.progress}%` : item.status === 'success' ? '已完成' : item.error }}</small>
+              <div class="upload-progress" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
+                <span :style="{ width: `${item.status === 'success' ? 100 : item.progress}%` }" />
+              </div>
+              <small v-if="item.status === 'uploading'" class="upload-progress-text">{{ formatBytes(item.loaded) }} / {{ formatBytes(item.total || item.file.size) }}</small>
             </div>
             <div class="q-actions">
               <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="uploadItem(item)">重试</button>
@@ -200,9 +224,16 @@ onMounted(loadDirs)
           </li>
         </ul>
 
-        <button v-if="uploadQueue.length" class="primary-btn" type="button" :disabled="!hasPendingUploads || uploading || !canUpload" @click="uploadAll">
-          {{ uploading ? '上传中…' : '上传队列' }}
-        </button>
+        <div v-if="uploadQueue.length" class="upload-summary">
+          <div>
+            <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${uploadQueue.length}` }}</strong>
+            <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}</small>
+          </div>
+          <div class="upload-progress wide" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
+          <button class="primary-btn" type="button" :disabled="!hasPendingUploads || uploading || !canUpload" @click="uploadAll">
+            {{ uploading ? '上传中…' : '开始上传' }}
+          </button>
+        </div>
       </div>
     </template>
   </section>

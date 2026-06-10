@@ -58,6 +58,7 @@ export interface UploadPolicyPayload {
 export interface FilePickerRoot {
   id: string
   name: string
+  path?: string
   allowSelectFiles: boolean
   allowSelectDirs: boolean
 }

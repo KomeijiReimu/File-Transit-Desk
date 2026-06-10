@@ -29,6 +29,7 @@ type uploadPolicyResponse struct {
 type filePickerRootDTO struct {
 	ID               string `json:"id"`
 	Name             string `json:"name"`
+	Path             string `json:"path"`
 	AllowSelectFiles bool   `json:"allowSelectFiles"`
 	AllowSelectDirs  bool   `json:"allowSelectDirs"`
 }
@@ -84,7 +85,7 @@ func (s *Server) filePickerRoots(c *fiber.Ctx) error {
 	roots := s.filePickerRootsForRuntime()
 	out := make([]filePickerRootDTO, 0, len(roots))
 	for _, root := range roots {
-		out = append(out, filePickerRootDTO{ID: root.ID, Name: root.Name, AllowSelectFiles: root.AllowSelectFiles, AllowSelectDirs: root.AllowSelectDirs})
+		out = append(out, filePickerRootDTO{ID: root.ID, Name: root.Name, Path: root.Path, AllowSelectFiles: root.AllowSelectFiles, AllowSelectDirs: root.AllowSelectDirs})
 	}
 	return c.JSON(out)
 }

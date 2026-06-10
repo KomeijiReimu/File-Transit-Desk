@@ -483,6 +483,23 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
 		t.Fatalf("create admin session: %v", err)
 	}
+	rootsReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/roots", nil)
+	rootsReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	rootsResp, err := app.Test(rootsReq)
+	if err != nil {
+		t.Fatalf("picker roots: %v", err)
+	}
+	var roots []filePickerRootDTO
+	decodeJSON(t, rootsResp, &roots)
+	foundRootPath := false
+	for _, pickerRoot := range roots {
+		if pickerRoot.ID == "pick" && pickerRoot.Path == root {
+			foundRootPath = true
+		}
+	}
+	if rootsResp.StatusCode != http.StatusOK || !foundRootPath {
+		t.Fatalf("expected picker roots to expose path for address bar, status=%d roots=%+v", rootsResp.StatusCode, roots)
+	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&pageSize=10", nil)
 	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
