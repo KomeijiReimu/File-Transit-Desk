@@ -305,19 +305,18 @@ onBeforeUnmount(() => close())
               <button v-for="crumb in breadcrumbs" :key="crumb.path" type="button" @click="loadPath(crumb.path)">{{ crumb.name }}</button>
             </nav>
 
-            <div class="picker-browser" :aria-busy="loading">
-              <div v-for="item in items" :key="item.path" class="picker-card" :data-muted="!item.readable || item.symlink" :data-kind="item.type">
-                <span class="picker-card-open" :role="item.type === 'directory' ? 'button' : undefined" :tabindex="item.type === 'directory' ? 0 : -1" @click="enter(item)" @keydown.enter.prevent="enter(item)" @keydown.space.prevent="enter(item)">
-                  <span class="picker-card-icon" aria-hidden="true">{{ item.type === 'directory' ? '📁' : item.symlink ? '↪' : '📄' }}</span>
-                  <span class="picker-card-main">
-                    <strong>{{ item.name }}</strong>
-                    <small>{{ itemTypeLabel(item) }} · {{ formatSize(item.size) }}</small>
-                    <small>{{ item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : '—' }}</small>
-                  </span>
-                </span>
-                <span class="picker-card-actions" @click.stop>
-                  <button v-if="item.type === 'directory'" class="mini-btn" type="button" @click="enter(item)">打开</button>
-                  <button class="mini-btn" type="button" :disabled="!item.selectable || item.type !== mode || validating" @click="selectPath(item.path)">选择</button>
+            <div class="picker-list" :aria-busy="loading">
+              <div class="picker-list-head">
+                <span>名称</span><span>类型</span><span>大小</span><span>修改时间</span><span>操作</span>
+              </div>
+              <div v-for="item in items" :key="item.path" class="picker-row" :data-muted="!item.readable || item.symlink" @dblclick="enter(item)">
+                <span class="picker-name"><span class="picker-icon">{{ item.type === 'directory' ? '📁' : item.symlink ? '↪' : '📄' }}</span>{{ item.name }}</span>
+                <span>{{ itemTypeLabel(item) }}</span>
+                <span>{{ formatSize(item.size) }}</span>
+                <span>{{ item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : '—' }}</span>
+                <span class="picker-row-actions">
+                  <button v-if="item.type === 'directory'" class="mini-btn" type="button" @click.stop="enter(item)">进入</button>
+                  <button class="mini-btn" type="button" :disabled="!item.selectable || item.type !== mode || validating" @click.stop="selectPath(item.path)">选择</button>
                 </span>
               </div>
               <div v-if="loading" class="state-block compact"><span class="loader" /> 正在读取目录…</div>

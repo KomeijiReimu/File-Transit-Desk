@@ -4,11 +4,12 @@ import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
 import { isAdmin } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
-import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { DirectoryInfo, FileEntry } from '@/types'
+import { useGsapEntrance } from '@/useGsapEntrance'
 import { formatBytes, formatDate, joinPath, parentPath } from '@/utils'
 
+const pageRef = ref<HTMLElement | null>(null)
 const dirs = ref<DirectoryInfo[]>([])
 const route = useRoute()
 const selectedDirId = ref('')
@@ -23,15 +24,13 @@ const responseCanDownload = ref<boolean | null>(null)
 let restoringQuery = false
 
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === selectedDirId.value))
-const dirOptions = computed(() => dirs.value.map((dir) => ({
-  label: dir.label || dir.name,
-  value: dir.id,
-  hint: dir.description || dir.root || dir.id,
-})))
 const canUpload = computed(() => responseCanUpload.value ?? Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const canDownload = computed(() => responseCanDownload.value ?? (selectedDir.value ? selectedDir.value.canDownload !== false && selectedDir.value.allowDownload !== false : false))
 const selectedIsFileResource = computed(() => selectedDir.value?.type === 'file')
 const crumbs = computed(() => [{ name: selectedDir.value?.name || '目录', path: '' }, ...currentPath.value.split('/').filter(Boolean).map((part, index, arr) => ({ name: part, path: arr.slice(0, index + 1).join('/') }))])
+const motionKey = computed(() => (!loading.value && dirs.value.length ? `${dirs.value.length}:${selectedDirId.value || 'none'}` : ''))
+
+useGsapEntrance(pageRef, { refreshKey: () => motionKey.value })
 
 function tokenQuery(type: 'download' | 'upload', entry?: FileEntry) {
   const path = entry ? (entry.path || joinPath(currentPath.value, entry.name)) : currentPath.value
@@ -55,7 +54,7 @@ async function loadDirs() {
     dirs.value = await api.dirs()
     const queryDir = String(route.query.dirId || '')
     restoringQuery = true
-    selectedDirId.value = dirs.value.some((dir) => dir.id === queryDir) ? queryDir : dirs.value[0]?.id || ''
+    selectedDirId.value = dirs.value.some((dir) => dir.id === queryDir) ? queryDir : dirs.value.length === 1 ? dirs.value[0]?.id || '' : ''
     currentPath.value = String(route.query.path || '')
     if (selectedDirId.value) await loadFiles()
     restoringQuery = false
@@ -89,6 +88,28 @@ function openDir(entry: FileEntry) {
   currentPath.value = joinPath(currentPath.value, entry.name)
 }
 
+function selectResource(dir: DirectoryInfo) {
+  if (selectedDirId.value === dir.id && !currentPath.value) return
+  if (selectedDirId.value === dir.id) {
+    currentPath.value = ''
+    return
+  }
+  selectedDirId.value = dir.id
+}
+
+function resourceDescription(dir: DirectoryInfo) {
+  return dir.description || (dir.type === 'file' ? '单文件共享' : '共享目录')
+}
+
+function resourcePermissionLabel(dir: DirectoryInfo) {
+  const upload = Boolean(dir.canUpload ?? dir.allowUpload)
+  const download = dir.canDownload !== false && dir.allowDownload !== false
+  if (upload && download) return '可上传 · 可下载'
+  if (upload) return '可上传'
+  if (download) return '可下载'
+  return '只读配置'
+}
+
 async function startDownload(entry: FileEntry) {
   if (!selectedDirId.value || entryIsDir(entry) || downloadingPath.value) return
   const path = entry.path || joinPath(currentPath.value, entry.name)
@@ -111,6 +132,7 @@ watch(selectedDirId, async () => {
   currentPath.value = ''
   responseCanUpload.value = null
   responseCanDownload.value = null
+  entries.value = []
   if (selectedDirId.value) await loadFiles()
 })
 watch(currentPath, () => {
@@ -121,22 +143,42 @@ onMounted(loadDirs)
 </script>
 
 <template>
-  <section class="page-stack">
+  <section ref="pageRef" class="page-stack files-page">
     <header class="page-header split">
       <div>
         <p class="eyebrow">Files</p>
         <h1>文件浏览</h1>
-        <p>选择目录并浏览路径，文件列表会直接显示在当前目录下方。</p>
+        <p>像打开文件夹一样进入共享位置，再沿路径查看文件。</p>
       </div>
-      <GlassSelect v-model="selectedDirId" class="page-select" :options="dirOptions" aria-label="选择目录" placeholder="选择目录" />
     </header>
 
     <StateBlock :loading="loading" :error="error" />
 
     <EmptyState v-if="!loading && !dirs.length" title="还没有可用目录" description="请先在后端配置可访问目录。" />
 
-    <template v-else-if="selectedDir">
-      <div class="panel dir-summary">
+    <div v-if="!loading && dirs.length" class="resource-browser" data-motion>
+      <button
+        v-for="dir in dirs"
+        :key="dir.id"
+        class="resource-tile"
+        type="button"
+        :data-active="dir.id === selectedDirId"
+        :data-type="dir.type === 'file' ? 'file' : 'directory'"
+        @click="selectResource(dir)"
+      >
+        <span class="resource-icon" aria-hidden="true"><span /></span>
+        <span class="resource-copy">
+          <strong>{{ dir.label || dir.name }}</strong>
+          <small>{{ resourceDescription(dir) }}</small>
+          <small>{{ resourcePermissionLabel(dir) }}</small>
+        </span>
+      </button>
+    </div>
+
+    <EmptyState v-if="!loading && dirs.length && !selectedDir" title="请选择共享位置" description="点击上方文件夹即可进入对应位置。" />
+
+    <template v-if="selectedDir">
+      <div class="panel dir-summary" data-motion>
         <div>
           <strong>{{ selectedDir.label || selectedDir.name }}</strong>
           <p>{{ selectedDir.description || selectedDir.root || '已配置目录' }}</p>
@@ -148,7 +190,7 @@ onMounted(loadDirs)
         </div>
       </div>
 
-      <div class="toolbar panel">
+      <div class="toolbar panel" data-motion>
         <nav class="breadcrumbs" aria-label="面包屑">
           <button v-for="crumb in crumbs" :key="crumb.path || 'root'" type="button" @click="currentPath = crumb.path">
             {{ crumb.name }}
@@ -161,7 +203,7 @@ onMounted(loadDirs)
         </div>
       </div>
 
-      <div class="table-card">
+      <div class="table-card" data-motion>
         <table v-if="entries.length" class="data-table">
           <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
           <tbody>
