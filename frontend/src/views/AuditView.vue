@@ -10,7 +10,10 @@ import { formatDate } from '@/utils'
 const logs = ref<AuditLog[]>([])
 const loading = ref(true)
 const error = ref('')
-const limit = ref(100)
+const page = ref(1)
+const pageSize = ref(50)
+const total = ref(0)
+const totalPages = ref(0)
 const keyword = ref('')
 const status = ref('all')
 const statusOptions = [
@@ -31,12 +34,16 @@ const filteredLogs = computed(() => {
   })
 })
 
-async function load(nextLimit = limit.value) {
+async function load(nextPage = page.value) {
   loading.value = true
   error.value = ''
   try {
-    logs.value = await api.auditLogs({ limit: nextLimit })
-    limit.value = nextLimit
+    const result = await api.auditLogPage({ page: nextPage, pageSize: pageSize.value })
+    logs.value = result.logs
+    page.value = result.page
+    pageSize.value = result.pageSize
+    total.value = result.total
+    totalPages.value = result.totalPages
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '访问记录加载失败。'
   } finally {
@@ -44,9 +51,9 @@ async function load(nextLimit = limit.value) {
   }
 }
 
-function loadMore() {
-  // 后端最多返回 500 条，前端逐步增大 limit，避免首次进入加载过多历史记录。
-  load(Math.min(limit.value + 100, 500))
+function goPage(nextPage: number) {
+  if (nextPage < 1 || (totalPages.value > 0 && nextPage > totalPages.value)) return
+  load(nextPage)
 }
 
 onMounted(() => load())
@@ -64,7 +71,7 @@ function logTone(log: AuditLog) {
   <section class="page-stack audit-page">
     <header class="page-header split">
       <div><p class="eyebrow">Audit</p><h1>访问记录</h1><p>查看最近登录、下载、上传、令牌访问等行为。</p></div>
-      <button class="ghost-btn" @click="load()">刷新</button>
+      <button class="ghost-btn" @click="load(page)">刷新</button>
     </header>
 
     <div class="panel filter-bar">
@@ -73,6 +80,14 @@ function logTone(log: AuditLog) {
         <GlassSelect v-model="status" :options="statusOptions" aria-label="筛选访问记录状态" />
       </label>
       <button class="ghost-btn" type="button" @click="keyword = ''; status = 'all'">清空筛选</button>
+    </div>
+
+    <div v-if="total > 0" class="panel pagination-bar">
+      <span>第 {{ page }} / {{ totalPages || 1 }} 页，共 {{ total }} 条</span>
+      <div class="row-actions">
+        <button class="mini-btn" type="button" :disabled="loading || page <= 1" @click="goPage(page - 1)">上一页</button>
+        <button class="mini-btn" type="button" :disabled="loading || page >= totalPages" @click="goPage(page + 1)">下一页</button>
+      </div>
     </div>
 
     <StateBlock :loading="loading" :error="error" />
@@ -85,7 +100,6 @@ function logTone(log: AuditLog) {
           <small>{{ formatDate(log.createdAt || log.time) }} · {{ log.ip || '未知 IP' }} · {{ log.status || '完成' }}</small>
         </div>
       </article>
-      <button v-if="limit < 500" class="ghost-btn full" type="button" :disabled="loading" @click="loadMore">加载更多记录</button>
     </div>
     <EmptyState v-else-if="!loading" title="暂无访问记录" description="调整筛选条件，或等待后端产生审计事件后再查看。" />
   </section>

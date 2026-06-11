@@ -302,8 +302,8 @@ rm -rf backend/uploads/*
 | `auth.cookie_secure` | HTTPS 部署时建议设为 `true` |
 | `web.static_dir` | 前端构建产物目录 |
 | `cors.allow_origins` | 允许的前端来源，不能使用 `*` |
-| `storage.upload_max_mb` | 单次上传请求总大小限制 |
-| `storage.upload_max_file_mb` | 单个文件大小限制 |
+| `storage.upload_max_mb` | 单次上传请求总大小限制，示例默认 5120 MB |
+| `storage.upload_max_file_mb` | 单个文件大小限制，示例默认 5120 MB |
 | `storage.upload_max_files` | 单次请求最多文件数量 |
 | `storage.allowed_extensions` / `storage.blocked_extensions` | 上传扩展名白名单与黑名单，管理员可在 Web 配置页维护 |
 | `storage.dirs` | 开放目录资源列表及上传/下载权限，可由管理员配置管理页维护 |
@@ -312,7 +312,7 @@ rm -rf backend/uploads/*
 | `file_picker.max_page_size` | 文件选择器单页最大返回条目数 |
 | `tokens.default_ttl_seconds` | 临时令牌默认有效期 |
 | `tokens.max_ttl_seconds` | 临时令牌最长有效期，管理员输入更长时间会被夹紧到该上限 |
-| `tokens.upload_max_mb` | 单个上传令牌累计上传容量，`0` 表示不限制 |
+| `tokens.upload_max_mb` | 单个上传令牌累计上传容量，示例默认 5120 MB，`0` 表示不限制 |
 | `audit.retain` | 审计日志保留条数 |
 
 ## 部署方式
@@ -335,7 +335,7 @@ docker compose -f docker-compose.example.yml up -d --build
 http://服务器地址:17878
 ```
 
-前端 nginx 容器会代理 `/api` 和 `/t` 到后端容器。此方式要求 `backend/` 和 `frontend/` 保持同级目录；后端容器使用非 root 用户运行，请确保挂载的 `config/`、`data/` 和上传目录对容器用户可写。配置管理页依赖目录挂载来原子写回 `config/config.yaml`；若希望禁止管理员页面在线写回配置，可把配置目录改成只读挂载。
+前端 nginx 容器会代理 `/api` 和 `/t` 到后端容器，默认允许 10G 上传并关闭上传代理缓冲，以便 2G 级文件稳定透传到后端。此方式要求 `backend/` 和 `frontend/` 保持同级目录；后端容器使用非 root 用户运行，请确保挂载的 `config/`、`data/` 和上传目录对容器用户可写。配置管理页依赖目录挂载来原子写回 `config/config.yaml`；若希望禁止管理员页面在线写回配置，可把配置目录改成只读挂载。
 
 如需修改 Docker 对外访问端口，调整 `backend/docker-compose.example.yml` 中的左侧端口即可：
 
@@ -409,13 +409,13 @@ downloads:
 
 `backend/config.example.yaml` 中提供以下上传限制：
 
-- `storage.upload_max_mb`：单次上传请求总量；
-- `storage.upload_max_file_mb`：单个文件大小；
+- `storage.upload_max_mb`：单次上传请求总量，示例默认 5120 MB；
+- `storage.upload_max_file_mb`：单个文件大小，示例默认 5120 MB；
 - `storage.upload_max_files`：单次请求文件数量；
 - `storage.allowed_extensions`：扩展名白名单，空数组表示不限制；
 - `storage.blocked_extensions`：扩展名黑名单，优先级高于白名单；默认清空，可在管理页按需添加；
 - `tokens.max_ttl_seconds`：临时令牌最长有效期，避免误创建长期公开链接。
-- `tokens.upload_max_mb`：单个上传令牌累计上传容量，`0` 表示不限制。
+- `tokens.upload_max_mb`：单个上传令牌累计上传容量，示例默认 5120 MB，`0` 表示不限制。
 
 上传文件名会先规范化再做扩展名判断，尾随空格、尾随点和控制字符不会绕过策略。扩展名策略只是准入规则，不等同于内容安全检测；策略修改后只影响之后的新上传和公开上传令牌。文件会先写入同目录临时文件，完整写入后再提交为最终文件名；如果同一次多文件上传中途失败，本次已保存文件会被清理，公开上传令牌的次数和容量也会回滚。
 

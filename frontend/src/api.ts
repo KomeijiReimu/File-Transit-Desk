@@ -2,6 +2,7 @@ import router from '@/router'
 import type {
   AdminLoginPayload,
   AuditLog,
+  AuditLogPage,
   CreateTokenPayload,
   CreateTokenResponse,
   DirectoryInfo,
@@ -14,6 +15,7 @@ import type {
   SafeConfig,
   TokenInfo,
   UploadPolicyPayload,
+  UploadLimits,
   UserInfo,
 } from '@/types'
 
@@ -31,6 +33,11 @@ export class ApiError extends Error {
 
 // suppressAuthRedirect 用于心跳、会话恢复和公开页，避免后台探测接口把用户强制跳走。
 type ApiRequestInit = RequestInit & { suppressAuthRedirect?: boolean }
+type UploadOptions = {
+  onProgress?: (progress: { loaded: number; total: number; percent: number }) => void
+  signal?: AbortSignal
+  suppressAuthRedirect?: boolean
+}
 
 async function parseResponse<T>(response: Response, suppressAuthRedirect = false): Promise<T> {
   const contentType = response.headers.get('content-type') || ''
@@ -77,9 +84,27 @@ async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T>
   }
 }
 
-function uploadForm<T>(url: string, form: FormData, onProgress?: (progress: { loaded: number; total: number; percent: number }) => void, suppressAuthRedirect = false): Promise<T> {
+function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {}): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    const { onProgress, signal, suppressAuthRedirect = false } = options
+    let settled = false
+    const rejectOnce = (err: ApiError) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    }
+    const resolveOnce = (value: T) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    if (signal?.aborted) {
+      rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
+      return
+    }
+    const abortHandler = () => xhr.abort()
+    signal?.addEventListener('abort', abortHandler, { once: true })
     xhr.open('POST', url)
     xhr.withCredentials = true
     xhr.upload.onprogress = (event) => {
@@ -88,8 +113,11 @@ function uploadForm<T>(url: string, form: FormData, onProgress?: (progress: { lo
       const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
       onProgress?.({ loaded, total, percent })
     }
-    xhr.onerror = () => reject(new ApiError('无法连接服务器，请检查后端服务或网络连接。', 0))
+    xhr.onerror = () => rejectOnce(new ApiError('上传连接中断。请检查网络、后端是否仍在运行，或文件是否超过服务端/代理上传上限。', 0))
+    xhr.ontimeout = () => rejectOnce(new ApiError('上传超时。请检查网络稳定性，或调高反向代理上传超时时间。', 0))
+    xhr.onabort = () => rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
     xhr.onload = () => {
+      signal?.removeEventListener('abort', abortHandler)
       const contentType = xhr.getResponseHeader('content-type') || ''
       const text = xhr.responseText || ''
       const payload = contentType.includes('application/json') && text ? safeJSON(text) : text
@@ -102,11 +130,11 @@ function uploadForm<T>(url: string, form: FormData, onProgress?: (progress: { lo
           window.dispatchEvent(new Event('ft:auth-expired'))
           router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
         }
-        reject(new ApiError(message, xhr.status, payload))
+        rejectOnce(new ApiError(message, xhr.status, payload))
         return
       }
       onProgress?.({ loaded: 1, total: 1, percent: 100 })
-      resolve((payload || {}) as T)
+      resolveOnce((payload || {}) as T)
     }
     xhr.send(form)
   })
@@ -132,6 +160,8 @@ const query = (params: Record<string, string | number | undefined>) => {
 
 export interface AuditFilter {
   limit?: number
+  page?: number
+  pageSize?: number
   action?: string
   status?: string
 }
@@ -149,6 +179,7 @@ export const api = {
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   dirs: () => request<DirectoryInfo[]>('/api/dirs'),
+  uploadLimits: () => request<UploadLimits>('/api/upload-policy'),
   listFiles: (dirId: string, path = '') => request<ListFilesResponse>(`/api/files/list${query({ dirId, path })}`),
   upload: (dirId: string, path: string, files: FileList | File[]) => {
     const form = new FormData()
@@ -157,13 +188,13 @@ export const api = {
     Array.from(files).forEach((file) => form.append('files', file))
     return request<{ ok: boolean; uploaded?: number }>('/api/files/upload', { method: 'POST', body: form })
   },
-  uploadOne: (dirId: string, path: string, file: File, onProgress?: (progress: { loaded: number; total: number; percent: number }) => void) => {
+  uploadOne: (dirId: string, path: string, file: File, options: UploadOptions = {}) => {
     // 单文件上传用于队列逐项重试，失败时不会影响队列中其他文件的状态。
     const form = new FormData()
     form.set('dirId', dirId)
     form.set('path', path)
     form.append('files', file)
-    return uploadForm<{ ok: boolean; uploaded?: number }>('/api/files/upload', form, onProgress)
+    return uploadForm<{ ok: boolean; uploaded?: number }>('/api/files/upload', form, options)
   },
   createDownloadLease: (dirId: string, path: string) =>
     request<DownloadLeaseResponse>('/api/files/download-lease', {
@@ -179,6 +210,8 @@ export const api = {
     request<{ ok: boolean }>(`/api/tokens/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
   auditLogs: (filter: AuditFilter = {}) =>
     request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status })}`),
+  auditLogPage: (filter: AuditFilter = {}) =>
+    request<AuditLogPage>(`/api/audit/logs${query({ page: filter.page, pageSize: filter.pageSize, action: filter.action, status: filter.status })}`),
   safeConfig: () => request<SafeConfig>('/api/config'),
   updateUploadPolicy: (payload: UploadPolicyPayload) =>
     request<UploadPolicyPayload>('/api/config/upload-policy', { method: 'PUT', body: JSON.stringify(payload) }),
@@ -199,10 +232,10 @@ export const api = {
   // 公开分享接口不带登录态要求，全部依赖 token 或下载票据授权。
   publicTokenInfo: (token: string) =>
     request<TokenInfo>(`/t/${encodeURIComponent(token)}/info`),
-  publicUpload: (token: string, file: File, onProgress?: (progress: { loaded: number; total: number; percent: number }) => void) => {
+  publicUpload: (token: string, file: File, options: UploadOptions = {}) => {
     const form = new FormData()
     form.append('files', file)
-    return uploadForm<{ ok: boolean; uploaded?: number }>(`/t/${encodeURIComponent(token)}/upload`, form, onProgress, true)
+    return uploadForm<{ ok: boolean; uploaded?: number }>(`/t/${encodeURIComponent(token)}/upload`, form, { ...options, suppressAuthRedirect: true })
   },
   createPublicDownloadLease: (token: string) =>
     request<DownloadLeaseResponse>(`/t/${encodeURIComponent(token)}/download-lease`, { method: 'POST' }),

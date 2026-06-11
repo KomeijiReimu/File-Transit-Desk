@@ -221,13 +221,13 @@ func Default() *Config {
 	c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
 	c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
 	c.Downloads.ContentHashMaxMB = 64
-	c.Storage.UploadMaxMB = 512
-	c.Storage.UploadMaxFileMB = 512
+	c.Storage.UploadMaxMB = 5120
+	c.Storage.UploadMaxFileMB = 5120
 	c.Storage.UploadMaxFiles = 20
 	c.FilePicker.MaxPageSize = 200
 	c.Tokens.DefaultTTLSeconds = 3600
 	c.Tokens.MaxTTLSeconds = int64((24 * time.Hour) / time.Second)
-	c.Tokens.UploadMaxMB = 1024
+	c.Tokens.UploadMaxMB = 5120
 	c.Audit.Retain = 1000
 	c.CORS.AllowOrigins = []string{"http://localhost:5173"}
 	return c
@@ -266,7 +266,7 @@ func (c *Config) normalize() {
 		c.Downloads.LeaseTTLSeconds = c.Downloads.LeaseMaxTTLSeconds
 	}
 	if c.Storage.UploadMaxMB <= 0 {
-		c.Storage.UploadMaxMB = 512
+		c.Storage.UploadMaxMB = 5120
 	}
 	if c.Storage.UploadMaxFileMB <= 0 {
 		c.Storage.UploadMaxFileMB = c.Storage.UploadMaxMB

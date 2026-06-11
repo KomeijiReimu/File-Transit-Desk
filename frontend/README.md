@@ -8,12 +8,12 @@
   - 普通 TOTP 登录：调用 `/api/auth/login`，进入受限的文件浏览视图。
   - 管理员账号密码登录：调用 `/api/auth/admin-login`，前端在 `authState.role` 中标记 `admin`，并显示令牌管理、访问记录、配置管理等管理入口。
 - **文件浏览页**：调用 `/api/dirs` 与 `/api/files/list`，支持目录/单文件资源切换、面包屑、返回上级、权限提示、下载，并提供“上传到此处”入口。管理员还可以从文件行直接跳到令牌页创建下载分享，或从当前目录创建上传分享。上传区域已从浏览页拆出，目录工具栏下方会直接显示文件列表。
-- **文件上传页**：调用 `/api/dirs` 与 `/api/files/upload`，支持目录和目标路径选择、拖拽区域、文件队列、上传状态以及失败后的**重试**按钮。“拖拽文件到此上传”和“或点击按钮选择文件，队列支持失败重试”采用分行间距展示，避免说明文案过于紧凑。
+- **文件上传页**：调用 `/api/dirs`、`/api/upload-policy` 与 `/api/files/upload`，只展示允许上传的目录资源，支持目录和目标路径选择、拖拽区域、文件队列、上传进度、随时取消、失败重试以及上传前大小/扩展名提示。
 - **令牌管理页（管理员）**：调用 `/api/tokens`，支持创建下载/上传令牌、设置资源/路径/有效期/最大使用次数。目录资源的下载令牌路径必须指向已存在的具体文件，单文件资源无需填写相对路径；上传令牌只能选择允许上传的目录资源。生成后的链接统一转换成 `/share/{token}` 形式，并仅在创建成功时提供一键**复制链接**按钮与复制成功提示；历史令牌列表不会再次显示明文链接。列表中的“撤销”用于立即让链接失效；仍可用令牌显示“删除并失效”，已失效令牌显示“删除记录”，避免两种操作含义混淆。
 - **公开分享页 `/share/:token`**（无需登录）：调用 `/t/:token/info` 后，根据令牌类型展示
   - 下载令牌：漂亮的下载页与“立即下载”按钮，先调用 `/t/:token/download-lease` 兑换短期下载票据，再跳转票据地址。
   - 上传令牌：拖拽 / 多选 / 上传队列，提交到 `/t/:token/upload`，每个文件有状态显示。
-- **访问记录页（管理员）**：调用 `/api/audit/logs`，优先展示 `actionLabel`，支持按关键字（动作 / 路径 / 目录 / IP）模糊搜索、按状态（全部 / 成功 / 失败 / 拒绝）筛选、以及“加载更多”（自动递增 `limit`）。
+- **访问记录页（管理员）**：调用 `/api/audit/logs?page=&pageSize=`，优先展示 `actionLabel`，支持按关键字（动作 / 路径 / 目录 / IP）模糊搜索、按状态筛选和上一页 / 下一页分页。
 - **配置管理页（管理员）**：调用 `/api/config`、`/api/config/resources`、`/api/config/upload-policy` 和 `/api/config/file-picker/*`，可视化新增、编辑、删除目录资源和单文件资源；路径输入旁提供服务端文件选择器，可从系统入口或快捷位置选择目录和单文件，列表默认目录优先并支持排序；上传扩展名白名单和黑名单也可在页面中维护。页面只展示安全配置视图，不显示 TOTP Secret 或管理员密码摘要。
 
 前端在登录态页面会监听点击、键盘、滚动、触摸和页面重新可见等事件，只在用户活跃时调用 `/api/auth/heartbeat` 刷新空闲会话；页面隐藏或离开后不会持续保活。文件下载不再直接使用长期会话 URL，而是先兑换下载票据，因此页面会话随后空闲过期也不会中断已授权的长下载或断点续传。
@@ -100,7 +100,7 @@ docker build -t file-trans-frontend .
 docker run --rm -p 8081:80 file-trans-frontend
 ```
 
-镜像基于 `oven/bun:1-alpine` 使用 `bun install --frozen-lockfile` 完成可复现依赖安装与生产构建，再用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:17878`。nginx 已将上传请求体上限设为 `1g`，避免默认 1MiB 限制影响文件上传；如果后端上传上限调大，需要同步调整 `nginx.conf`。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。
+镜像基于 `oven/bun:1-alpine` 使用 `bun install --frozen-lockfile` 完成可复现依赖安装与生产构建，再用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:17878`。nginx 已将上传请求体上限设为 `10g`，并关闭上传代理缓冲、延长代理读写超时，避免 2G 级文件在代理层被截断；如果后端上传上限调得更高，需要同步调整 `nginx.conf`。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。
 
 ## 接口约定
 
@@ -109,8 +109,8 @@ docker run --rm -p 8081:80 file-trans-frontend
 - `/api/auth/heartbeat` 用于刷新空闲会话，前端只在非公开路由、已登录、页面可见且用户有活动时调用。
 - `/api/files/download-lease` 与 `/t/:token/download-lease` 会返回短期下载票据 URL；前端下载按钮跳转该 URL，让浏览器和下载器可以使用 HTTP Range 续传。
 - `/api/config` 返回管理员安全配置视图；`/api/config/resources` 支持目录和单文件资源的新增、修改、删除，成功后后端会写回配置并热更新。
-- `TokenInfo` 支持可选的 `valid`、`reason`、`actionLabel`、`dirName`、`infoUrl`、`uploadedBytes`、`uploadMaxBytes` 字段，前端用它们渲染状态文案；上传令牌达到累计容量上限时会显示友好的失效原因。
-- `/api/audit/logs` 支持 `?limit=` 查询参数，访问记录页会逐步增大 `limit` 来实现“加载更多”。
+- `TokenInfo` 支持可选的 `valid`、`reason`、`actionLabel`、`dirName`、`infoUrl`、`uploadedBytes`、`uploadMaxBytes`、`uploadMaxFileBytes`、`uploadRequestMaxBytes` 字段，前端用它们渲染状态文案和上传前限制提示；上传令牌达到累计容量上限时会显示友好的失效原因。
+- `/api/audit/logs` 兼容旧的 `?limit=` 查询，也支持 `?page=&pageSize=` 返回分页对象；访问记录页使用分页方式浏览历史记录。
 - 接口返回非 2xx 时会统一读取 JSON 中的 `message` 或 `error`，401 会自动跳转登录页（公开页除外）。
 
 ## 可用脚本

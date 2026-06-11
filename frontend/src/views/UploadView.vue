@@ -5,7 +5,7 @@ import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
-import type { DirectoryInfo } from '@/types'
+import type { DirectoryInfo, UploadLimits } from '@/types'
 import { formatBytes } from '@/utils'
 
 interface UploadItem {
@@ -16,6 +16,7 @@ interface UploadItem {
   loaded: number
   total: number
   error?: string
+  controller?: AbortController
 }
 
 const route = useRoute()
@@ -27,8 +28,10 @@ const loading = ref(true)
 const dragOver = ref(false)
 const error = ref('')
 const notice = ref('')
+const limits = ref<UploadLimits | null>(null)
 const uploadQueue = ref<UploadItem[]>([])
 let uploadCounter = 0
+let stopUploadBatch = false
 
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === selectedDirId.value))
 const dirOptions = computed(() => dirs.value.map((dir) => ({
@@ -39,6 +42,7 @@ const dirOptions = computed(() => dirs.value.map((dir) => ({
 const canUpload = computed(() => Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const hasPendingUploads = computed(() => uploadQueue.value.some((item) => item.status === 'queued' || item.status === 'error'))
 const uploading = computed(() => uploadQueue.value.some((item) => item.status === 'uploading'))
+const currentUpload = computed(() => uploadQueue.value.find((item) => item.status === 'uploading'))
 const totalBytes = computed(() => uploadQueue.value.reduce((sum, item) => sum + item.file.size, 0))
 const finishedBytes = computed(() => uploadQueue.value.reduce((sum, item) => sum + (item.status === 'success' ? item.file.size : item.status === 'uploading' ? item.loaded : 0), 0))
 const finishedCount = computed(() => uploadQueue.value.filter((item) => item.status === 'success').length)
@@ -51,7 +55,10 @@ async function loadDirs() {
   loading.value = true
   error.value = ''
   try {
-    dirs.value = await api.dirs()
+    const [allDirs, uploadLimits] = await Promise.all([api.dirs(), api.uploadLimits()])
+    limits.value = uploadLimits
+    // 上传页只展示真正允许上传的目录资源；单文件资源和禁用上传的目录不出现在这里。
+    dirs.value = allDirs.filter((dir) => dir.type !== 'file' && Boolean(dir.canUpload ?? dir.allowUpload))
     const queryDir = String(route.query.dirId || '')
     selectedDirId.value = dirs.value.some((dir) => dir.id === queryDir) ? queryDir : dirs.value[0]?.id || ''
     targetPath.value = String(route.query.path || '')
@@ -60,6 +67,24 @@ async function loadDirs() {
   } finally {
     loading.value = false
   }
+}
+
+function fileExtension(name: string) {
+  const index = name.lastIndexOf('.')
+  return index > -1 ? name.slice(index).toLowerCase() : ''
+}
+
+function validateFiles(files: File[]) {
+  const policy = limits.value
+  if (!policy) return ''
+  for (const file of files) {
+    const ext = fileExtension(file.name)
+    if (policy.blockedExtensions.includes(ext)) return `“${file.name}” 的扩展名不允许上传。`
+    if (policy.allowedExtensions.length && !policy.allowedExtensions.includes(ext)) return `“${file.name}” 不在允许上传的扩展名范围内。`
+    if (file.size > policy.uploadMaxFileBytes) return `“${file.name}” 大小为 ${formatBytes(file.size)}，超过单文件上限 ${formatBytes(policy.uploadMaxFileBytes)}。`
+    if (file.size > policy.uploadMaxBytes) return `“${file.name}” 超过单次上传上限 ${formatBytes(policy.uploadMaxBytes)}。`
+  }
+  return ''
 }
 
 function addUploadFiles(files: FileList | File[]) {
@@ -72,9 +97,26 @@ function addUploadFiles(files: FileList | File[]) {
     notice.value = '正在上传，请等待当前队列完成后再追加文件。'
     return
   }
-  Array.from(files).forEach((file) => {
+  const list = Array.from(files)
+  const validationError = validateFiles(list)
+  if (validationError) {
+    error.value = validationError
+    return
+  }
+  error.value = ''
+  list.forEach((file) => {
     uploadQueue.value.push({ id: `local-${Date.now()}-${++uploadCounter}`, file, status: 'queued', progress: 0, loaded: 0, total: file.size })
   })
+}
+
+function uploadErrorMessage(err: unknown) {
+  if (err instanceof ApiError) {
+    if ((err.details as { aborted?: boolean } | undefined)?.aborted) return '上传已取消。'
+    if (err.status === 413) return err.message || '文件超过上传大小限制。'
+    if (err.status === 0) return err.message
+    return err.message
+  }
+  return '上传失败，可稍后重试。'
 }
 
 function onFileChange(event: Event) {
@@ -104,26 +146,44 @@ async function uploadItem(item: UploadItem) {
   item.loaded = 0
   item.total = item.file.size
   item.error = undefined
+  const controller = new AbortController()
+  item.controller = controller
   try {
     // 队列逐个调用单文件接口，失败项可以单独重试，不影响已完成项。
-    await api.uploadOne(selectedDirId.value, targetPath.value, item.file, (progress) => {
-      item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
-      item.total = progress.total || item.file.size
-      item.progress = progress.percent
+    await api.uploadOne(selectedDirId.value, targetPath.value, item.file, {
+      signal: controller.signal,
+      onProgress: (progress) => {
+        item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
+        item.total = progress.total || item.file.size
+        item.progress = progress.percent
+      },
     })
     item.progress = 100
     item.loaded = item.file.size
     item.status = 'success'
   } catch (err) {
     item.status = 'error'
-    item.error = err instanceof ApiError ? err.message : '上传失败，可稍后重试。'
+    item.error = uploadErrorMessage(err)
+  } finally {
+    item.controller = undefined
   }
+}
+
+function cancelUpload(item: UploadItem) {
+  stopUploadBatch = true
+  item.controller?.abort()
+}
+
+function cancelCurrentUpload() {
+  if (currentUpload.value) cancelUpload(currentUpload.value)
 }
 
 async function uploadAll() {
   if (uploading.value) return
+  stopUploadBatch = false
   notice.value = ''
   for (const item of uploadQueue.value.filter((item) => item.status === 'queued' || item.status === 'error')) {
+    if (stopUploadBatch) break
     await uploadItem(item)
   }
   if (!uploadQueue.value.some((item) => item.status === 'error') && uploadQueue.value.some((item) => item.status === 'success')) {
@@ -155,7 +215,7 @@ onMounted(loadDirs)
       <div>
         <p class="eyebrow">Upload</p>
         <h1>文件上传</h1>
-        <p>选择目标位置后添加文件，上传进度会在队列中实时显示。</p>
+        <p>只显示可上传的位置；上传过程可随时取消，并会显示明确进度和错误原因。</p>
       </div>
       <div class="header-actions">
         <RouterLink class="ghost-btn" :to="filesRoute">查看此目录文件</RouterLink>
@@ -172,11 +232,11 @@ onMounted(loadDirs)
       <div class="panel upload-target-card">
         <div>
           <strong>{{ selectedDir.label || selectedDir.name }}</strong>
-          <p>{{ selectedDir.description || selectedDir.root || '已配置目录' }}</p>
+          <p>{{ selectedDir.description || '已选择上传目标' }}</p>
         </div>
         <label class="upload-path-field">
           <span>上传路径</span>
-          <input v-model.trim="targetPath" placeholder="空为目录根路径，或填写 subdir" :disabled="uploading" />
+          <input v-model="targetPath" placeholder="空为目录根路径，或填写 subdir" :disabled="uploading" />
         </label>
       </div>
 
@@ -205,7 +265,9 @@ onMounted(loadDirs)
           </label>
         </div>
 
-        <div v-if="!canUpload" class="alert error">当前目录不允许上传，请切换到允许上传的目录。</div>
+        <div v-if="limits" class="upload-limit-note">
+          单文件上限 {{ formatBytes(limits.uploadMaxFileBytes) }}；单次请求上限 {{ formatBytes(limits.uploadMaxBytes) }}。
+        </div>
 
         <ul v-if="uploadQueue.length" class="upload-queue">
           <li v-for="item in uploadQueue" :key="item.id" :data-status="item.status">
@@ -219,6 +281,7 @@ onMounted(loadDirs)
             </div>
             <div class="q-actions">
               <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="uploadItem(item)">重试</button>
+              <button v-if="item.status === 'uploading'" class="mini-btn danger" type="button" @click="cancelUpload(item)">取消上传</button>
               <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" @click="removeUpload(item.id)">移除</button>
             </div>
           </li>
@@ -233,6 +296,7 @@ onMounted(loadDirs)
           <button class="primary-btn" type="button" :disabled="!hasPendingUploads || uploading || !canUpload" @click="uploadAll">
             {{ uploading ? '上传中…' : '开始上传' }}
           </button>
+          <button v-if="uploading" class="ghost-btn danger" type="button" @click="cancelCurrentUpload">终止当前上传</button>
         </div>
       </div>
     </template>

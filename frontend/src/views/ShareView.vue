@@ -15,6 +15,7 @@ interface UploadItem {
   loaded: number
   total: number
   error?: string
+  controller?: AbortController
 }
 
 const route = useRoute()
@@ -109,8 +110,10 @@ const queue = ref<UploadItem[]>([])
 const dragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 let counter = 0
+let stopUploadBatch = false
 const nextId = () => `up-${Date.now()}-${++counter}`
 const uploading = computed(() => queue.value.some((item) => item.status === 'uploading'))
+const currentUpload = computed(() => queue.value.find((item) => item.status === 'uploading'))
 const hasPendingUploads = computed(() => queue.value.some((item) => item.status === 'queued' || item.status === 'error'))
 const totalBytes = computed(() => queue.value.reduce((sum, item) => sum + item.file.size, 0))
 const finishedBytes = computed(() => queue.value.reduce((sum, item) => sum + (item.status === 'success' ? item.file.size : item.status === 'uploading' ? item.loaded : 0), 0))
@@ -125,10 +128,61 @@ function pickFiles() {
 function addFiles(files: FileList | File[]) {
   if (!validFlag.value || uploading.value) return
   const list = Array.from(files || [])
+  const maxFileBytes = info.value?.uploadMaxFileBytes || 0
+  const maxRequestBytes = info.value?.uploadRequestMaxBytes || 0
+  const allowed = info.value?.allowedExtensions || []
+  const blocked = info.value?.blockedExtensions || []
+  for (const file of list) {
+    const ext = fileExtension(file.name)
+    if (blocked.includes(ext)) {
+      error.value = `“${file.name}” 的扩展名不允许上传。`
+      return
+    }
+    if (allowed.length && !allowed.includes(ext)) {
+      error.value = `“${file.name}” 不在允许上传的扩展名范围内。`
+      return
+    }
+    if (maxFileBytes > 0 && file.size > maxFileBytes) {
+      error.value = `“${file.name}” 大小为 ${formatBytes(file.size)}，超过单文件上限 ${formatBytes(maxFileBytes)}。`
+      return
+    }
+    if (maxRequestBytes > 0 && file.size > maxRequestBytes) {
+      error.value = `“${file.name}” 超过单次上传上限 ${formatBytes(maxRequestBytes)}。`
+      return
+    }
+  }
+  const maxBytes = info.value?.uploadMaxBytes || 0
+  const usedBytes = info.value?.uploadedBytes || 0
+  if (maxBytes > 0) {
+    let projected = usedBytes + queue.value.reduce((sum, item) => sum + (item.status === 'queued' || item.status === 'error' ? item.file.size : 0), 0)
+    for (const file of list) {
+      projected += file.size
+      if (projected > maxBytes) {
+        error.value = `“${file.name}” 会超过该上传链接的剩余容量。`
+        return
+      }
+    }
+  }
+  error.value = ''
   for (const file of list) {
     // 使用本地唯一 ID 跟踪状态，避免同名文件在队列中互相覆盖。
     queue.value.push({ id: nextId(), file, status: 'queued', progress: 0, loaded: 0, total: file.size })
   }
+}
+
+function fileExtension(name: string) {
+  const index = name.lastIndexOf('.')
+  return index > -1 ? name.slice(index).toLowerCase() : ''
+}
+
+function uploadErrorMessage(err: unknown) {
+  if (err instanceof ApiError) {
+    if ((err.details as { aborted?: boolean } | undefined)?.aborted) return '上传已取消。'
+    if (err.status === 413) return err.message || '文件超过上传大小限制。'
+    if (err.status === 0) return err.message
+    return err.message
+  }
+  return '上传失败，请稍后重试。'
 }
 
 function onFileChange(event: Event) {
@@ -160,25 +214,43 @@ async function uploadItem(item: UploadItem) {
   item.loaded = 0
   item.total = item.file.size
   item.error = undefined
+  const controller = new AbortController()
+  item.controller = controller
   try {
-    await api.publicUpload(tokenParam.value, item.file, (progress) => {
-      item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
-      item.total = progress.total || item.file.size
-      item.progress = progress.percent
+    await api.publicUpload(tokenParam.value, item.file, {
+      signal: controller.signal,
+      onProgress: (progress) => {
+        item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
+        item.total = progress.total || item.file.size
+        item.progress = progress.percent
+      },
     })
     item.progress = 100
     item.loaded = item.file.size
     item.status = 'success'
   } catch (err) {
     item.status = 'error'
-    item.error = err instanceof ApiError ? err.message : '上传失败，请稍后重试。'
+    item.error = uploadErrorMessage(err)
+  } finally {
+    item.controller = undefined
   }
+}
+
+function cancelUpload(item: UploadItem) {
+  stopUploadBatch = true
+  item.controller?.abort()
+}
+
+function cancelCurrentUpload() {
+  if (currentUpload.value) cancelUpload(currentUpload.value)
 }
 
 async function uploadAll() {
   if (uploading.value) return
+  stopUploadBatch = false
   const pending = queue.value.filter((item) => item.status === 'queued' || item.status === 'error')
   for (const item of pending) {
+    if (stopUploadBatch) break
     await uploadItem(item)
     if (item.status === 'success') {
       // 上传成功后刷新公开信息，更新使用次数和累计容量展示；失败不打断后续重试。
@@ -285,6 +357,7 @@ onMounted(loadInfo)
                 </div>
                 <div class="q-actions">
                   <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="retryItem(item)">重试</button>
+                  <button v-if="item.status === 'uploading'" class="mini-btn danger" type="button" @click="cancelUpload(item)">取消上传</button>
                   <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" @click="removeItem(item.id)">移除</button>
                 </div>
               </li>
@@ -301,6 +374,7 @@ onMounted(loadInfo)
               <button class="primary-btn big" type="button" :disabled="!hasPendingUploads || uploading" @click="uploadAll">
                 {{ uploading ? '上传中…' : '开始上传' }}
               </button>
+              <button v-if="uploading" class="ghost-btn danger" type="button" @click="cancelCurrentUpload">终止当前上传</button>
               <button class="ghost-btn" type="button" :disabled="uploading" @click="pickFiles">追加文件</button>
             </div>
           </template>

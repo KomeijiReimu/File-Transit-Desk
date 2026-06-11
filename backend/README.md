@@ -65,8 +65,8 @@ go run ./cmd/server -config config.yaml
 - `auth.admin.password_sha256`：管理员密码的 SHA-256 十六进制摘要。
 - `web.static_dir`：前端构建产物目录，存在时自动托管并回退到 `index.html`；不会吞掉 `/api` 与 `/t` 路由。
 - `cors.allow_origins`：允许来源，本地默认 `http://localhost:5173`；由于接口使用 Cookie 凭据，配置中禁止使用 `*`。
-- `storage.upload_max_mb`：单次上传请求总大小限制，同时作为 Fiber 请求体上限。
-- `storage.upload_max_file_mb`：单个文件大小限制，必须小于等于 `storage.upload_max_mb`。
+- `storage.upload_max_mb`：单次上传请求总大小限制，同时作为 Fiber 请求体上限；示例默认 5120 MB，可覆盖常见 2G 文件上传。
+- `storage.upload_max_file_mb`：单个文件大小限制，必须小于等于 `storage.upload_max_mb`；示例默认 5120 MB。
 - `storage.upload_max_files`：单次 multipart 请求最多允许的文件数量。
 - `storage.allowed_extensions` / `storage.blocked_extensions`：上传扩展名白名单与黑名单；白名单非空时只允许列出的扩展名，黑名单优先拒绝。默认黑名单为空，可由管理员配置管理页按需维护。
 - `storage.dirs`：开放目录资源，含 `type: directory`、`allow_download/allow_upload`，可由管理员“配置管理”页维护。
@@ -75,7 +75,7 @@ go run ./cmd/server -config config.yaml
 - `file_picker.max_page_size` / `file_picker.deny_names` / `file_picker.deny_patterns`：文件选择器分页上限和可选隐藏规则。
 - `tokens.default_ttl_seconds`：令牌默认有效期。
 - `tokens.max_ttl_seconds`：令牌最长有效期，管理员传入更长的 `expiresAt` 或 `ttlSeconds` 会被夹紧到该上限。
-- `tokens.upload_max_mb`：单个上传令牌的累计上传容量；`0` 表示不限制。
+- `tokens.upload_max_mb`：单个上传令牌的累计上传容量；示例默认 5120 MB，`0` 表示不限制。
 - `audit.retain`：审计日志保留条数。
 
 ### 修改端口
@@ -143,6 +143,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 ### 目录与文件
 
 - `GET /api/dirs`：返回共享资源数组，普通用户字段为 `id/name/type/allowDownload/allowUpload/canDownload/canUpload`；管理员响应额外包含 `root` 便于配置管理展示。普通用户不会收到服务端真实路径。
+- `GET /api/upload-policy`：返回登录态上传页需要的大小和扩展名限制，前端会在真正传输前提示明显的限制错误，避免大文件传到一半才失败。
 - `GET /api/files/list?dirId=default&path=subdir`：返回：
 
 ```json
@@ -199,7 +200,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 - `POST /api/tokens/:id/revoke`：撤销令牌，让尚未过期且未用尽的链接立即失效，并同步清理该令牌已兑换的下载票据。用于应急止血或提前结束分享。
 - `DELETE /api/tokens/:id`：删除令牌记录。删除也会让令牌失效并清理相关下载票据，但主要语义是移除管理列表中的历史记录。
-- `GET /t/:token/info`：公开令牌信息。无效时返回 `{ "valid": false, "reason": "expired|revoked|exhausted|upload_quota_exhausted|resource_unavailable|permission_disabled|not_found" }`；有效时返回 `{ "valid": true, "type": "download", "path": "a.txt", "expiresAt": "...", "maxUses": 1, "uses": 0, "uploadedBytes": 0, "uploadMaxBytes": 1073741824 }`，不会暴露目录 ID。
+- `GET /t/:token/info`：公开令牌信息。无效时返回 `{ "valid": false, "reason": "expired|revoked|exhausted|upload_quota_exhausted|resource_unavailable|permission_disabled|not_found" }`；有效时返回 `{ "valid": true, "type": "download", "path": "a.txt", "expiresAt": "...", "maxUses": 1, "uses": 0, "uploadedBytes": 0, "uploadMaxBytes": 5368709120, "uploadMaxFileBytes": 5368709120, "uploadRequestMaxBytes": 5368709120 }`，不会暴露目录 ID。
 - `POST /t/:token/download-lease`：公开下载令牌兑换短期下载票据，兑换时原子消耗一次使用次数。
 - `GET /t/download-by-lease?lease=...`：公开票据下载，支持 Range 续传且不重复消耗令牌次数。
 - `GET /t/:token/download`：兼容保留，会显示确认下载页；用户主动点击后才 `POST` 兑换票据，避免链接预览或安全扫描提前消耗一次性下载次数。
@@ -210,7 +211,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 ### 审计与健康检查
 
-- `GET /api/audit/logs?limit=100`：仅管理员可访问，`limit` 被限制在 `1..500`，字段为 `id/action/actionLabel/ip/detail/createdAt`。
+- `GET /api/audit/logs?page=1&pageSize=50`：仅管理员可访问，分页返回 `{ logs, page, pageSize, total, totalPages }`，`pageSize` 最大 200。旧的 `?limit=100` 数组响应仍兼容保留。
 - `GET /api/health`：返回 `{ "ok": true }`。
 
 ### 配置管理

@@ -445,6 +445,34 @@ func TestAdminCanUpdateUploadPolicyWithEmptyBlacklist(t *testing.T) {
 	}
 }
 
+func TestAuditLogsPagination(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(t.TempDir()), st)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := st.Audit("test", "127.0.0.1", fmt.Sprintf("log-%d", i)); err != nil {
+			t.Fatalf("audit: %v", err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/audit/logs?page=2&pageSize=2", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("audit page request: %v", err)
+	}
+	var page auditPageDTO
+	decodeJSON(t, resp, &page)
+	if resp.StatusCode != http.StatusOK || page.Page != 2 || page.PageSize != 2 || page.Total != 3 || page.TotalPages != 2 || len(page.Logs) != 1 {
+		t.Fatalf("unexpected audit page: status=%d page=%+v", resp.StatusCode, page)
+	}
+}
+
 func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	// 文件选择器是管理员路径输入辅助：只列允许根内条目，最终选择仍由后端校验。
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
@@ -638,6 +666,45 @@ func TestUploadCommitsFinalFileWithOwnerOnlyPermission(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0600 {
 		t.Fatalf("expected uploaded file mode 0600, got %v", got)
+	}
+}
+
+func TestUploadDuplicateNamesDoNotOverwrite(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	app := New(cfg, st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	for _, content := range []string{"first", "second"} {
+		body, contentType := multipartUploadBody(t, "same.txt", []byte(content))
+		req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
+		req.Header.Set("Content-Type", contentType)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("upload request: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected upload ok, got %d", resp.StatusCode)
+		}
+	}
+	first, err := os.ReadFile(filepath.Join(root, "same.txt"))
+	if err != nil {
+		t.Fatalf("read first file: %v", err)
+	}
+	second, err := os.ReadFile(filepath.Join(root, "same-1.txt"))
+	if err != nil {
+		t.Fatalf("read renamed file: %v", err)
+	}
+	if string(first) != "first" || string(second) != "second" {
+		t.Fatalf("duplicate upload overwrote content, first=%q second=%q", first, second)
 	}
 }
 

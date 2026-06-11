@@ -145,6 +145,24 @@ type auditDTO struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
+type auditPageDTO struct {
+	Logs       []auditDTO `json:"logs"`
+	Page       int        `json:"page"`
+	PageSize   int        `json:"pageSize"`
+	Total      int        `json:"total"`
+	TotalPages int        `json:"totalPages"`
+}
+
+type uploadLimitsDTO struct {
+	UploadMaxMB        int      `json:"uploadMaxMB"`
+	UploadMaxFileMB    int      `json:"uploadMaxFileMB"`
+	UploadMaxFiles     int      `json:"uploadMaxFiles"`
+	UploadMaxBytes     int64    `json:"uploadMaxBytes"`
+	UploadMaxFileBytes int64    `json:"uploadMaxFileBytes"`
+	AllowedExtensions  []string `json:"allowedExtensions"`
+	BlockedExtensions  []string `json:"blockedExtensions"`
+}
+
 type loginLimiter struct {
 	mu       sync.Mutex
 	attempts map[string]loginAttempt
@@ -174,8 +192,9 @@ func NewWithConfigPath(cfg *config.Config, st *store.Store, configPath string) *
 	_ = st.DeleteExpiredTokens(time.Now())
 	_ = st.DeleteExpiredDownloadLeases(time.Now())
 	app := fiber.New(fiber.Config{
-		BodyLimit:    cfg.Storage.UploadMaxMB * 1024 * 1024,
-		ErrorHandler: jsonErrorHandler,
+		BodyLimit:         cfg.Storage.UploadMaxMB * 1024 * 1024,
+		StreamRequestBody: true,
+		ErrorHandler:      jsonErrorHandler,
 	})
 	if len(cfg.CORS.AllowOrigins) > 0 {
 		// 接口使用 Cookie 凭据，CORS 必须显式列出允许来源，不能依赖通配符。
@@ -222,6 +241,7 @@ func (s *Server) routes(app *fiber.App) {
 	app.Post("/api/auth/heartbeat", s.auth(s.heartbeat))
 	app.Post("/api/auth/logout", s.auth(s.logout))
 	app.Get("/api/dirs", s.auth(s.dirs))
+	app.Get("/api/upload-policy", s.auth(s.uploadPolicy))
 	app.Get("/api/files/list", s.auth(s.listFiles))
 	app.Get("/api/files/download", s.auth(s.downloadFile))
 	app.Post("/api/files/download-lease", s.auth(s.createDownloadLease))
@@ -561,6 +581,19 @@ func (s *Server) dirs(c *fiber.Ctx) error {
 		out = append(out, dirToDTO(dir, includeRoot))
 	}
 	return c.JSON(out)
+}
+
+func (s *Server) uploadPolicy(c *fiber.Ctx) error {
+	cfg := s.cfg()
+	return c.JSON(uploadLimitsDTO{
+		UploadMaxMB:        cfg.Storage.UploadMaxMB,
+		UploadMaxFileMB:    cfg.Storage.UploadMaxFileMB,
+		UploadMaxFiles:     cfg.Storage.UploadMaxFiles,
+		UploadMaxBytes:     mbToBytes(cfg.Storage.UploadMaxMB),
+		UploadMaxFileBytes: mbToBytes(cfg.Storage.UploadMaxFileMB),
+		AllowedExtensions:  append([]string{}, cfg.Storage.AllowedExtensions...),
+		BlockedExtensions:  append([]string{}, cfg.Storage.BlockedExtensions...),
+	})
 }
 
 func dirToDTO(dir config.Dir, includeRoot bool) dirDTO {
@@ -1188,6 +1221,9 @@ func normalizedFileMtime(info os.FileInfo) time.Time {
 }
 
 func (s *Server) uploadFiles(c *fiber.Ctx) error {
+	if length := c.Request().Header.ContentLength(); length > 0 && int64(length) > mbToBytes(s.cfg().Storage.UploadMaxMB) {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单次上传总量不能超过 %d MB", s.cfg().Storage.UploadMaxMB))
+	}
 	dirID := firstNonEmpty(c.FormValue("dirId"), c.Query("dirId"))
 	dir, err := s.dirByID(dirID)
 	if err != nil {
@@ -1340,7 +1376,11 @@ func commitTempFile(tmpName, dst string) (bool, error) {
 func (s *Server) formFiles(c *fiber.Ctx) ([]*multipart.FileHeader, int64, error) {
 	form, err := c.MultipartForm()
 	if err != nil {
-		return nil, 0, fiber.ErrBadRequest
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "too large") || strings.Contains(message, "bodylimit") || strings.Contains(message, "request body") {
+			return nil, 0, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单次上传总量不能超过 %d MB", s.cfg().Storage.UploadMaxMB))
+		}
+		return nil, 0, fiber.NewError(fiber.StatusBadRequest, "上传请求格式不正确，请重新选择文件后再试。")
 	}
 	// 同时兼容旧字段 file 和新字段 files，便于公开页与登录态页面共用后端。
 	files := append([]*multipart.FileHeader{}, form.File["file"]...)
@@ -1611,6 +1651,32 @@ func (s *Server) deleteToken(c *fiber.Ctx) error {
 }
 
 func (s *Server) auditLogs(c *fiber.Ctx) error {
+	if c.Query("page") != "" || c.Query("pageSize") != "" {
+		page, err := strconv.Atoi(c.Query("page", "1"))
+		if err != nil || page < 1 {
+			page = 1
+		}
+		pageSize, err := strconv.Atoi(c.Query("pageSize", "50"))
+		if err != nil || pageSize < 1 {
+			pageSize = 50
+		}
+		if pageSize > 200 {
+			pageSize = 200
+		}
+		logs, total, err := s.store.AuditLogsPage(pageSize, (page-1)*pageSize)
+		if err != nil {
+			return err
+		}
+		out := make([]auditDTO, 0, len(logs))
+		for _, l := range logs {
+			out = append(out, auditDTO{ID: l.ID, Action: l.Action, ActionLabel: actionLabel(l.Action), IP: l.IP, Detail: l.Detail, CreatedAt: l.CreatedAt})
+		}
+		totalPages := 0
+		if total > 0 {
+			totalPages = (total + pageSize - 1) / pageSize
+		}
+		return c.JSON(auditPageDTO{Logs: out, Page: page, PageSize: pageSize, Total: total, TotalPages: totalPages})
+	}
 	limit, err := strconv.Atoi(c.Query("limit", "100"))
 	if err != nil || limit < 1 {
 		limit = 100
@@ -1655,7 +1721,8 @@ func (s *Server) publicTokenInfo(c *fiber.Ctx) error {
 	if !valid {
 		return c.JSON(fiber.Map{"valid": false, "reason": reason})
 	}
-	out := fiber.Map{"valid": true, "type": t.Type, "path": t.Path, "expiresAt": nil, "maxUses": t.MaxUses, "uses": t.Uses, "uploadedBytes": t.UploadedBytes, "uploadMaxBytes": s.tokenUploadMaxBytes()}
+	cfg := s.cfg()
+	out := fiber.Map{"valid": true, "type": t.Type, "path": t.Path, "expiresAt": nil, "maxUses": t.MaxUses, "uses": t.Uses, "uploadedBytes": t.UploadedBytes, "uploadMaxBytes": s.tokenUploadMaxBytes(), "uploadMaxFileBytes": mbToBytes(cfg.Storage.UploadMaxFileMB), "uploadRequestMaxBytes": mbToBytes(cfg.Storage.UploadMaxMB), "allowedExtensions": cfg.Storage.AllowedExtensions, "blockedExtensions": cfg.Storage.BlockedExtensions}
 	if t.ExpiresAt.Valid {
 		out["expiresAt"] = t.ExpiresAt.Time
 	}

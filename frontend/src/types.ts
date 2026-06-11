@@ -55,6 +55,16 @@ export interface UploadPolicyPayload {
   blockedExtensions: string[]
 }
 
+export interface UploadLimits {
+  uploadMaxMB: number
+  uploadMaxFileMB: number
+  uploadMaxFiles: number
+  uploadMaxBytes: number
+  uploadMaxFileBytes: number
+  allowedExtensions: string[]
+  blockedExtensions: string[]
+}
+
 export interface FilePickerRoot {
   id: string
   name: string
@@ -142,6 +152,10 @@ export interface TokenInfo {
   used?: number
   uploadedBytes?: number
   uploadMaxBytes?: number
+  uploadMaxFileBytes?: number
+  uploadRequestMaxBytes?: number
+  allowedExtensions?: string[]
+  blockedExtensions?: string[]
   revoked?: boolean
   createdAt?: string
   url?: string
@@ -182,4 +196,12 @@ export interface AuditLog {
   userAgent?: string
   status?: string
   detail?: string
+}
+
+export interface AuditLogPage {
+  logs: AuditLog[]
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
 }

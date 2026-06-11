@@ -644,6 +644,34 @@ func (s *Store) AuditLogs(limit int) ([]AuditLog, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) AuditLogsPage(limit, offset int) ([]AuditLog, int, error) {
+	if limit < 1 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.DB.Query(`SELECT id, action, ip, detail, created_at FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var out []AuditLog
+	for rows.Next() {
+		var log AuditLog
+		if err := rows.Scan(&log.ID, &log.Action, &log.IP, &log.Detail, &log.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, log)
+	}
+	return out, total, rows.Err()
+}
+
 type tokenScanner interface {
 	Scan(dest ...any) error
 }

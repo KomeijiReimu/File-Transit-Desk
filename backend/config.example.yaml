@@ -35,9 +35,9 @@ cors:
     - "http://localhost:5173"
 storage:
   # 整个请求体上限；后端 Fiber BodyLimit 也使用该值。
-  upload_max_mb: 512
+  upload_max_mb: 5120
   # 单个文件上限，必须小于等于 upload_max_mb。
-  upload_max_file_mb: 512
+  upload_max_file_mb: 5120
   # 单次 multipart 请求最多允许的文件数量。
   upload_max_files: 20
   # 白名单非空时，只允许这些扩展名；示例： [".zip", ".txt", ".pdf"]。
@@ -72,6 +72,6 @@ tokens:
   # 管理员创建令牌时允许的最长有效期，防止误创建长期公开链接。
   max_ttl_seconds: 86400
   # 单个上传令牌的累计上传容量；0 表示不限制。
-  upload_max_mb: 1024
+  upload_max_mb: 5120
 audit:
   retain: 1000

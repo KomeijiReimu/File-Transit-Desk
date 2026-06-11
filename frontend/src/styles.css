@@ -190,7 +190,7 @@ small, .muted-text { color: var(--muted); }
 .primary-btn.big { padding: 16px 22px; font-size: 16px; border-radius: 18px; }
 .ghost-btn { border: 1px solid var(--line); background: rgba(255,255,255,.04); }
 .mini-btn { min-height: 36px; padding: 8px 11px; border-radius: 12px; background: rgba(94,224,198,.16); color: var(--accent-2); font-weight: 700; font-size: 13px; }
-.mini-btn.danger { background: rgba(255,107,122,.15); color: var(--danger); }
+.mini-btn.danger, .ghost-btn.danger { background: rgba(255,107,122,.15); color: var(--danger); }
 .primary-btn:hover, .ghost-btn:hover, .mini-btn:hover, .upload-btn:hover { transform: translateY(-2px); filter: brightness(1.06); }
 .primary-btn:disabled:hover, .ghost-btn:disabled:hover, .mini-btn:disabled:hover { transform: none; }
 .full { width: 100%; }
@@ -279,6 +279,7 @@ small, .muted-text { color: var(--muted); }
 .upload-target-card p { margin: 8px 0 0; color: var(--muted); line-height: 1.6; }
 .upload-path-field { display: grid; gap: 8px; }
 .upload-path-field span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
+.upload-limit-note { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .upload-panel-header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .upload-panel-header strong { font-family: "Songti SC", serif; font-size: 18px; }
 .upload-panel-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -382,6 +383,7 @@ code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; pa
 /* ---------------- Audit timeline + filters ---------------- */
 .filter-bar { padding: var(--space-card); display: grid; grid-template-columns: minmax(260px, 1.6fr) minmax(220px, .9fr) auto; gap: 16px; align-items: end; }
 .filter-bar .ghost-btn { align-self: end; height: 48px; }
+.pagination-bar { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px var(--space-card); color: var(--muted); }
 .filter-field { display: grid; gap: 6px; }
 .filter-field span { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
 .filter-meta { display: flex; align-items: center; justify-content: flex-end; padding-bottom: 6px; }
