@@ -119,16 +119,23 @@ func Load(path string) (*Config, error) {
 	c := Default()
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取配置文件失败\n配置文件：%s\n原因：%w\n处理建议：请确认配置文件存在，并且当前用户对该文件有读取权限", displayPath(path), err)
 	}
 	if err := yaml.Unmarshal(b, c); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("配置文件格式错误\n配置文件：%s\n原因：%w\n处理建议：请检查提示行附近的 YAML 缩进、冒号和列表层级；例如 file_picker 应与 storage 同级，不能缩进到 storage.shares 下面", displayPath(path), err)
 	}
 	c.normalize()
 	if err := c.validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("配置内容校验失败\n配置文件：%s\n原因：%w\n处理建议：请按上面的原因修改配置；如果是首次运行，可对照 backend/config.example.yaml", displayPath(path), err)
 	}
 	return c, nil
+}
+
+func displayPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 func SaveAtomic(path string, c *Config) error {

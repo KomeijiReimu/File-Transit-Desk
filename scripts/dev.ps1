@@ -40,11 +40,12 @@ function Join-CmdArguments {
 }
 
 function Wait-BackendReady {
-  param([string]$Origin, [object]$Process)
+  param([string]$Origin, [object]$Process, [string]$StdoutLog, [string]$StderrLog)
   $HealthUrl = "$Origin/api/health"
   Write-Host "等待后端就绪：$HealthUrl"
   for ($i = 0; $i -lt 60; $i++) {
     if ($Process -and $Process.HasExited) {
+      Show-BackendFailure -Message '后端启动失败。' -Process $Process -StdoutLog $StdoutLog -StderrLog $StderrLog
       exit $Process.ExitCode
     }
     try {
@@ -56,7 +57,40 @@ function Wait-BackendReady {
       Start-Sleep -Milliseconds 500
     }
   }
-  throw "后端未在预期时间内就绪，请检查后端启动日志。"
+  Show-BackendFailure -Message '后端未在预期时间内就绪。' -Process $Process -StdoutLog $StdoutLog -StderrLog $StderrLog
+  exit 1
+}
+
+function Show-LogTail {
+  param([string]$Path, [string]$Title)
+  if ($Path -and (Test-Path -LiteralPath $Path)) {
+    $Content = Get-Content -LiteralPath $Path -Tail 80 -ErrorAction SilentlyContinue
+    if ($Content) {
+      Write-Host ""
+      Write-Host $Title
+      $Content | ForEach-Object { Write-Host "  $_" }
+    }
+  }
+}
+
+function Show-BackendFailure {
+  param([string]$Message, [object]$Process, [string]$StdoutLog, [string]$StderrLog)
+  Write-Host ""
+  Write-Host $Message -ForegroundColor Red
+  if ($Process -and $Process.HasExited) {
+    Write-Host "退出码：$($Process.ExitCode)"
+  }
+  Show-LogTail -Path $StderrLog -Title '后端错误日志：'
+  Show-LogTail -Path $StdoutLog -Title '后端输出日志：'
+  Write-Host ""
+  Write-Host '常见处理方式：'
+  Write-Host "  1. 如果提示 YAML 格式错误，请检查 backend/config.yaml 对应行附近的缩进。"
+  Write-Host "  2. file_picker 应与 storage 同级；不要把 roots/max_page_size/deny_names 缩进到 storage.shares 下面。"
+  Write-Host "  3. 如果提示端口监听失败，请确认 $BackendOrigin 没有被其他进程占用，或用 -BackendPort 修改端口。"
+  Write-Host "  4. 如果提示数据库无法打开，请确认 backend/data 目录可写。"
+  Write-Host "日志文件："
+  Write-Host "  stdout: $StdoutLog"
+  Write-Host "  stderr: $StderrLog"
 }
 
 Require-Command -Name 'go' -InstallHint 'Go'
@@ -92,6 +126,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $FrontendDir 'node_modules') -PathTy
 
 $BackendProcess = $null
 $FrontendProcess = $null
+$BackendStdoutLog = Join-Path ([System.IO.Path]::GetTempPath()) ("file-trans-backend-stdout-{0}.log" -f ([guid]::NewGuid().ToString('N')))
+$BackendStderrLog = Join-Path ([System.IO.Path]::GetTempPath()) ("file-trans-backend-stderr-{0}.log" -f ([guid]::NewGuid().ToString('N')))
 $OldBackendOrigin = $env:BACKEND_ORIGIN
 $OldViteBackendOrigin = $env:VITE_BACKEND_ORIGIN
 
@@ -101,10 +137,12 @@ try {
   $BackendProcess = Start-Process -FilePath 'go' `
     -ArgumentList @('run', './cmd/server', '-config', $BackendConfigPath) `
     -WorkingDirectory (Join-Path $RootDir 'backend') `
+    -RedirectStandardOutput $BackendStdoutLog `
+    -RedirectStandardError $BackendStderrLog `
     -NoNewWindow `
     -PassThru
 
-  Wait-BackendReady -Origin $BackendOrigin -Process $BackendProcess
+  Wait-BackendReady -Origin $BackendOrigin -Process $BackendProcess -StdoutLog $BackendStdoutLog -StderrLog $BackendStderrLog
 
   $env:BACKEND_ORIGIN = $BackendOrigin
   $env:VITE_BACKEND_ORIGIN = $BackendOrigin
@@ -127,6 +165,9 @@ try {
   }
 
   if ($BackendProcess.HasExited) {
+    if ($BackendProcess.ExitCode -ne 0) {
+      Show-BackendFailure -Message '后端进程已退出。' -Process $BackendProcess -StdoutLog $BackendStdoutLog -StderrLog $BackendStderrLog
+    }
     exit $BackendProcess.ExitCode
   }
   if ($FrontendProcess.HasExited) {

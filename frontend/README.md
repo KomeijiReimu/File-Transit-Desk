@@ -35,6 +35,7 @@ pwsh -File scripts/dev.ps1
 ```
 
 该脚本会读取 `backend/config.yaml` 启动后端，并启动 Vite 前端开发服务器。
+如果后端配置写错，脚本会直接显示中文启动失败原因和日志尾部；常见的 YAML 缩进问题可按提示检查 `backend/config.yaml`。
 
 如只运行前端：
 

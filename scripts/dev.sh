@@ -46,6 +46,44 @@ if [[ ! -d "${ROOT_DIR}/frontend/node_modules" ]]; then
   (cd "${ROOT_DIR}/frontend" && bun install)
 fi
 
+BACKEND_STDOUT_LOG="$(mktemp "${TMPDIR:-/tmp}/file-trans-backend-stdout.XXXXXX.log")"
+BACKEND_STDERR_LOG="$(mktemp "${TMPDIR:-/tmp}/file-trans-backend-stderr.XXXXXX.log")"
+
+show_log_tail() {
+  local path="$1"
+  local title="$2"
+  if [[ -s "${path}" ]]; then
+    echo "" >&2
+    echo "${title}" >&2
+    while IFS= read -r line; do
+      echo "  ${line}" >&2
+    done < <(tail -n 80 "${path}")
+  fi
+}
+
+show_backend_failure() {
+  local message="$1"
+  local code="${2:-}"
+  echo "" >&2
+  echo "${message}" >&2
+  if [[ -n "${code}" ]]; then
+    echo "退出码：${code}" >&2
+  fi
+  show_log_tail "${BACKEND_STDERR_LOG}" "后端错误日志："
+  show_log_tail "${BACKEND_STDOUT_LOG}" "后端输出日志："
+  cat >&2 <<MSG
+
+常见处理方式：
+  1. 如果提示 YAML 格式错误，请检查 backend/config.yaml 对应行附近的缩进。
+  2. file_picker 应与 storage 同级；不要把 roots/max_page_size/deny_names 缩进到 storage.shares 下面。
+  3. 如果提示端口监听失败，请确认 ${BACKEND_ORIGIN} 没有被其他进程占用，或用 BACKEND_PORT 修改端口。
+  4. 如果提示数据库无法打开，请确认 backend/data 目录可写。
+日志文件：
+  stdout: ${BACKEND_STDOUT_LOG}
+  stderr: ${BACKEND_STDERR_LOG}
+MSG
+}
+
 cleanup() {
   local code=$?
   if [[ -n "${BACKEND_PID:-}" ]]; then
@@ -73,7 +111,10 @@ wait_for_backend() {
   echo "等待后端就绪：${BACKEND_ORIGIN}/api/health"
   for _ in {1..60}; do
     if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
-      wait "${BACKEND_PID}"
+      local code=0
+      wait "${BACKEND_PID}" || code=$?
+      show_backend_failure "后端启动失败。" "${code}"
+      exit "${code}"
     fi
     # 通过 bash 内置 TCP 发送真实健康检查请求，避免端口被旧进程占用时误判为本项目后端就绪。
     if (exec 3<>"/dev/tcp/${host}/${port}" && printf 'GET /api/health HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "${host}" >&3 && IFS= read -r -t 1 line <&3 && [[ "${line}" == *" 200 "* ]]) >/dev/null 2>&1; then
@@ -82,7 +123,7 @@ wait_for_backend() {
     fi
     sleep 0.5
   done
-  echo "后端未在预期时间内就绪，请检查后端启动日志。" >&2
+  show_backend_failure "后端未在预期时间内就绪。" ""
   exit 1
 }
 
@@ -91,7 +132,7 @@ echo "前端代理目标：${BACKEND_ORIGIN}"
 (
   cd "${ROOT_DIR}/backend"
   go run ./cmd/server -config "${BACKEND_CONFIG_PATH}"
-) &
+) >"${BACKEND_STDOUT_LOG}" 2>"${BACKEND_STDERR_LOG}" &
 BACKEND_PID=$!
 wait_for_backend
 
@@ -103,4 +144,9 @@ echo "启动前端：http://localhost:${FRONTEND_PORT}"
 ) &
 FRONTEND_PID=$!
 
-wait -n "${BACKEND_PID}" "${FRONTEND_PID}"
+wait -n "${BACKEND_PID}" "${FRONTEND_PID}" || code=$?
+code="${code:-0}"
+if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
+  show_backend_failure "后端进程已退出。" "${code}"
+fi
+exit "${code}"

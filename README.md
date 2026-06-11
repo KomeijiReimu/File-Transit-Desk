@@ -135,6 +135,8 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 - 启动 Vite 前端开发服务器；
 - 将前端开发代理 `/api` 和 `/t` 指向后端。
 
+如果后端启动失败，脚本会输出中文原因、后端日志尾部和日志文件路径。常见问题是 `backend/config.yaml` 的 YAML 缩进错误，例如 `file_picker` 应与 `storage` 同级，不能把 `roots/max_page_size/deny_names` 缩进到 `storage.shares` 下面。
+
 默认访问地址：
 
 ```text

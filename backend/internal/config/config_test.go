@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestConfigValidatesAdminPasswordHash(t *testing.T) {
 	// 管理员密码只允许 SHA-256 十六进制摘要，避免误把明文密码写进配置。
@@ -44,6 +49,24 @@ func TestDefaultUploadBlacklistIsEmpty(t *testing.T) {
 	}
 	if len(c.FilePicker.DenyNames) != 0 || len(c.FilePicker.DenyPatterns) != 0 {
 		t.Fatalf("expected default file picker filters to be empty, got names=%v patterns=%v", c.FilePicker.DenyNames, c.FilePicker.DenyPatterns)
+	}
+}
+
+func TestLoadReportsFriendlyYAMLError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	bad := []byte("storage:\n  shares: []\n    roots: []\n")
+	if err := os.WriteFile(path, bad, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected malformed yaml to fail")
+	}
+	message := err.Error()
+	for _, want := range []string{"配置文件格式错误", "config.yaml", "file_picker", "storage.shares"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected friendly error to contain %q, got %q", want, message)
+		}
 	}
 }
 

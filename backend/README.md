@@ -17,6 +17,7 @@ pwsh -File scripts/dev.ps1
 ```
 
 脚本默认读取 `backend/config.yaml`，后端端口仍以该配置文件中的 `server.port` 为准。
+如果后端启动失败，一键脚本会显示中文错误、后端日志尾部和日志文件路径。若看到 YAML 格式错误，请优先检查提示行附近的缩进；`file_picker` 是顶层配置，应该与 `storage` 同级，不能写到 `storage.shares` 下面。
 
 如只运行后端：
 
