@@ -145,6 +145,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 - `GET /api/dirs`：返回共享资源数组，普通用户字段为 `id/name/type/allowDownload/allowUpload/canDownload/canUpload`；管理员响应额外包含 `root` 便于配置管理展示。普通用户不会收到服务端真实路径。
 - `GET /api/upload-policy`：返回登录态上传页需要的大小和扩展名限制，前端会在真正传输前提示明显的限制错误，避免大文件传到一半才失败。
+- `GET /api/share-origins?currentOrigin=http://localhost:5173`：仅管理员可访问，返回后端枚举到的本机网卡候选地址，令牌页用它生成可选分享链接；它不会改变令牌授权，也不会自动决定应该复制哪个 IP。
 - `GET /api/files/list?dirId=default&path=subdir`：返回：
 
 ```json

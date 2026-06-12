@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -470,6 +471,15 @@ func TestAuditLogsPagination(t *testing.T) {
 	decodeJSON(t, resp, &page)
 	if resp.StatusCode != http.StatusOK || page.Page != 2 || page.PageSize != 2 || page.Total != 3 || page.TotalPages != 2 || len(page.Logs) != 1 {
 		t.Fatalf("unexpected audit page: status=%d page=%+v", resp.StatusCode, page)
+	}
+}
+
+func TestOriginFromIPUsesFrontendPort(t *testing.T) {
+	if got := originFromIP("http", net.ParseIP("192.168.124.9"), "5173"); got != "http://192.168.124.9:5173" {
+		t.Fatalf("unexpected IPv4 origin: %s", got)
+	}
+	if got := originFromIP("https", net.ParseIP("2001:db8::1"), "8443"); got != "https://[2001:db8::1]:8443" {
+		t.Fatalf("unexpected IPv6 origin: %s", got)
 	}
 }
 

@@ -48,7 +48,7 @@ export function extractShareToken(raw?: string): string {
  * 构造面向用户的前端分享页地址，避免把后端兼容 HTML 接口直接暴露给用户。
  */
 export function buildShareUrl(token: string, origin?: string): string {
-  const configuredOrigin = typeof import.meta !== 'undefined' ? import.meta.env.VITE_PUBLIC_SHARE_ORIGIN : ''
+  const configuredOrigin = configuredPublicShareOrigin()
   const base = normalizeOrigin(origin || configuredOrigin || (typeof window !== 'undefined' ? window.location.origin : ''))
   if (!token) return base
   return `${base}${buildSharePath(token)}`
@@ -59,7 +59,11 @@ export function buildSharePath(token: string): string {
 }
 
 export function publicShareOriginConfigured(): boolean {
-  return Boolean(typeof import.meta !== 'undefined' && import.meta.env.VITE_PUBLIC_SHARE_ORIGIN)
+  return Boolean(configuredPublicShareOrigin())
+}
+
+export function configuredPublicShareOrigin(): string {
+  return typeof import.meta !== 'undefined' ? normalizeOrigin(import.meta.env.VITE_PUBLIC_SHARE_ORIGIN || '') : ''
 }
 
 function normalizeOrigin(origin: string): string {

@@ -13,6 +13,7 @@ import type {
   ListFilesResponse,
   ResourcePayload,
   SafeConfig,
+  ShareOriginCandidate,
   TokenInfo,
   UploadPolicyPayload,
   UploadLimits,
@@ -202,6 +203,7 @@ export const api = {
       body: JSON.stringify({ dirId, path }),
     }),
   tokens: () => request<TokenInfo[]>('/api/tokens'),
+  shareOrigins: (currentOrigin: string) => request<ShareOriginCandidate[]>(`/api/share-origins${query({ currentOrigin })}`),
   createToken: (payload: CreateTokenPayload) =>
     request<CreateTokenResponse>('/api/tokens', { method: 'POST', body: JSON.stringify(payload) }),
   revokeToken: (id: string | number) =>

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -163,6 +165,12 @@ type uploadLimitsDTO struct {
 	BlockedExtensions  []string `json:"blockedExtensions"`
 }
 
+type shareOriginDTO struct {
+	Origin string `json:"origin"`
+	Label  string `json:"label"`
+	Source string `json:"source"`
+}
+
 type loginLimiter struct {
 	mu       sync.Mutex
 	attempts map[string]loginAttempt
@@ -248,6 +256,7 @@ func (s *Server) routes(app *fiber.App) {
 	app.Get("/api/files/download-by-lease", s.downloadByLease)
 	app.Post("/api/files/upload", s.auth(s.uploadFiles))
 	app.Get("/api/tokens", s.adminOnly(s.listTokens))
+	app.Get("/api/share-origins", s.adminOnly(s.shareOrigins))
 	app.Post("/api/tokens", s.adminOnly(s.createToken))
 	app.Post("/api/tokens/:id/revoke", s.adminOnly(s.revokeToken))
 	app.Delete("/api/tokens/:id", s.adminOnly(s.deleteToken))
@@ -594,6 +603,106 @@ func (s *Server) uploadPolicy(c *fiber.Ctx) error {
 		AllowedExtensions:  append([]string{}, cfg.Storage.AllowedExtensions...),
 		BlockedExtensions:  append([]string{}, cfg.Storage.BlockedExtensions...),
 	})
+}
+
+func (s *Server) shareOrigins(c *fiber.Ctx) error {
+	scheme, port := shareOriginSchemePort(c.Query("currentOrigin"), c)
+	items := make([]shareOriginDTO, 0)
+	seen := map[string]bool{}
+	for _, ip := range localShareIPs() {
+		origin := originFromIP(scheme, ip, port)
+		if origin == "" || seen[origin] {
+			continue
+		}
+		seen[origin] = true
+		label := "本机地址 " + ip.String()
+		if ip.IsPrivate() {
+			label = "局域网 " + ip.String()
+		}
+		items = append(items, shareOriginDTO{Origin: origin, Label: label, Source: "interface"})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Origin < items[j].Origin })
+	return c.JSON(items)
+}
+
+func shareOriginSchemePort(currentOrigin string, c *fiber.Ctx) (string, string) {
+	scheme, port := "http", ""
+	if parsed, err := url.Parse(strings.TrimSpace(currentOrigin)); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		scheme = parsed.Scheme
+		port = parsed.Port()
+		return scheme, port
+	}
+	if c.Protocol() != "" {
+		scheme = c.Protocol()
+	}
+	if host := c.Hostname(); host != "" {
+		if _, p, err := net.SplitHostPort(host); err == nil {
+			port = p
+		} else if strings.Contains(host, ":") && !strings.Contains(host, "]") {
+			port = ""
+		} else if idx := strings.LastIndex(host, ":"); idx > -1 {
+			port = host[idx+1:]
+		}
+	}
+	return scheme, port
+}
+
+func localShareIPs() []net.IP {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	out := make([]net.IP, 0)
+	seen := map[string]bool{}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			if v4 := ip.To4(); v4 != nil {
+				ip = v4
+			}
+			key := ip.String()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, ip)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+func originFromIP(scheme string, ip net.IP, port string) string {
+	if ip == nil {
+		return ""
+	}
+	host := ip.String()
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port != "" {
+		host = net.JoinHostPort(strings.Trim(host, "[]"), port)
+		if strings.Contains(ip.String(), ":") {
+			host = "[" + ip.String() + "]:" + port
+		}
+	}
+	return scheme + "://" + host
 }
 
 func dirToDTO(dir config.Dir, includeRoot bool) dirDTO {

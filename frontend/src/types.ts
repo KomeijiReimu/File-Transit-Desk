@@ -179,6 +179,12 @@ export interface CreateTokenResponse extends TokenInfo {
   url: string
 }
 
+export interface ShareOriginCandidate {
+  origin: string
+  label: string
+  source: 'current' | 'configured' | 'interface' | string
+}
+
 export interface DownloadLeaseResponse {
   url: string
   expiresAt: string

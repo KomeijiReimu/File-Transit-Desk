@@ -6,11 +6,12 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
-import type { CreateTokenResponse, DirectoryInfo, TokenInfo } from '@/types'
-import { buildSharePath, buildShareUrl, copyToClipboard, extractShareToken, formatDate, publicShareOriginConfigured } from '@/utils'
+import type { CreateTokenResponse, DirectoryInfo, ShareOriginCandidate, TokenInfo } from '@/types'
+import { buildSharePath, buildShareUrl, configuredPublicShareOrigin, copyToClipboard, extractShareToken, formatDate } from '@/utils'
 
 const tokens = ref<TokenInfo[]>([])
 const dirs = ref<DirectoryInfo[]>([])
+const shareOrigins = ref<ShareOriginCandidate[]>([])
 const route = useRoute()
 const loading = ref(true)
 const saving = ref(false)
@@ -18,7 +19,7 @@ const error = ref('')
 const createdLink = ref('')
 const createdPath = ref('')
 const createdToken = ref('')
-const copyState = ref<'idle' | 'link-ok' | 'path-ok' | 'token-ok' | 'err'>('idle')
+const copyState = ref('idle')
 const rowCopyId = ref<string | number | null>(null)
 const pendingDelete = ref<TokenInfo | null>(null)
 const deleteError = ref('')
@@ -58,6 +59,29 @@ function sharePathFor(token: TokenInfo | CreateTokenResponse): string {
   const t = extractShareToken(raw)
   return t ? buildSharePath(t) : ''
 }
+
+const shareOriginOptions = computed(() => {
+  const options: ShareOriginCandidate[] = []
+  const seen = new Set<string>()
+  const add = (item: ShareOriginCandidate) => {
+    const origin = item.origin.replace(/\/+$/, '')
+    if (!origin || seen.has(origin)) return
+    seen.add(origin)
+    options.push({ ...item, origin })
+  }
+  if (typeof window !== 'undefined') {
+    add({ origin: window.location.origin, label: '当前访问地址', source: 'current' })
+  }
+  const configured = configuredPublicShareOrigin()
+  if (configured) add({ origin: configured, label: '公开地址', source: 'configured' })
+  shareOrigins.value.forEach(add)
+  return options
+})
+
+const shareLinks = computed(() => shareOriginOptions.value.map((item) => ({
+  ...item,
+  url: createdToken.value ? buildShareUrl(createdToken.value, item.origin) : '',
+})))
 
 function tokenStatusLabel(token: TokenInfo) {
   if (token.revoked) return '已撤销'
@@ -107,9 +131,14 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [dirList, tokenList] = await Promise.all([api.dirs(), api.tokens()])
+    const [dirList, tokenList, originList] = await Promise.all([
+      api.dirs(),
+      api.tokens(),
+      api.shareOrigins(typeof window !== 'undefined' ? window.location.origin : '').catch(() => [] as ShareOriginCandidate[]),
+    ])
     dirs.value = dirList
     tokens.value = tokenList
+    shareOrigins.value = originList
     applyRouteQuery(false)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '令牌数据加载失败。'
@@ -147,14 +176,12 @@ async function createToken() {
   }
 }
 
-async function copyCreated(value: string, okState: 'link-ok' | 'path-ok' | 'token-ok') {
+async function copyCreated(value: string, okState: string) {
   if (!value) return
   const ok = await copyToClipboard(value)
   copyState.value = ok ? okState : 'err'
   window.setTimeout(() => { copyState.value = 'idle' }, 2200)
 }
-
-const createdLinkLabel = computed(() => publicShareOriginConfigured() ? '公开地址链接' : '当前地址链接')
 
 watch(() => form.type, () => {
   if (!usableDirs.value.some((dir) => dir.id === form.dirId)) form.dirId = usableDirs.value[0]?.id || ''
@@ -248,9 +275,12 @@ onMounted(load)
               <span>分享路径</span>
               <code class="link-code">{{ createdPath }}</code>
             </div>
-            <div>
-              <span>{{ createdLinkLabel }}</span>
-              <code class="link-code">{{ createdLink }}</code>
+            <div v-for="candidate in shareLinks" :key="candidate.origin">
+              <span>{{ candidate.label }}</span>
+              <code class="link-code">{{ candidate.url }}</code>
+              <button class="mini-btn" type="button" @click="copyCreated(candidate.url, `origin:${candidate.origin}`)">
+                {{ copyState === `origin:${candidate.origin}` ? '✓ 已复制' : '复制这个地址' }}
+              </button>
             </div>
             <div>
               <span>令牌</span>
@@ -260,9 +290,6 @@ onMounted(load)
           <div class="created-actions">
             <button class="primary-btn" type="button" @click="copyCreated(createdPath, 'path-ok')">
               {{ copyState === 'path-ok' ? '✓ 已复制' : copyState === 'err' ? '复制失败' : '复制分享路径' }}
-            </button>
-            <button class="ghost-btn" type="button" @click="copyCreated(createdLink, 'link-ok')">
-              {{ copyState === 'link-ok' ? '✓ 已复制' : `复制${createdLinkLabel}` }}
             </button>
             <button class="ghost-btn" type="button" @click="copyCreated(createdToken, 'token-ok')">
               {{ copyState === 'token-ok' ? '✓ 已复制' : '复制令牌' }}
