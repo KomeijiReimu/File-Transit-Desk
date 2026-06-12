@@ -7,7 +7,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { CreateTokenResponse, DirectoryInfo, TokenInfo } from '@/types'
-import { buildShareUrl, copyToClipboard, extractShareToken, formatDate } from '@/utils'
+import { buildSharePath, buildShareUrl, copyToClipboard, extractShareToken, formatDate, publicShareOriginConfigured } from '@/utils'
 
 const tokens = ref<TokenInfo[]>([])
 const dirs = ref<DirectoryInfo[]>([])
@@ -16,8 +16,9 @@ const loading = ref(true)
 const saving = ref(false)
 const error = ref('')
 const createdLink = ref('')
+const createdPath = ref('')
 const createdToken = ref('')
-const copyState = ref<'idle' | 'ok' | 'err'>('idle')
+const copyState = ref<'idle' | 'link-ok' | 'path-ok' | 'token-ok' | 'err'>('idle')
 const rowCopyId = ref<string | number | null>(null)
 const pendingDelete = ref<TokenInfo | null>(null)
 const deleteError = ref('')
@@ -50,6 +51,12 @@ function shareUrlFor(token: TokenInfo | CreateTokenResponse): string {
   const raw = token.url || token.link || token.token || ''
   const t = extractShareToken(raw)
   return t ? buildShareUrl(t) : ''
+}
+
+function sharePathFor(token: TokenInfo | CreateTokenResponse): string {
+  const raw = token.url || token.link || token.token || ''
+  const t = extractShareToken(raw)
+  return t ? buildSharePath(t) : ''
 }
 
 function tokenStatusLabel(token: TokenInfo) {
@@ -114,6 +121,7 @@ async function load() {
 async function createToken() {
   error.value = ''
   createdLink.value = ''
+  createdPath.value = ''
   createdToken.value = ''
   copyState.value = 'idle'
   if (!canSubmit.value) {
@@ -130,6 +138,7 @@ async function createToken() {
     const token = await api.createToken({ ...form, path: selectedDirIsFile.value ? '' : form.path })
     createdToken.value = token.token || extractShareToken(token.url || token.link || '')
     createdLink.value = shareUrlFor(token)
+    createdPath.value = sharePathFor(token)
     await load()
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '创建令牌失败。'
@@ -138,12 +147,14 @@ async function createToken() {
   }
 }
 
-async function copyCreated() {
-  if (!createdLink.value) return
-  const ok = await copyToClipboard(createdLink.value)
-  copyState.value = ok ? 'ok' : 'err'
+async function copyCreated(value: string, okState: 'link-ok' | 'path-ok' | 'token-ok') {
+  if (!value) return
+  const ok = await copyToClipboard(value)
+  copyState.value = ok ? okState : 'err'
   window.setTimeout(() => { copyState.value = 'idle' }, 2200)
 }
+
+const createdLinkLabel = computed(() => publicShareOriginConfigured() ? '公开地址链接' : '当前地址链接')
 
 watch(() => form.type, () => {
   if (!usableDirs.value.some((dir) => dir.id === form.dirId)) form.dirId = usableDirs.value[0]?.id || ''
@@ -232,10 +243,29 @@ onMounted(load)
 
         <div v-if="createdLink" class="created-link">
           <span class="muted-text">只显示一次，请立即复制：</span>
-          <code class="link-code">{{ createdLink }}</code>
+          <div class="share-link-list">
+            <div>
+              <span>分享路径</span>
+              <code class="link-code">{{ createdPath }}</code>
+            </div>
+            <div>
+              <span>{{ createdLinkLabel }}</span>
+              <code class="link-code">{{ createdLink }}</code>
+            </div>
+            <div>
+              <span>令牌</span>
+              <code class="link-code">{{ createdToken }}</code>
+            </div>
+          </div>
           <div class="created-actions">
-            <button class="primary-btn" type="button" @click="copyCreated">
-              {{ copyState === 'ok' ? '✓ 已复制' : copyState === 'err' ? '复制失败' : '复制链接' }}
+            <button class="primary-btn" type="button" @click="copyCreated(createdPath, 'path-ok')">
+              {{ copyState === 'path-ok' ? '✓ 已复制' : copyState === 'err' ? '复制失败' : '复制分享路径' }}
+            </button>
+            <button class="ghost-btn" type="button" @click="copyCreated(createdLink, 'link-ok')">
+              {{ copyState === 'link-ok' ? '✓ 已复制' : `复制${createdLinkLabel}` }}
+            </button>
+            <button class="ghost-btn" type="button" @click="copyCreated(createdToken, 'token-ok')">
+              {{ copyState === 'token-ok' ? '✓ 已复制' : '复制令牌' }}
             </button>
             <a class="ghost-btn" :href="createdLink" target="_blank" rel="noopener">在新窗口打开</a>
           </div>

@@ -307,7 +307,6 @@ onMounted(loadInfo)
         <template v-if="isDownload">
           <div v-if="validFlag" class="share-actions">
             <button class="primary-btn big" type="button" :disabled="downloading" @click="startPublicDownload">{{ downloading ? '准备下载…' : '⇩ 立即下载' }}</button>
-            <small>下载链接会自动处理长文件传输。</small>
           </div>
           <div v-else class="alert error">{{ reasonLabel }}</div>
         </template>

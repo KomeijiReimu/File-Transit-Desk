@@ -48,9 +48,22 @@ export function extractShareToken(raw?: string): string {
  * 构造面向用户的前端分享页地址，避免把后端兼容 HTML 接口直接暴露给用户。
  */
 export function buildShareUrl(token: string, origin?: string): string {
-  const base = origin || (typeof window !== 'undefined' ? window.location.origin : '')
+  const configuredOrigin = typeof import.meta !== 'undefined' ? import.meta.env.VITE_PUBLIC_SHARE_ORIGIN : ''
+  const base = normalizeOrigin(origin || configuredOrigin || (typeof window !== 'undefined' ? window.location.origin : ''))
   if (!token) return base
-  return `${base}/share/${encodeURIComponent(token)}`
+  return `${base}${buildSharePath(token)}`
+}
+
+export function buildSharePath(token: string): string {
+  return token ? `/share/${encodeURIComponent(token)}` : '/share/'
+}
+
+export function publicShareOriginConfigured(): boolean {
+  return Boolean(typeof import.meta !== 'undefined' && import.meta.env.VITE_PUBLIC_SHARE_ORIGIN)
+}
+
+function normalizeOrigin(origin: string): string {
+  return origin.replace(/\/+$/, '')
 }
 
 export async function copyToClipboard(text: string): Promise<boolean> {

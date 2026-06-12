@@ -3,7 +3,8 @@ param(
   [int]$BackendPort = $(if ($env:BACKEND_PORT) { [int]$env:BACKEND_PORT } else { 17878 }),
   [string]$BackendOrigin = $(if ($env:BACKEND_ORIGIN) { $env:BACKEND_ORIGIN } else { '' }),
   [string]$FrontendHost = $(if ($env:FRONTEND_HOST) { $env:FRONTEND_HOST } else { '0.0.0.0' }),
-  [int]$FrontendPort = $(if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 5173 })
+  [int]$FrontendPort = $(if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 5173 }),
+  [string]$FrontendPublicShareOrigin = $(if ($env:FRONTEND_PUBLIC_SHARE_ORIGIN) { $env:FRONTEND_PUBLIC_SHARE_ORIGIN } elseif ($env:VITE_PUBLIC_SHARE_ORIGIN) { $env:VITE_PUBLIC_SHARE_ORIGIN } else { '' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -130,6 +131,7 @@ $BackendStdoutLog = Join-Path ([System.IO.Path]::GetTempPath()) ("file-trans-bac
 $BackendStderrLog = Join-Path ([System.IO.Path]::GetTempPath()) ("file-trans-backend-stderr-{0}.log" -f ([guid]::NewGuid().ToString('N')))
 $OldBackendOrigin = $env:BACKEND_ORIGIN
 $OldViteBackendOrigin = $env:VITE_BACKEND_ORIGIN
+$OldPublicShareOrigin = $env:VITE_PUBLIC_SHARE_ORIGIN
 
 try {
   Write-Host "启动后端：$BackendConfig"
@@ -146,6 +148,7 @@ try {
 
   $env:BACKEND_ORIGIN = $BackendOrigin
   $env:VITE_BACKEND_ORIGIN = $BackendOrigin
+  $env:VITE_PUBLIC_SHARE_ORIGIN = $FrontendPublicShareOrigin
 
   Write-Host "启动前端：http://localhost:$FrontendPort"
   $FrontendCommand = 'bun ' + (Join-CmdArguments @('run', 'dev', '--', '--host', $FrontendHost, '--port', [string]$FrontendPort))
@@ -182,4 +185,5 @@ try {
   }
   $env:BACKEND_ORIGIN = $OldBackendOrigin
   $env:VITE_BACKEND_ORIGIN = $OldViteBackendOrigin
+  $env:VITE_PUBLIC_SHARE_ORIGIN = $OldPublicShareOrigin
 }
