@@ -112,6 +112,7 @@ type Dir struct {
 const (
 	ResourceDirectory = "directory"
 	ResourceFile      = "file"
+	maxUploadLimitMB  = 102400
 )
 
 func Load(path string) (*Config, error) {
@@ -328,8 +329,8 @@ func (c *Config) validate() error {
 	if c.Downloads.ContentHashMaxMB < 0 || c.Downloads.ContentHashMaxMB > 102400 {
 		return fmt.Errorf("downloads.content_hash_max_mb must be between 0 and 102400")
 	}
-	if c.Storage.UploadMaxMB < 1 || c.Storage.UploadMaxMB > 10240 {
-		return fmt.Errorf("storage.upload_max_mb must be between 1 and 10240")
+	if c.Storage.UploadMaxMB < 1 || c.Storage.UploadMaxMB > maxUploadLimitMB {
+		return fmt.Errorf("storage.upload_max_mb must be between 1 and %d", maxUploadLimitMB)
 	}
 	if c.Storage.UploadMaxFileMB < 1 || c.Storage.UploadMaxFileMB > c.Storage.UploadMaxMB {
 		return fmt.Errorf("storage.upload_max_file_mb must be between 1 and storage.upload_max_mb")
@@ -337,8 +338,8 @@ func (c *Config) validate() error {
 	if c.Storage.UploadMaxFiles < 1 || c.Storage.UploadMaxFiles > 1000 {
 		return fmt.Errorf("storage.upload_max_files must be between 1 and 1000")
 	}
-	if c.Tokens.UploadMaxMB < 0 || c.Tokens.UploadMaxMB > 102400 {
-		return fmt.Errorf("tokens.upload_max_mb must be between 0 and 102400")
+	if c.Tokens.UploadMaxMB < 0 || c.Tokens.UploadMaxMB > maxUploadLimitMB {
+		return fmt.Errorf("tokens.upload_max_mb must be between 0 and %d", maxUploadLimitMB)
 	}
 	if overlap := intersectExtensions(c.Storage.AllowedExtensions, c.Storage.BlockedExtensions); overlap != "" {
 		return fmt.Errorf("extension %q cannot appear in both storage.allowed_extensions and storage.blocked_extensions", overlap)

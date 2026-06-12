@@ -41,6 +41,23 @@ func TestConfigValidatesDownloadContentHashLimit(t *testing.T) {
 	}
 }
 
+func TestConfigAllowsLargeLANUploadLimit(t *testing.T) {
+	// 局域网传输可能需要 10GB 以上的大文件上传；只保留极高防误配上限，不把 50GB 这类常见私有传输场景挡掉。
+	c := validTestConfig()
+	c.Storage.UploadMaxMB = 51200
+	c.Storage.UploadMaxFileMB = 51200
+	c.Tokens.UploadMaxMB = 51200
+	if err := c.validate(); err != nil {
+		t.Fatalf("expected 50GB upload limit to pass validation: %v", err)
+	}
+
+	c.Storage.UploadMaxMB = maxUploadLimitMB + 1
+	c.Storage.UploadMaxFileMB = c.Storage.UploadMaxMB
+	if err := c.validate(); err == nil {
+		t.Fatalf("expected upload limit above maxUploadLimitMB to fail")
+	}
+}
+
 func TestDefaultUploadBlacklistIsEmpty(t *testing.T) {
 	// 默认不再预置阻断扩展名，是否限制危险类型交由管理员按场景配置。
 	c := Default()
