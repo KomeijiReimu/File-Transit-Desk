@@ -271,29 +271,30 @@ onMounted(load)
         <div v-if="createdLink" class="created-link">
           <span class="muted-text">只显示一次，请立即复制：</span>
           <div class="share-link-list">
-            <div>
+            <div class="share-link-row">
               <span>分享路径</span>
               <code class="link-code">{{ createdPath }}</code>
+              <button class="mini-btn" type="button" @click="copyCreated(createdPath, 'path-ok')">
+                {{ copyState === 'path-ok' ? '✓ 已复制' : '复制' }}
+              </button>
             </div>
-            <div v-for="candidate in shareLinks" :key="candidate.origin">
+            <div v-for="candidate in shareLinks" :key="candidate.origin" class="share-link-row">
               <span>{{ candidate.label }}</span>
               <code class="link-code">{{ candidate.url }}</code>
               <button class="mini-btn" type="button" @click="copyCreated(candidate.url, `origin:${candidate.origin}`)">
-                {{ copyState === `origin:${candidate.origin}` ? '✓ 已复制' : '复制这个地址' }}
+                {{ copyState === `origin:${candidate.origin}` ? '✓ 已复制' : '复制' }}
               </button>
             </div>
-            <div>
+            <div class="share-link-row">
               <span>令牌</span>
               <code class="link-code">{{ createdToken }}</code>
+              <button class="mini-btn" type="button" @click="copyCreated(createdToken, 'token-ok')">
+                {{ copyState === 'token-ok' ? '✓ 已复制' : '复制' }}
+              </button>
             </div>
           </div>
           <div class="created-actions">
-            <button class="primary-btn" type="button" @click="copyCreated(createdPath, 'path-ok')">
-              {{ copyState === 'path-ok' ? '✓ 已复制' : copyState === 'err' ? '复制失败' : '复制分享路径' }}
-            </button>
-            <button class="ghost-btn" type="button" @click="copyCreated(createdToken, 'token-ok')">
-              {{ copyState === 'token-ok' ? '✓ 已复制' : '复制令牌' }}
-            </button>
+            <span v-if="copyState === 'err'" class="copy-error">复制失败，请手动选中文本。</span>
             <a class="ghost-btn" :href="createdLink" target="_blank" rel="noopener">在新窗口打开</a>
           </div>
         </div>
