@@ -80,8 +80,15 @@ const shareOriginOptions = computed(() => {
 
 const shareLinks = computed(() => shareOriginOptions.value.map((item) => ({
   ...item,
+  displayLabel: shareOriginLabel(item),
   url: createdToken.value ? buildShareUrl(createdToken.value, item.origin) : '',
 })))
+
+function shareOriginLabel(item: ShareOriginCandidate) {
+  if (item.source === 'current') return '当前'
+  if (item.source === 'configured') return '公开'
+  return '地址'
+}
 
 function tokenStatusLabel(token: TokenInfo) {
   if (token.revoked) return '已撤销'
@@ -183,6 +190,11 @@ async function copyCreated(value: string, okState: string) {
   window.setTimeout(() => { copyState.value = 'idle' }, 2200)
 }
 
+function selectReadonlyText(event: FocusEvent) {
+  const input = event.target as HTMLInputElement | null
+  input?.select()
+}
+
 watch(() => form.type, () => {
   if (!usableDirs.value.some((dir) => dir.id === form.dirId)) form.dirId = usableDirs.value[0]?.id || ''
   if (selectedDirIsFile.value) form.path = ''
@@ -273,21 +285,21 @@ onMounted(load)
           <div class="share-link-list">
             <div class="share-link-row">
               <span>分享路径</span>
-              <code class="link-code">{{ createdPath }}</code>
+              <input class="share-link-input" :value="createdPath" readonly aria-label="分享路径" @focus="selectReadonlyText" />
               <button class="mini-btn" type="button" @click="copyCreated(createdPath, 'path-ok')">
                 {{ copyState === 'path-ok' ? '✓ 已复制' : '复制' }}
               </button>
             </div>
             <div v-for="candidate in shareLinks" :key="candidate.origin" class="share-link-row">
-              <span>{{ candidate.label }}</span>
-              <code class="link-code">{{ candidate.url }}</code>
+              <span>{{ candidate.displayLabel }}</span>
+              <input class="share-link-input" :value="candidate.url" readonly :aria-label="candidate.label" @focus="selectReadonlyText" />
               <button class="mini-btn" type="button" @click="copyCreated(candidate.url, `origin:${candidate.origin}`)">
                 {{ copyState === `origin:${candidate.origin}` ? '✓ 已复制' : '复制' }}
               </button>
             </div>
             <div class="share-link-row">
               <span>令牌</span>
-              <code class="link-code">{{ createdToken }}</code>
+              <input class="share-link-input" :value="createdToken" readonly aria-label="令牌" @focus="selectReadonlyText" />
               <button class="mini-btn" type="button" @click="copyCreated(createdToken, 'token-ok')">
                 {{ copyState === 'token-ok' ? '✓ 已复制' : '复制' }}
               </button>
