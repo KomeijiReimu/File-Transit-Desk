@@ -3,6 +3,8 @@
 interface ImportMetaEnv {
   readonly VITE_PUBLIC_SHARE_ORIGIN?: string
   readonly VITE_TRANSFER_ORIGIN?: string
+  readonly VITE_FRONTEND_PORT?: string
+  readonly VITE_TRANSFER_PORT?: string
 }
 
 interface ImportMeta {

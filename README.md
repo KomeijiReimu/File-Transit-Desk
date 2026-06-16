@@ -158,7 +158,9 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1 -FrontendPublicShareOrigin http://192.168.124.9:5173
 ```
 
-如果直接使用一键启动脚本传大文件，默认上传和下载会经过 Vite 开发代理。为了减少这一跳并让大文件传输直连 Go 后端，可以显式指定浏览器能访问到的后端地址：
+如果直接使用一键启动脚本传大文件，前端会默认按当前页面主机名直连 Go 后端：打开 `http://localhost:5173` 时使用 `http://localhost:17878`，打开 `http://192.168.124.9:5173` 时使用 `http://192.168.124.9:17878`。这会绕过 Vite 开发代理，减少一跳传输开销。
+
+如需固定为某个域名、反向代理地址或特殊端口，也可以显式指定浏览器能访问到的后端地址：
 
 ```bash
 FRONTEND_TRANSFER_ORIGIN=http://192.168.124.9:17878 ./scripts/dev.sh
@@ -170,7 +172,7 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1 -FrontendTransferOrigin http://192.168.124.9:17878
 ```
 
-配置该项后，页面仍从前端端口打开，但上传票据、下载票据对应的大文件传输会直接访问后端地址。请确保 `backend/config.yaml` 的 `cors.allow_origins` 包含当前前端地址，例如 `http://192.168.124.9:5173`。这是显式极速通道配置，地址写错、后端不可达或 CORS 未允许时不会悄悄改走代理，前端会直接提示连接失败，便于管理员修正配置。
+无论使用默认直连还是显式指定，页面仍从前端端口打开，但上传票据、下载票据对应的大文件传输会直接访问后端地址。请确保 `backend/config.yaml` 的 `cors.allow_origins` 包含当前前端地址，例如 `http://192.168.124.9:5173`。地址写错、后端不可达或 CORS 未允许时不会悄悄改走代理，前端会直接提示连接失败，便于管理员修正配置。
 
 ### 3. 手动分别启动
 

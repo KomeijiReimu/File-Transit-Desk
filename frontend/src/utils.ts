@@ -84,7 +84,9 @@ export function configuredPublicShareOrigin(): string {
 }
 
 export function configuredTransferOrigin(): string {
-  return typeof import.meta !== 'undefined' ? normalizeOrigin(import.meta.env.VITE_TRANSFER_ORIGIN || '') : ''
+  if (typeof import.meta === 'undefined') return ''
+  const explicit = normalizeOrigin(import.meta.env.VITE_TRANSFER_ORIGIN || '')
+  return explicit || inferredDevTransferOrigin()
 }
 
 export function buildTransferUrl(path: string) {
@@ -95,6 +97,18 @@ export function buildTransferUrl(path: string) {
 
 function normalizeOrigin(origin: string): string {
   return origin.replace(/\/+$/, '')
+}
+
+function inferredDevTransferOrigin(): string {
+  if (typeof window === 'undefined' || typeof import.meta === 'undefined') return ''
+  const frontendPort = import.meta.env.VITE_FRONTEND_PORT || '5173'
+  const transferPort = import.meta.env.VITE_TRANSFER_PORT || '17878'
+  // 一键开发脚本默认走 Vite 前端端口。此时按“用户实际打开页面的主机名”直连后端，
+  // 例如 localhost:5173 -> localhost:17878，192.168.x.x:5173 -> 192.168.x.x:17878。
+  // 非开发端口保持同源路径，避免影响生产部署或反向代理部署。
+  if (window.location.port !== frontendPort) return ''
+  const hostname = window.location.hostname.includes(':') ? `[${window.location.hostname}]` : window.location.hostname
+  return `${window.location.protocol}//${hostname}:${transferPort}`
 }
 
 export async function copyToClipboard(text: string): Promise<boolean> {

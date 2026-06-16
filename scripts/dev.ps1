@@ -134,6 +134,8 @@ $OldBackendOrigin = $env:BACKEND_ORIGIN
 $OldViteBackendOrigin = $env:VITE_BACKEND_ORIGIN
 $OldPublicShareOrigin = $env:VITE_PUBLIC_SHARE_ORIGIN
 $OldTransferOrigin = $env:VITE_TRANSFER_ORIGIN
+$OldFrontendPort = $env:VITE_FRONTEND_PORT
+$OldTransferPort = $env:VITE_TRANSFER_PORT
 
 try {
   Write-Host "启动后端：$BackendConfig"
@@ -152,6 +154,8 @@ try {
   $env:VITE_BACKEND_ORIGIN = $BackendOrigin
   $env:VITE_PUBLIC_SHARE_ORIGIN = $FrontendPublicShareOrigin
   $env:VITE_TRANSFER_ORIGIN = $FrontendTransferOrigin
+  $env:VITE_FRONTEND_PORT = [string]$FrontendPort
+  $env:VITE_TRANSFER_PORT = [string]$BackendPort
 
   Write-Host "启动前端：http://localhost:$FrontendPort"
   $FrontendCommand = 'bun ' + (Join-CmdArguments @('run', 'dev', '--', '--host', $FrontendHost, '--port', [string]$FrontendPort))
@@ -190,4 +194,6 @@ try {
   $env:VITE_BACKEND_ORIGIN = $OldViteBackendOrigin
   $env:VITE_PUBLIC_SHARE_ORIGIN = $OldPublicShareOrigin
   $env:VITE_TRANSFER_ORIGIN = $OldTransferOrigin
+  $env:VITE_FRONTEND_PORT = $OldFrontendPort
+  $env:VITE_TRANSFER_PORT = $OldTransferPort
 }
