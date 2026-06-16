@@ -64,18 +64,19 @@ type DownloadLease struct {
 }
 
 type UploadLease struct {
-	ID        int64
-	Hash      string
-	SessionID string
-	Role      string
-	DirID     string
-	Path      string
-	FileName  string
-	FileSize  int64
-	ExpiresAt time.Time
-	CreatedAt time.Time
-	UsedAt    sql.NullTime
-	ClientIP  string
+	ID                  int64
+	Hash                string
+	SessionID           string
+	Role                string
+	DirID               string
+	Path                string
+	FileName            string
+	FileSize            int64
+	ResourceFingerprint string
+	ExpiresAt           time.Time
+	CreatedAt           time.Time
+	UsedAt              sql.NullTime
+	ClientIP            string
 }
 
 type AuditLog struct {
@@ -176,6 +177,7 @@ CREATE TABLE IF NOT EXISTS upload_leases(
   path TEXT NOT NULL,
   file_name TEXT NOT NULL,
   file_size INTEGER NOT NULL,
+  resource_fingerprint TEXT NOT NULL DEFAULT '',
   expires_at DATETIME NOT NULL,
   created_at DATETIME NOT NULL,
   used_at DATETIME,
@@ -200,6 +202,9 @@ CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires
 		return err
 	}
 	if err := s.addColumnIfMissing("download_leases", "file_sha256", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("upload_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	// 旧版本 sessions 没有空闲会话字段，迁移时用既有创建时间和绝对过期时间回填。
@@ -342,8 +347,8 @@ func (s *Store) CreateUploadLease(lease *UploadLease) error {
 		lease.CreatedAt = now
 	}
 	res, err := s.DB.Exec(
-		`INSERT INTO upload_leases(lease_hash, session_id, role, dir_id, path, file_name, file_size, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		lease.Hash, lease.SessionID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP,
+		`INSERT INTO upload_leases(lease_hash, session_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		lease.Hash, lease.SessionID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP,
 	)
 	if err != nil {
 		return err
@@ -369,8 +374,8 @@ func (s *Store) ReserveUploadLease(hash string, now time.Time) (UploadLease, err
 
 func (s *Store) UploadLeaseByHash(hash string) (UploadLease, error) {
 	var lease UploadLease
-	err := s.DB.QueryRow(`SELECT id, lease_hash, session_id, role, dir_id, path, file_name, file_size, expires_at, created_at, used_at, client_ip FROM upload_leases WHERE lease_hash = ?`, hash).Scan(
-		&lease.ID, &lease.Hash, &lease.SessionID, &lease.Role, &lease.DirID, &lease.Path, &lease.FileName, &lease.FileSize, &lease.ExpiresAt, &lease.CreatedAt, &lease.UsedAt, &lease.ClientIP,
+	err := s.DB.QueryRow(`SELECT id, lease_hash, session_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, used_at, client_ip FROM upload_leases WHERE lease_hash = ?`, hash).Scan(
+		&lease.ID, &lease.Hash, &lease.SessionID, &lease.Role, &lease.DirID, &lease.Path, &lease.FileName, &lease.FileSize, &lease.ResourceFingerprint, &lease.ExpiresAt, &lease.CreatedAt, &lease.UsedAt, &lease.ClientIP,
 	)
 	return lease, err
 }

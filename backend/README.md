@@ -45,7 +45,7 @@ go run ./cmd/server -config config.yaml
 - 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
 - 临时令牌数据库只保存 SHA-256 哈希，明文只在创建响应中返回一次。
 - 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；登录态普通上传、上传票据接口和公开分享上传都使用流式 multipart 落盘，不在主路径调用全量 `MultipartForm()`；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
-- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。
+- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。
 - 服务维护内存传输注册表，管理员可查看活跃上传和下载。上传进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。
 - 上传临时文件写在目标目录内，文件名形如 `.upload-*.tmp`；失败、超限、客户端断开或管理员取消会尽量删除。服务启动和定时任务会按配置清理超过保留期且不在活跃注册表中的临时文件。
 
@@ -174,7 +174,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `GET /api/files/download-by-lease?lease=...`：使用下载票据下载文件，支持 HTTP Range 断点续传；不要求页面会话仍然有效，但会校验票据未过期、目录仍允许下载、文件大小、修改时间和可用内容哈希未变化。
 - `GET /api/files/download?dirId=default&path=a.txt`：兼容保留的直接下载接口，仍要求请求开始时有有效会话。
 - `POST /api/files/upload-lease`：登录态创建上传票据，请求 `{ "dirId": "default", "path": "subdir", "fileName": "a.bin", "fileSize": 123 }`，返回 `{ "lease": "...", "uploadUrl": "/api/files/upload-by-lease", "expiresAt": "..." }`。票据一次性使用且不依赖 Cookie，适合直连后端或长时间上传。前端或直连客户端应通过 `Authorization: Bearer <lease>` 发送票据，不要把票据放入 URL 查询参数。
-- `POST /api/files/upload-by-lease`：使用上传票据提交 `multipart/form-data` 文件。后端使用票据绑定的目录、路径、文件名和大小，不信任 Cookie 或表单中的目标字段；同名文件仍不覆盖。为兼容旧客户端，查询参数 `?lease=...` 仍可用，但不推荐。
+- `POST /api/files/upload-by-lease`：使用上传票据提交 `multipart/form-data` 文件，必须带 `Authorization: Bearer <lease>`。后端使用票据绑定的目录、路径、文件名、大小和资源授权指纹，不信任 Cookie、查询参数或表单中的目标字段；同名文件仍不覆盖。
 - `POST /api/files/upload`：兼容保留的登录态 `multipart/form-data` 上传接口，字段 `dirId`、`path`、`file` 或 `files`，兼容多文件。推荐把 `dirId/path` 放在查询参数中；如果放在表单字段中，必须出现在文件字段之前。该接口会流式落盘并执行上传数量、单文件大小、请求总量、扩展名策略校验。返回：
 
 ```json

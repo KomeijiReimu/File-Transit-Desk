@@ -1361,6 +1361,158 @@ func TestUploadLeaseSurvivesSessionDeletion(t *testing.T) {
 	}
 }
 
+func TestUploadLeaseFingerprintRejectsAfterRestartWithChangedResource(t *testing.T) {
+	base := t.TempDir()
+	oldRoot := filepath.Join(base, "old")
+	newRoot := filepath.Join(base, "new")
+	if err := os.MkdirAll(oldRoot, 0755); err != nil {
+		t.Fatalf("mkdir old root: %v", err)
+	}
+	if err := os.MkdirAll(newRoot, 0755); err != nil {
+		t.Fatalf("mkdir new root: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(oldRoot), st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"restart.txt","fileSize":5}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("create upload lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+	restarted := New(testConfig(newRoot), st)
+	body, contentType := multipartUploadBody(t, "ignored.txt", []byte("hello"))
+	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
+	uploadReq.Header.Set("Content-Type", contentType)
+	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
+	uploadResp, err := restarted.Test(uploadReq)
+	if err != nil {
+		t.Fatalf("upload stale lease after restart: %v", err)
+	}
+	assertErrorContains(t, uploadResp, http.StatusForbidden, "资源已变化")
+	if _, err := os.Stat(filepath.Join(newRoot, "restart.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale lease not to write into new root, stat=%v", err)
+	}
+	stored, err := st.UploadLeaseByHash(security.HashToken(lease.Lease))
+	if err != nil {
+		t.Fatalf("reload upload lease: %v", err)
+	}
+	if stored.UsedAt.Valid {
+		t.Fatalf("expected fingerprint mismatch not to consume upload lease")
+	}
+}
+
+func TestUploadLeaseFingerprintCatchesOnlineResourceChangeWithoutCleanup(t *testing.T) {
+	base := t.TempDir()
+	oldRoot := filepath.Join(base, "old")
+	newRoot := filepath.Join(base, "new")
+	if err := os.MkdirAll(oldRoot, 0755); err != nil {
+		t.Fatalf("mkdir old root: %v", err)
+	}
+	if err := os.MkdirAll(newRoot, 0755); err != nil {
+		t.Fatalf("mkdir new root: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(oldRoot)
+	s := &Server{config: cfg, store: st, loginLimiter: newLoginLimiter(), transfers: newTransferRegistry()}
+	app := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
+	s.routes(app)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"race.txt","fileSize":5}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("create upload lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+	s.replaceConfig(testConfig(newRoot))
+	body, contentType := multipartUploadBody(t, "ignored.txt", []byte("hello"))
+	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
+	uploadReq.Header.Set("Content-Type", contentType)
+	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
+	uploadResp, err := app.Test(uploadReq)
+	if err != nil {
+		t.Fatalf("upload stale lease after hot config change: %v", err)
+	}
+	assertErrorContains(t, uploadResp, http.StatusForbidden, "资源已变化")
+	if _, err := os.Stat(filepath.Join(newRoot, "race.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale lease not to write into hot-updated root, stat=%v", err)
+	}
+	stored, err := st.UploadLeaseByHash(security.HashToken(lease.Lease))
+	if err != nil {
+		t.Fatalf("reload upload lease: %v", err)
+	}
+	if stored.UsedAt.Valid {
+		t.Fatalf("expected hot-change fingerprint mismatch not to consume upload lease")
+	}
+}
+
+func TestUploadLeaseRejectsQueryToken(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(root), st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"query.txt","fileSize":5}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("create upload lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+	body, contentType := multipartUploadBody(t, "ignored.txt", []byte("hello"))
+	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL+"?lease="+url.QueryEscape(lease.Lease), body)
+	uploadReq.Header.Set("Content-Type", contentType)
+	uploadResp, err := app.Test(uploadReq)
+	if err != nil {
+		t.Fatalf("upload by query lease: %v", err)
+	}
+	uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected query lease to be unauthorized, got %d", uploadResp.StatusCode)
+	}
+	stored, err := st.UploadLeaseByHash(security.HashToken(lease.Lease))
+	if err != nil {
+		t.Fatalf("reload upload lease: %v", err)
+	}
+	if stored.UsedAt.Valid {
+		t.Fatalf("expected query lease rejection not to consume upload lease")
+	}
+}
+
 func TestUploadLeaseInvalidatedWhenResourceChanges(t *testing.T) {
 	base := t.TempDir()
 	oldRoot := filepath.Join(base, "old")

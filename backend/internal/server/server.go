@@ -1156,6 +1156,36 @@ func resolvedAbsPath(path string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
+func uploadLeaseResourceFingerprint(dir config.Dir) string {
+	canonical := canonicalResourcePath(dir.Path)
+	material := strings.Join([]string{
+		"v1",
+		dir.ID,
+		dir.Type,
+		canonical,
+		strconv.FormatBool(dir.AllowUpload),
+		strconv.FormatBool(dir.AllowDownload),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(sum[:])
+}
+
+func uploadLeaseResourceFingerprintMatches(lease store.UploadLease, dir config.Dir) bool {
+	return lease.ResourceFingerprint != "" && lease.ResourceFingerprint == uploadLeaseResourceFingerprint(dir)
+}
+
+func canonicalResourcePath(path string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return cleaned
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(real)
+	}
+	return filepath.Clean(abs)
+}
+
 func resourceTypeLabel(value string) string {
 	if value == config.ResourceFile {
 		return "单文件"
@@ -1506,7 +1536,7 @@ func (s *Server) createUploadLease(c *fiber.Ctx) error {
 	}
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(s.cfg().Auth.UploadLeaseTTLSeconds) * time.Second)
-	lease := store.UploadLease{Hash: hash, SessionID: fmt.Sprint(c.Locals("sessionID")), Role: fmt.Sprint(c.Locals("role")), DirID: dir.ID, Path: safeRel, FileName: name, FileSize: in.FileSize, ExpiresAt: expiresAt, CreatedAt: now, ClientIP: s.clientIP(c)}
+	lease := store.UploadLease{Hash: hash, SessionID: fmt.Sprint(c.Locals("sessionID")), Role: fmt.Sprint(c.Locals("role")), DirID: dir.ID, Path: safeRel, FileName: name, FileSize: in.FileSize, ResourceFingerprint: uploadLeaseResourceFingerprint(dir), ExpiresAt: expiresAt, CreatedAt: now, ClientIP: s.clientIP(c)}
 	_ = s.store.DeleteExpiredUploadLeases(now)
 	if err := s.store.CreateUploadLease(&lease); err != nil {
 		return err
@@ -1520,14 +1550,34 @@ func (s *Server) uploadByLease(c *fiber.Ctx) error {
 	if plain == "" {
 		return fiber.ErrUnauthorized
 	}
-	lease, err := s.store.ReserveUploadLease(security.HashToken(plain), time.Now())
+	hash := security.HashToken(plain)
+	now := time.Now()
+	lease, err := s.store.UploadLeaseByHash(hash)
 	if err != nil {
-		_ = s.store.DeleteExpiredUploadLeases(time.Now())
+		_ = s.store.DeleteExpiredUploadLeases(now)
+		return fiber.ErrUnauthorized
+	}
+	if lease.UsedAt.Valid || !now.Before(lease.ExpiresAt) {
+		_ = s.store.DeleteExpiredUploadLeases(now)
 		return fiber.ErrUnauthorized
 	}
 	dir, ok := s.cfg().Dir(lease.DirID)
 	if !ok || !dir.AllowUpload {
 		return fiber.ErrForbidden
+	}
+	if !uploadLeaseResourceFingerprintMatches(lease, dir) {
+		_ = s.store.Audit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
+		return fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
+	}
+	lease, err = s.store.ReserveUploadLease(hash, now)
+	if err != nil {
+		_ = s.store.DeleteExpiredUploadLeases(time.Now())
+		return fiber.ErrUnauthorized
+	}
+	dir, ok = s.cfg().Dir(lease.DirID)
+	if !ok || !dir.AllowUpload || !uploadLeaseResourceFingerprintMatches(lease, dir) {
+		_ = s.store.Audit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
+		return fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
 	}
 	resp, err := s.saveStreamingMultipart(c, streamUploadOptions{dir: dir, rel: lease.Path, source: "upload_lease", lease: &lease, fixedFileName: lease.FileName, expectedSize: lease.FileSize})
 	if err != nil {
@@ -2605,39 +2655,40 @@ func tokenValidity(t store.Token, now time.Time) (bool, string) {
 func actionLabel(action string) string {
 	// 后端统一补充中文动作名，前端无需维护另一份审计动作映射。
 	labels := map[string]string{
-		"file_list":                    "文件列表",
-		"dirs":                         "查看目录",
-		"download":                     "文件下载",
-		"upload":                       "文件上传",
-		"login_success":                "登录成功",
-		"login_failed":                 "登录失败",
-		"login_rate_limited":           "登录限速",
-		"logout":                       "退出登录",
-		"unauthorized":                 "未认证访问",
-		"forbidden":                    "权限不足",
-		"illegal_access":               "非法访问",
-		"token_create":                 "创建令牌",
-		"token_revoke":                 "撤销令牌",
-		"token_delete":                 "删除令牌",
-		"token_use":                    "使用令牌",
-		"token_denied":                 "令牌拒绝",
-		"csrf_denied":                  "跨站请求拦截",
-		"token_download_failed":        "令牌下载失败",
-		"token_upload_failed":          "令牌上传失败",
-		"download_lease_create":        "创建下载票据",
-		"public_download_lease_create": "创建公开下载票据",
-		"download_lease_use":           "使用下载票据",
-		"download_lease_file_changed":  "下载票据文件变化",
-		"upload_lease_create":          "创建上传票据",
-		"upload_lease_use":             "使用上传票据",
-		"upload_lease_failed":          "上传票据失败",
-		"config_view":                  "查看配置",
-		"config_resource_create":       "新增共享资源",
-		"config_resource_update":       "修改共享资源",
-		"config_resource_delete":       "删除共享资源",
-		"config_upload_policy_update":  "修改上传策略",
-		"file_picker_select":           "选择服务端路径",
-		"file_picker_denied":           "文件选择拒绝",
+		"file_list":                     "文件列表",
+		"dirs":                          "查看目录",
+		"download":                      "文件下载",
+		"upload":                        "文件上传",
+		"login_success":                 "登录成功",
+		"login_failed":                  "登录失败",
+		"login_rate_limited":            "登录限速",
+		"logout":                        "退出登录",
+		"unauthorized":                  "未认证访问",
+		"forbidden":                     "权限不足",
+		"illegal_access":                "非法访问",
+		"token_create":                  "创建令牌",
+		"token_revoke":                  "撤销令牌",
+		"token_delete":                  "删除令牌",
+		"token_use":                     "使用令牌",
+		"token_denied":                  "令牌拒绝",
+		"csrf_denied":                   "跨站请求拦截",
+		"token_download_failed":         "令牌下载失败",
+		"token_upload_failed":           "令牌上传失败",
+		"download_lease_create":         "创建下载票据",
+		"public_download_lease_create":  "创建公开下载票据",
+		"download_lease_use":            "使用下载票据",
+		"download_lease_file_changed":   "下载票据文件变化",
+		"upload_lease_create":           "创建上传票据",
+		"upload_lease_use":              "使用上传票据",
+		"upload_lease_failed":           "上传票据失败",
+		"upload_lease_resource_changed": "上传票据资源变化",
+		"config_view":                   "查看配置",
+		"config_resource_create":        "新增共享资源",
+		"config_resource_update":        "修改共享资源",
+		"config_resource_delete":        "删除共享资源",
+		"config_upload_policy_update":   "修改上传策略",
+		"file_picker_select":            "选择服务端路径",
+		"file_picker_denied":            "文件选择拒绝",
 	}
 	if label, ok := labels[action]; ok {
 		return label

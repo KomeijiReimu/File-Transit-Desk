@@ -154,6 +154,20 @@ CREATE TABLE download_leases(
   created_at DATETIME NOT NULL,
   last_used_at DATETIME
 );
+CREATE TABLE upload_leases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lease_hash TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  dir_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL,
+  used_at DATETIME,
+  client_ip TEXT NOT NULL DEFAULT ''
+);
 `)
 	if closeErr := db.Close(); closeErr != nil {
 		t.Fatalf("close legacy db: %v", closeErr)
@@ -175,6 +189,9 @@ CREATE TABLE download_leases(
 	}
 	if !columnExists(t, st.DB, "download_leases", "file_sha256") {
 		t.Fatalf("expected download_leases.file_sha256 to be added")
+	}
+	if !columnExists(t, st.DB, "upload_leases", "resource_fingerprint") {
+		t.Fatalf("expected upload_leases.resource_fingerprint to be added")
 	}
 	if _, err := st.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at)`); err != nil {
 		t.Fatalf("expected idle expiry index to be creatable after migration: %v", err)
