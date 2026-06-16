@@ -1,4 +1,5 @@
 import router from '@/router'
+import { buildTransferUrl } from '@/utils'
 import type {
   AdminLoginPayload,
   AuditLog,
@@ -15,6 +16,9 @@ import type {
   SafeConfig,
   ShareOriginCandidate,
   TokenInfo,
+  TransferRecord,
+  UploadLeaseRequest,
+  UploadLeaseResponse,
   UploadPolicyPayload,
   UploadLimits,
   UserInfo,
@@ -38,6 +42,8 @@ type UploadOptions = {
   onProgress?: (progress: { loaded: number; total: number; percent: number }) => void
   signal?: AbortSignal
   suppressAuthRedirect?: boolean
+  withCredentials?: boolean
+  headers?: Record<string, string>
 }
 
 async function parseResponse<T>(response: Response, suppressAuthRedirect = false): Promise<T> {
@@ -88,7 +94,7 @@ async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T>
 function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {}): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    const { onProgress, signal, suppressAuthRedirect = false } = options
+    const { onProgress, signal, suppressAuthRedirect = false, withCredentials = true, headers } = options
     let settled = false
     const rejectOnce = (err: ApiError) => {
       if (settled) return
@@ -107,7 +113,8 @@ function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {})
     const abortHandler = () => xhr.abort()
     signal?.addEventListener('abort', abortHandler, { once: true })
     xhr.open('POST', url)
-    xhr.withCredentials = true
+    xhr.withCredentials = withCredentials
+    Object.entries(headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value))
     xhr.upload.onprogress = (event) => {
       const total = event.lengthComputable && event.total > 0 ? event.total : 0
       const loaded = event.loaded || 0
@@ -134,7 +141,6 @@ function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {})
         rejectOnce(new ApiError(message, xhr.status, payload))
         return
       }
-      onProgress?.({ loaded: 1, total: 1, percent: 100 })
       resolveOnce((payload || {}) as T)
     }
     xhr.send(form)
@@ -195,7 +201,19 @@ export const api = {
     form.set('dirId', dirId)
     form.set('path', path)
     form.append('files', file)
-    return uploadForm<{ ok: boolean; uploaded?: number }>('/api/files/upload', form, options)
+    return uploadForm<{ ok: boolean; uploaded?: number }>(`/api/files/upload${query({ dirId, path })}`, form, options)
+  },
+  createUploadLease: (payload: UploadLeaseRequest) =>
+    request<UploadLeaseResponse>('/api/files/upload-lease', { method: 'POST', body: JSON.stringify(payload) }),
+  uploadByLease: (lease: UploadLeaseResponse, file: File, options: UploadOptions = {}) => {
+    const form = new FormData()
+    form.append('files', file)
+    return uploadForm<{ ok: boolean; uploaded?: number }>(buildTransferUrl(lease.uploadUrl), form, {
+      ...options,
+      suppressAuthRedirect: true,
+      withCredentials: false,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${lease.lease}` },
+    })
   },
   createDownloadLease: (dirId: string, path: string) =>
     request<DownloadLeaseResponse>('/api/files/download-lease', {
@@ -214,6 +232,8 @@ export const api = {
     request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status })}`),
   auditLogPage: (filter: AuditFilter = {}) =>
     request<AuditLogPage>(`/api/audit/logs${query({ page: filter.page, pageSize: filter.pageSize, action: filter.action, status: filter.status })}`),
+  activeTransfers: () => request<{ transfers: TransferRecord[] }>('/api/transfers/active'),
+  cancelTransfer: (id: string) => request<{ ok: boolean }>(`/api/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   safeConfig: () => request<SafeConfig>('/api/config'),
   updateUploadPolicy: (payload: UploadPolicyPayload) =>
     request<UploadPolicyPayload>('/api/config/upload-policy', { method: 'PUT', body: JSON.stringify(payload) }),
@@ -237,7 +257,11 @@ export const api = {
   publicUpload: (token: string, file: File, options: UploadOptions = {}) => {
     const form = new FormData()
     form.append('files', file)
-    return uploadForm<{ ok: boolean; uploaded?: number }>(`/t/${encodeURIComponent(token)}/upload`, form, { ...options, suppressAuthRedirect: true })
+    return uploadForm<{ ok: boolean; uploaded?: number }>(buildTransferUrl(`/t/${encodeURIComponent(token)}/upload`), form, {
+      ...options,
+      suppressAuthRedirect: true,
+      withCredentials: false,
+    })
   },
   createPublicDownloadLease: (token: string) =>
     request<DownloadLeaseResponse>(`/t/${encodeURIComponent(token)}/download-lease`, { method: 'POST' }),

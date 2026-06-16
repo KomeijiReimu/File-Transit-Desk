@@ -23,6 +23,7 @@ import (
 	"filetrans-backend/internal/security"
 	"filetrans-backend/internal/store"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -1303,6 +1304,403 @@ func TestLoginLimiterReservesAttemptsAtomically(t *testing.T) {
 	limiter.reset("ip")
 	if !limiter.reserve("ip") {
 		t.Fatalf("expected reset limiter to allow new attempt")
+	}
+}
+
+func TestUploadLeaseSurvivesSessionDeletion(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(root), st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"lease.txt","fileSize":5}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("create lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, resp, &lease)
+	if lease.Lease == "" || resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", resp.StatusCode, lease)
+	}
+	if strings.Contains(lease.UploadURL, "lease=") {
+		t.Fatalf("upload lease URL must not expose bearer token in query: %s", lease.UploadURL)
+	}
+	if err := st.DeleteSession("user-sid"); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	part, err := w.CreateFormFile("files", "ignored.txt")
+	if err != nil {
+		t.Fatalf("create part: %v", err)
+	}
+	_, _ = part.Write([]byte("hello"))
+	_ = w.Close()
+	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
+	uploadReq.Header.Set("Content-Type", w.FormDataContentType())
+	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
+	uploadResp, err := app.Test(uploadReq)
+	if err != nil {
+		t.Fatalf("upload by lease: %v", err)
+	}
+	uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected lease upload ok, got %d", uploadResp.StatusCode)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "lease.txt"))
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("expected uploaded content, data=%q err=%v", data, err)
+	}
+}
+
+func TestUploadLeaseInvalidatedWhenResourceChanges(t *testing.T) {
+	base := t.TempDir()
+	oldRoot := filepath.Join(base, "old")
+	newRoot := filepath.Join(base, "new")
+	if err := os.MkdirAll(oldRoot, 0755); err != nil {
+		t.Fatalf("mkdir old root: %v", err)
+	}
+	if err := os.MkdirAll(newRoot, 0755); err != nil {
+		t.Fatalf("mkdir new root: %v", err)
+	}
+	oldTmp := filepath.Join(oldRoot, ".upload-stale.tmp")
+	if err := os.WriteFile(oldTmp, []byte("stale"), 0600); err != nil {
+		t.Fatalf("write stale temp: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(oldRoot)
+	cfg.Auth.DevAllowFixedCode = true
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.SaveAtomic(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	app := NewWithConfigPath(cfg, st, cfgPath)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"moved.txt","fileSize":5}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("create upload lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/config/resources/default", strings.NewReader(fmt.Sprintf(`{"id":"default","name":"Default","type":"directory","path":%q,"allowDownload":true,"allowUpload":true}`, newRoot)))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	updateResp, err := app.Test(updateReq)
+	if err != nil {
+		t.Fatalf("update resource: %v", err)
+	}
+	updateResp.Body.Close()
+	if updateResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected resource update ok, got %d", updateResp.StatusCode)
+	}
+	if _, err := os.Stat(oldTmp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected old resource temp to be removed, stat=%v", err)
+	}
+	body, contentType := multipartUploadBody(t, "ignored.txt", []byte("hello"))
+	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
+	uploadReq.Header.Set("Content-Type", contentType)
+	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
+	uploadResp, err := app.Test(uploadReq)
+	if err != nil {
+		t.Fatalf("upload by stale lease: %v", err)
+	}
+	uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected stale upload lease to fail, got %d", uploadResp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(newRoot, "moved.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale upload not to create file in new root, stat=%v", err)
+	}
+}
+
+func TestUploadLeaseInvalidatedAfterResourceDeleteAndRecreate(t *testing.T) {
+	base := t.TempDir()
+	oldRoot := filepath.Join(base, "old")
+	newRoot := filepath.Join(base, "new")
+	if err := os.MkdirAll(oldRoot, 0755); err != nil {
+		t.Fatalf("mkdir old root: %v", err)
+	}
+	if err := os.MkdirAll(newRoot, 0755); err != nil {
+		t.Fatalf("mkdir new root: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(oldRoot)
+	cfg.Auth.DevAllowFixedCode = true
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.SaveAtomic(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	app := NewWithConfigPath(cfg, st, cfgPath)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"recreated.txt","fileSize":5}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("create upload lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/config/resources/default", nil)
+	deleteReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	deleteResp, err := app.Test(deleteReq)
+	if err != nil {
+		t.Fatalf("delete resource: %v", err)
+	}
+	deleteResp.Body.Close()
+	if deleteResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected delete ok, got %d", deleteResp.StatusCode)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/config/resources", strings.NewReader(fmt.Sprintf(`{"id":"default","name":"Default","type":"directory","path":%q,"allowDownload":true,"allowUpload":true}`, newRoot)))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	createResp, err := app.Test(createReq)
+	if err != nil {
+		t.Fatalf("recreate resource: %v", err)
+	}
+	createResp.Body.Close()
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected recreate ok, got %d", createResp.StatusCode)
+	}
+	body, contentType := multipartUploadBody(t, "ignored.txt", []byte("hello"))
+	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
+	uploadReq.Header.Set("Content-Type", contentType)
+	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
+	uploadResp, err := app.Test(uploadReq)
+	if err != nil {
+		t.Fatalf("upload by stale lease: %v", err)
+	}
+	uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected recreated resource stale lease to fail, got %d", uploadResp.StatusCode)
+	}
+}
+
+func TestStreamingUploadLimitCleansTempFile(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	cfg.Storage.UploadMaxMB = 2
+	cfg.Storage.UploadMaxFileMB = 1
+	app := New(cfg, st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	body, contentType := multipartUploadBody(t, "large.bin", bytes.Repeat([]byte("x"), 1024*1024+10))
+	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
+	req.Header.Set("Content-Type", contentType)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("upload request: %v", err)
+	}
+	assertErrorContains(t, resp, http.StatusRequestEntityTooLarge, "单个文件")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read root: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".upload-") {
+			t.Fatalf("expected temp file cleanup, found %s", entry.Name())
+		}
+	}
+}
+
+func TestStartupUploadTempCleanupHonorsRetention(t *testing.T) {
+	root := t.TempDir()
+	oldTmp := filepath.Join(root, ".upload-old.tmp")
+	newTmp := filepath.Join(root, ".upload-new.tmp")
+	if err := os.WriteFile(oldTmp, []byte("old"), 0600); err != nil {
+		t.Fatalf("write old temp: %v", err)
+	}
+	if err := os.WriteFile(newTmp, []byte("new"), 0600); err != nil {
+		t.Fatalf("write new temp: %v", err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(oldTmp, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	cfg.Storage.UploadTempRetentionSeconds = 60
+	_ = New(cfg, st)
+	if _, err := os.Stat(oldTmp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected old temp to be removed, stat=%v", err)
+	}
+	if _, err := os.Stat(newTmp); err != nil {
+		t.Fatalf("expected new temp to remain: %v", err)
+	}
+}
+
+func TestActiveTransfersAPIShape(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(t.TempDir()), st)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/transfers/active", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("active transfers: %v", err)
+	}
+	var payload struct {
+		Transfers []transferRecord `json:"transfers"`
+	}
+	decodeJSON(t, resp, &payload)
+	if resp.StatusCode != http.StatusOK || payload.Transfers == nil {
+		t.Fatalf("expected active transfers structure, status=%d payload=%+v", resp.StatusCode, payload)
+	}
+}
+
+func TestAdminCancelUploadTransfer(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(t.TempDir())
+	s := &Server{config: cfg, store: st, loginLimiter: newLoginLimiter(), transfers: newTransferRegistry()}
+	app := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
+	s.routes(app)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	canceled := make(chan struct{})
+	s.transfers.add(&transferRecord{ID: "upload-1", Type: "upload", Status: transferActive, Source: "session", DirID: "default", FileName: "slow.bin", Cancelable: true, cancel: func() { close(canceled) }})
+	req := httptest.NewRequest(http.MethodPost, "/api/transfers/upload-1/cancel", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("cancel transfer: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected cancel ok, got %d", resp.StatusCode)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatalf("expected upload cancel function to be called")
+	}
+	items := s.transfers.list()
+	if len(items) != 1 || items[0].Status != transferCanceling {
+		t.Fatalf("expected transfer marked canceling, got %+v", items)
+	}
+}
+
+func TestPublicUploadUsesRegistrySourceAndCancel(t *testing.T) {
+	registry := newTransferRegistry()
+	canceled := false
+	registry.add(&transferRecord{ID: "public-1", Type: "upload", Status: transferActive, Source: "public_token", DirID: "default", Path: "", FileName: "public.bin", TotalBytes: 1024, Cancelable: true, TempPath: "./relative/.upload-live.tmp", cancel: func() { canceled = true }})
+	items := registry.list()
+	if len(items) != 1 || items[0].Source != "public_token" || !items[0].Cancelable {
+		t.Fatalf("expected visible cancelable public upload transfer, got %+v", items)
+	}
+	active := registry.activeTempPaths()
+	if len(active) != 1 {
+		t.Fatalf("expected one normalized active temp path, got %+v", active)
+	}
+	for path := range active {
+		if !filepath.IsAbs(path) || strings.Contains(path, "..") {
+			t.Fatalf("expected absolute normalized active temp path, got %q", path)
+		}
+	}
+	if !registry.cancel("public-1") || !canceled {
+		t.Fatalf("expected public upload transfer cancel to call cancel hook")
+	}
+	items = registry.list()
+	if len(items) != 1 || items[0].Status != transferCanceling {
+		t.Fatalf("expected public upload marked canceling, got %+v", items)
+	}
+}
+
+func TestPublicUploadStreamingLimitCleansTempAndRollsBackToken(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	cfg := testConfig(root)
+	cfg.Storage.UploadMaxMB = 2
+	cfg.Storage.UploadMaxFileMB = 1
+	cfg.Tokens.UploadMaxMB = 2
+	app := New(cfg, st)
+	tok := &store.Token{Hash: security.HashToken("public-upload"), Type: "upload", DirID: "default", Path: "", MaxUses: 1, ExpiresAt: sqlNullTime(time.Now().Add(time.Hour))}
+	if err := st.CreateToken(tok); err != nil {
+		t.Fatalf("create upload token: %v", err)
+	}
+	body, contentType := multipartUploadBody(t, "too-large.bin", bytes.Repeat([]byte("x"), 1024*1024+10))
+	req := httptest.NewRequest(http.MethodPost, "/t/public-upload/upload", body)
+	req.Header.Set("Content-Type", contentType)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("public upload request: %v", err)
+	}
+	assertErrorContains(t, resp, http.StatusRequestEntityTooLarge, "单个文件")
+	loaded, err := st.TokenByHash(security.HashToken("public-upload"))
+	if err != nil {
+		t.Fatalf("reload token: %v", err)
+	}
+	if loaded.Uses != 0 || loaded.UploadedBytes != 0 {
+		t.Fatalf("expected failed public upload to roll back reservation, got uses=%d bytes=%d", loaded.Uses, loaded.UploadedBytes)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read root: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".upload-") || entry.Name() == "too-large.bin" {
+			t.Fatalf("expected failed public upload cleanup, found %s", entry.Name())
+		}
 	}
 }
 

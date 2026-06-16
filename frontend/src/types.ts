@@ -190,6 +190,38 @@ export interface DownloadLeaseResponse {
   expiresAt: string
 }
 
+export interface UploadLeaseRequest {
+  dirId: string
+  path: string
+  fileName: string
+  fileSize: number
+}
+
+export interface UploadLeaseResponse {
+  lease: string
+  uploadUrl: string
+  expiresAt: string
+}
+
+export interface TransferRecord {
+  id: string
+  type: 'upload' | 'download' | string
+  status: 'active' | 'canceling' | string
+  source: string
+  dirId?: string
+  path?: string
+  fileName?: string
+  totalBytes?: number
+  transferredBytes?: number
+  currentSpeedBps?: number
+  averageSpeedBps?: number
+  startedAt?: string
+  updatedAt?: string
+  clientIP?: string
+  cancelable?: boolean
+  bestEffort?: boolean
+}
+
 export interface AuditLog {
   id?: string | number
   time?: string

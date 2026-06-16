@@ -63,6 +63,21 @@ type DownloadLease struct {
 	LastUsedAt sql.NullTime
 }
 
+type UploadLease struct {
+	ID        int64
+	Hash      string
+	SessionID string
+	Role      string
+	DirID     string
+	Path      string
+	FileName  string
+	FileSize  int64
+	ExpiresAt time.Time
+	CreatedAt time.Time
+	UsedAt    sql.NullTime
+	ClientIP  string
+}
+
 type AuditLog struct {
 	ID        int64
 	Action    string
@@ -151,6 +166,23 @@ CREATE TABLE IF NOT EXISTS download_leases(
 );
 CREATE INDEX IF NOT EXISTS idx_download_leases_hash ON download_leases(lease_hash);
 CREATE INDEX IF NOT EXISTS idx_download_leases_expires_at ON download_leases(expires_at);
+
+CREATE TABLE IF NOT EXISTS upload_leases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lease_hash TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  dir_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL,
+  used_at DATETIME,
+  client_ip TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_upload_leases_hash ON upload_leases(lease_hash);
+CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires_at);
 `)
 	if err != nil {
 		return err
@@ -299,8 +331,57 @@ func (s *Store) DeleteExpiredDownloadLeases(now time.Time) error {
 	return err
 }
 
+func (s *Store) DeleteExpiredUploadLeases(now time.Time) error {
+	_, err := s.DB.Exec(`DELETE FROM upload_leases WHERE datetime(expires_at) <= datetime(?) OR used_at IS NOT NULL`, now)
+	return err
+}
+
+func (s *Store) CreateUploadLease(lease *UploadLease) error {
+	now := time.Now()
+	if lease.CreatedAt.IsZero() {
+		lease.CreatedAt = now
+	}
+	res, err := s.DB.Exec(
+		`INSERT INTO upload_leases(lease_hash, session_id, role, dir_id, path, file_name, file_size, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		lease.Hash, lease.SessionID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP,
+	)
+	if err != nil {
+		return err
+	}
+	lease.ID, err = res.LastInsertId()
+	return err
+}
+
+func (s *Store) ReserveUploadLease(hash string, now time.Time) (UploadLease, error) {
+	res, err := s.DB.Exec(`UPDATE upload_leases SET used_at = ? WHERE lease_hash = ? AND used_at IS NULL AND datetime(expires_at) > datetime(?)`, now, hash, now)
+	if err != nil {
+		return UploadLease{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return UploadLease{}, err
+	}
+	if affected != 1 {
+		return UploadLease{}, sql.ErrNoRows
+	}
+	return s.UploadLeaseByHash(hash)
+}
+
+func (s *Store) UploadLeaseByHash(hash string) (UploadLease, error) {
+	var lease UploadLease
+	err := s.DB.QueryRow(`SELECT id, lease_hash, session_id, role, dir_id, path, file_name, file_size, expires_at, created_at, used_at, client_ip FROM upload_leases WHERE lease_hash = ?`, hash).Scan(
+		&lease.ID, &lease.Hash, &lease.SessionID, &lease.Role, &lease.DirID, &lease.Path, &lease.FileName, &lease.FileSize, &lease.ExpiresAt, &lease.CreatedAt, &lease.UsedAt, &lease.ClientIP,
+	)
+	return lease, err
+}
+
 func (s *Store) DeleteDownloadLeasesByTokenID(id int64) error {
 	_, err := s.DB.Exec(`DELETE FROM download_leases WHERE token_id = ?`, id)
+	return err
+}
+
+func (s *Store) DeleteUploadLeasesByDirID(dirID string) error {
+	_, err := s.DB.Exec(`DELETE FROM upload_leases WHERE dir_id = ?`, dirID)
 	return err
 }
 
@@ -580,6 +661,9 @@ func (s *Store) RevokeTokensByDirIDsAndLeases(dirIDs []string) error {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM download_leases WHERE dir_id = ? OR token_id IN (SELECT id FROM tokens WHERE dir_id = ?)`, dirID, dirID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM upload_leases WHERE dir_id = ?`, dirID); err != nil {
 			return err
 		}
 	}

@@ -13,9 +13,11 @@ auth:
   # 会话绝对最长有效期；到期后必须重新登录。
   session_ttl_seconds: 86400
   # 用户无活动超过该时间后视为空闲过期；前端只在可见且有操作时发送心跳续期。
-  idle_timeout_seconds: 180
+  idle_timeout_seconds: 1800
   # 心跳恢复宽限期；普通 API 不使用宽限，只有 heartbeat 可在短暂超时后续期。
   idle_grace_seconds: 30
+  # 登录态上传开始前签发的单次上传票据有效期；票据是 bearer 授权，泄露即等同本次上传权限。
+  upload_lease_ttl_seconds: 1800
   cookie_secure: false
   admin:
     username: "REPLACE_WITH_ADMIN_USERNAME"
@@ -40,6 +42,10 @@ storage:
   upload_max_file_mb: 5120
   # 单次 multipart 请求最多允许的文件数量。
   upload_max_files: 20
+  # 崩溃或取消后残留的 .upload-*.tmp 临时文件保留时间。
+  upload_temp_retention_seconds: 86400
+  # 启动后定时清理 .upload-*.tmp 的间隔。
+  upload_temp_cleanup_interval_seconds: 3600
   # 白名单非空时，只允许这些扩展名；示例： [".zip", ".txt", ".pdf"]。
   allowed_extensions: []
   # 黑名单优先级高于白名单；默认清空，管理员可在 Web 配置管理页按需添加。

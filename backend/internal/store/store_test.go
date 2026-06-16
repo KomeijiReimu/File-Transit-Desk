@@ -265,6 +265,32 @@ func TestExpiredTokenCleanupRemovesDownloadLeasesAndSanitizesAudit(t *testing.T)
 	}
 }
 
+func TestDeleteUploadLeasesByDirID(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	now := time.Now()
+	keep := &UploadLease{Hash: "keep", SessionID: "s", Role: "user", DirID: "keep", Path: "", FileName: "a.txt", FileSize: 1, ExpiresAt: now.Add(time.Hour)}
+	drop := &UploadLease{Hash: "drop", SessionID: "s", Role: "user", DirID: "old", Path: "", FileName: "b.txt", FileSize: 1, ExpiresAt: now.Add(time.Hour)}
+	if err := st.CreateUploadLease(keep); err != nil {
+		t.Fatalf("create keep lease: %v", err)
+	}
+	if err := st.CreateUploadLease(drop); err != nil {
+		t.Fatalf("create drop lease: %v", err)
+	}
+	if err := st.DeleteUploadLeasesByDirID("old"); err != nil {
+		t.Fatalf("delete upload leases: %v", err)
+	}
+	if _, err := st.UploadLeaseByHash("drop"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected old dir upload lease deleted, got %v", err)
+	}
+	if _, err := st.UploadLeaseByHash("keep"); err != nil {
+		t.Fatalf("expected other dir lease to remain: %v", err)
+	}
+}
+
 func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
 	t.Helper()
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)

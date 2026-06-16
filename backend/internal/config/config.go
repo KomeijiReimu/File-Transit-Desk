@@ -35,13 +35,14 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	TOTPSecret         string      `yaml:"totp_secret"`
-	DevAllowFixedCode  bool        `yaml:"dev_allow_fixed_code"`
-	SessionTTLSeconds  int64       `yaml:"session_ttl_seconds"`
-	IdleTimeoutSeconds int64       `yaml:"idle_timeout_seconds"`
-	IdleGraceSeconds   int64       `yaml:"idle_grace_seconds"`
-	CookieSecure       bool        `yaml:"cookie_secure"`
-	Admin              AdminConfig `yaml:"admin"`
+	TOTPSecret            string      `yaml:"totp_secret"`
+	DevAllowFixedCode     bool        `yaml:"dev_allow_fixed_code"`
+	SessionTTLSeconds     int64       `yaml:"session_ttl_seconds"`
+	IdleTimeoutSeconds    int64       `yaml:"idle_timeout_seconds"`
+	IdleGraceSeconds      int64       `yaml:"idle_grace_seconds"`
+	UploadLeaseTTLSeconds int64       `yaml:"upload_lease_ttl_seconds"`
+	CookieSecure          bool        `yaml:"cookie_secure"`
+	Admin                 AdminConfig `yaml:"admin"`
 }
 
 type DownloadsConfig struct {
@@ -64,13 +65,15 @@ type CORSConfig struct {
 }
 
 type StorageConfig struct {
-	UploadMaxMB       int      `yaml:"upload_max_mb"`
-	UploadMaxFileMB   int      `yaml:"upload_max_file_mb"`
-	UploadMaxFiles    int      `yaml:"upload_max_files"`
-	AllowedExtensions []string `yaml:"allowed_extensions"`
-	BlockedExtensions []string `yaml:"blocked_extensions"`
-	Dirs              []Dir    `yaml:"dirs"`
-	Shares            []Dir    `yaml:"shares,omitempty"`
+	UploadMaxMB                      int      `yaml:"upload_max_mb"`
+	UploadMaxFileMB                  int      `yaml:"upload_max_file_mb"`
+	UploadMaxFiles                   int      `yaml:"upload_max_files"`
+	UploadTempRetentionSeconds       int64    `yaml:"upload_temp_retention_seconds"`
+	UploadTempCleanupIntervalSeconds int64    `yaml:"upload_temp_cleanup_interval_seconds"`
+	AllowedExtensions                []string `yaml:"allowed_extensions"`
+	BlockedExtensions                []string `yaml:"blocked_extensions"`
+	Dirs                             []Dir    `yaml:"dirs"`
+	Shares                           []Dir    `yaml:"shares,omitempty"`
 }
 
 type FilePickerConfig struct {
@@ -224,14 +227,17 @@ func Default() *Config {
 	c.Server.Port = 17878
 	c.Database.Path = "./data/filetrans.db"
 	c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
-	c.Auth.IdleTimeoutSeconds = int64((3 * time.Minute) / time.Second)
+	c.Auth.IdleTimeoutSeconds = int64((30 * time.Minute) / time.Second)
 	c.Auth.IdleGraceSeconds = 30
+	c.Auth.UploadLeaseTTLSeconds = int64((30 * time.Minute) / time.Second)
 	c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
 	c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
 	c.Downloads.ContentHashMaxMB = 64
 	c.Storage.UploadMaxMB = 5120
 	c.Storage.UploadMaxFileMB = 5120
 	c.Storage.UploadMaxFiles = 20
+	c.Storage.UploadTempRetentionSeconds = 86400
+	c.Storage.UploadTempCleanupIntervalSeconds = 3600
 	c.FilePicker.MaxPageSize = 200
 	c.Tokens.DefaultTTLSeconds = 3600
 	c.Tokens.MaxTTLSeconds = int64((24 * time.Hour) / time.Second)
@@ -259,10 +265,13 @@ func (c *Config) normalize() {
 		c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
 	}
 	if c.Auth.IdleTimeoutSeconds <= 0 {
-		c.Auth.IdleTimeoutSeconds = int64((3 * time.Minute) / time.Second)
+		c.Auth.IdleTimeoutSeconds = int64((30 * time.Minute) / time.Second)
 	}
 	if c.Auth.IdleGraceSeconds < 0 {
 		c.Auth.IdleGraceSeconds = 0
+	}
+	if c.Auth.UploadLeaseTTLSeconds <= 0 {
+		c.Auth.UploadLeaseTTLSeconds = int64((30 * time.Minute) / time.Second)
 	}
 	if c.Downloads.LeaseTTLSeconds <= 0 {
 		c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
@@ -281,6 +290,12 @@ func (c *Config) normalize() {
 	}
 	if c.Storage.UploadMaxFiles <= 0 {
 		c.Storage.UploadMaxFiles = 20
+	}
+	if c.Storage.UploadTempRetentionSeconds <= 0 {
+		c.Storage.UploadTempRetentionSeconds = 86400
+	}
+	if c.Storage.UploadTempCleanupIntervalSeconds <= 0 {
+		c.Storage.UploadTempCleanupIntervalSeconds = 3600
 	}
 	c.Storage.AllowedExtensions = normalizeExtensions(c.Storage.AllowedExtensions)
 	c.Storage.BlockedExtensions = normalizeExtensions(c.Storage.BlockedExtensions)
@@ -319,6 +334,9 @@ func (c *Config) validate() error {
 	}
 	if c.Auth.IdleGraceSeconds > c.Auth.IdleTimeoutSeconds {
 		return fmt.Errorf("auth.idle_grace_seconds must not exceed auth.idle_timeout_seconds")
+	}
+	if c.Auth.UploadLeaseTTLSeconds < 60 || c.Auth.UploadLeaseTTLSeconds > c.Auth.SessionTTLSeconds {
+		return fmt.Errorf("auth.upload_lease_ttl_seconds must be between 60 and auth.session_ttl_seconds")
 	}
 	if c.Downloads.LeaseTTLSeconds < 60 {
 		return fmt.Errorf("downloads.lease_ttl_seconds must be at least 60")

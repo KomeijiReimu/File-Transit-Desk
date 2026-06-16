@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { TokenInfo } from '@/types'
-import { formatBytes, formatDate } from '@/utils'
+import { buildTransferUrl, formatBytes, formatDate, formatDuration, formatSpeed } from '@/utils'
 
 interface UploadItem {
   id: string
@@ -16,6 +16,12 @@ interface UploadItem {
   total: number
   error?: string
   controller?: AbortController
+  speedBps?: number
+  averageSpeedBps?: number
+  etaSeconds?: number
+  startedAt?: number
+  lastLoaded?: number
+  lastProgressAt?: number
 }
 
 const route = useRoute()
@@ -96,7 +102,7 @@ async function startPublicDownload() {
   try {
     const lease = await api.createPublicDownloadLease(tokenParam.value)
     // 公开下载先兑换票据：只消耗一次使用次数，后续 Range 续传不会重复扣次。
-    window.location.assign(lease.url)
+    window.location.assign(buildTransferUrl(lease.url))
     try { info.value = await api.publicTokenInfo(tokenParam.value) } catch { /* ignore */ }
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '下载链接创建失败，请稍后重试。'
@@ -119,6 +125,7 @@ const totalBytes = computed(() => queue.value.reduce((sum, item) => sum + item.f
 const finishedBytes = computed(() => queue.value.reduce((sum, item) => sum + (item.status === 'success' ? item.file.size : item.status === 'uploading' ? item.loaded : 0), 0))
 const finishedCount = computed(() => queue.value.filter((item) => item.status === 'success').length)
 const overallProgress = computed(() => totalBytes.value > 0 ? Math.min(100, Math.round((finishedBytes.value / totalBytes.value) * 100)) : 0)
+const currentSpeed = computed(() => queue.value.reduce((sum, item) => sum + (item.status === 'uploading' ? item.speedBps || 0 : 0), 0))
 
 function pickFiles() {
   if (uploading.value) return
@@ -185,6 +192,24 @@ function uploadErrorMessage(err: unknown) {
   return '上传失败，请稍后重试。'
 }
 
+function updateUploadProgress(item: UploadItem, loaded: number, total: number, percent: number) {
+  const now = Date.now()
+  if (!item.startedAt) item.startedAt = now
+  const previousLoaded = item.lastLoaded ?? 0
+  const previousAt = item.lastProgressAt ?? now
+  const hasPrevious = Boolean(item.lastProgressAt)
+  const deltaSeconds = Math.max(0.001, (now - previousAt) / 1000)
+  const instant = hasPrevious ? Math.max(0, (loaded - previousLoaded) / deltaSeconds) : 0
+  item.speedBps = hasPrevious ? (item.speedBps ? item.speedBps * 0.7 + instant * 0.3 : instant) : 0
+  item.averageSpeedBps = loaded > 0 ? loaded / Math.max(0.001, (now - item.startedAt) / 1000) : 0
+  item.loaded = total > 0 ? Math.min(loaded, total) : loaded
+  item.total = total || item.file.size
+  item.progress = percent
+  if (item.averageSpeedBps > 0 && item.total > item.loaded) item.etaSeconds = (item.total - item.loaded) / item.averageSpeedBps
+  item.lastLoaded = loaded
+  item.lastProgressAt = now
+}
+
 function onFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   if (input.files?.length) addFiles(input.files)
@@ -213,6 +238,12 @@ async function uploadItem(item: UploadItem) {
   item.progress = 0
   item.loaded = 0
   item.total = item.file.size
+  item.speedBps = 0
+  item.averageSpeedBps = 0
+  item.etaSeconds = undefined
+  item.startedAt = undefined
+  item.lastLoaded = 0
+  item.lastProgressAt = undefined
   item.error = undefined
   const controller = new AbortController()
   item.controller = controller
@@ -220,9 +251,7 @@ async function uploadItem(item: UploadItem) {
     await api.publicUpload(tokenParam.value, item.file, {
       signal: controller.signal,
       onProgress: (progress) => {
-        item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
-        item.total = progress.total || item.file.size
-        item.progress = progress.percent
+        updateUploadProgress(item, progress.loaded, progress.total || item.file.size, progress.percent)
       },
     })
     item.progress = 100
@@ -245,6 +274,12 @@ function cancelCurrentUpload() {
   if (currentUpload.value) cancelUpload(currentUpload.value)
 }
 
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (!uploading.value) return
+  event.preventDefault()
+  event.returnValue = '文件正在上传，关闭页面会中断上传。'
+}
+
 async function uploadAll() {
   if (uploading.value) return
   stopUploadBatch = false
@@ -263,7 +298,11 @@ function retryItem(item: UploadItem) {
   uploadItem(item)
 }
 
-onMounted(loadInfo)
+onMounted(() => {
+  loadInfo()
+  window.addEventListener('beforeunload', beforeUnload)
+})
+onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
 </script>
 
 <template>
@@ -352,7 +391,9 @@ onMounted(loadInfo)
                   <div class="upload-progress" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
                     <span :style="{ width: `${item.status === 'success' ? 100 : item.progress}%` }" />
                   </div>
-                  <small v-if="item.status === 'uploading'" class="upload-progress-text">{{ formatBytes(item.loaded) }} / {{ formatBytes(item.total || item.file.size) }}</small>
+                  <small v-if="item.status === 'uploading'" class="upload-progress-text">
+                    {{ formatBytes(item.loaded) }} / {{ formatBytes(item.total || item.file.size) }} · {{ formatSpeed(item.speedBps) }} · 剩余 {{ formatDuration(item.etaSeconds) }}
+                  </small>
                 </div>
                 <div class="q-actions">
                   <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="retryItem(item)">重试</button>
@@ -366,7 +407,7 @@ onMounted(loadInfo)
               <div v-if="queue.length" class="upload-summary share-upload-summary">
                 <div>
                   <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${queue.length}` }}</strong>
-                  <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}</small>
+                  <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
                 </div>
                 <div class="upload-progress wide" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
               </div>

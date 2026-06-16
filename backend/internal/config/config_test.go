@@ -58,6 +58,46 @@ func TestConfigAllowsLargeLANUploadLimit(t *testing.T) {
 	}
 }
 
+func TestConfigValidatesUploadLeaseTTL(t *testing.T) {
+	c := validTestConfig()
+	if c.Auth.UploadLeaseTTLSeconds != 1800 {
+		t.Fatalf("expected default upload lease ttl 1800, got %d", c.Auth.UploadLeaseTTLSeconds)
+	}
+	c.Auth.UploadLeaseTTLSeconds = c.Auth.SessionTTLSeconds + 1
+	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "auth.upload_lease_ttl_seconds") {
+		t.Fatalf("expected upload lease ttl validation error, got %v", err)
+	}
+}
+
+func TestLoadPreservesLargeUploadLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := `auth:
+  dev_allow_fixed_code: true
+  admin:
+    username: admin
+    password_sha256: 2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db
+storage:
+  upload_max_mb: 51200
+  upload_max_file_mb: 51200
+  dirs:
+    - id: default
+      name: Default
+      path: /tmp
+      allow_download: true
+      allow_upload: true
+`
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if c.Storage.UploadMaxMB != 51200 || c.Storage.UploadMaxFileMB != 51200 {
+		t.Fatalf("expected 51200MB limits to be preserved, got request=%d file=%d", c.Storage.UploadMaxMB, c.Storage.UploadMaxFileMB)
+	}
+}
+
 func TestDefaultUploadBlacklistIsEmpty(t *testing.T) {
 	// 默认不再预置阻断扩展名，是否限制危险类型交由管理员按场景配置。
 	c := Default()

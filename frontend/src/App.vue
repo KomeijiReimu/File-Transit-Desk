@@ -46,6 +46,10 @@ async function handleLogout() {
             <span class="nav-ico nav-tokens" aria-hidden="true" />
             <span>令牌管理</span>
           </RouterLink>
+          <RouterLink to="/transfers">
+            <span class="nav-ico nav-transfers" aria-hidden="true" />
+            <span>正在传输</span>
+          </RouterLink>
           <RouterLink to="/audit">
             <span class="nav-ico nav-audit" aria-hidden="true" />
             <span>访问记录</span>

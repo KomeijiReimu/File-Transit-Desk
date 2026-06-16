@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
-import type { DirectoryInfo, UploadLimits } from '@/types'
-import { formatBytes } from '@/utils'
+import type { DirectoryInfo, UploadLeaseResponse, UploadLimits } from '@/types'
+import { setUploadSessionHold } from '@/useSessionActivity'
+import { formatBytes, formatDuration, formatSpeed } from '@/utils'
 
 interface UploadItem {
   id: string
@@ -17,6 +18,13 @@ interface UploadItem {
   total: number
   error?: string
   controller?: AbortController
+  uploadLease?: UploadLeaseResponse
+  speedBps?: number
+  averageSpeedBps?: number
+  etaSeconds?: number
+  startedAt?: number
+  lastLoaded?: number
+  lastProgressAt?: number
 }
 
 const route = useRoute()
@@ -28,8 +36,10 @@ const loading = ref(true)
 const dragOver = ref(false)
 const error = ref('')
 const notice = ref('')
+const sessionNotice = ref('')
 const limits = ref<UploadLimits | null>(null)
 const uploadQueue = ref<UploadItem[]>([])
+const uploadBatchActive = ref(false)
 let uploadCounter = 0
 let stopUploadBatch = false
 
@@ -47,9 +57,11 @@ const totalBytes = computed(() => uploadQueue.value.reduce((sum, item) => sum + 
 const finishedBytes = computed(() => uploadQueue.value.reduce((sum, item) => sum + (item.status === 'success' ? item.file.size : item.status === 'uploading' ? item.loaded : 0), 0))
 const finishedCount = computed(() => uploadQueue.value.filter((item) => item.status === 'success').length)
 const overallProgress = computed(() => totalBytes.value > 0 ? Math.min(100, Math.round((finishedBytes.value / totalBytes.value) * 100)) : 0)
+const currentSpeed = computed(() => uploadQueue.value.reduce((sum, item) => sum + (item.status === 'uploading' ? item.speedBps || 0 : 0), 0))
 // 返回浏览页时带回当前目录和上传路径，用户可直接检查刚上传的位置。
 const filesRoute = computed(() => ({ name: 'files', query: { dirId: selectedDirId.value, path: targetPath.value } }))
 let restoringInitialQuery = true
+let uploadHeartbeatTimer: number | undefined
 
 async function loadDirs() {
   loading.value = true
@@ -119,6 +131,30 @@ function uploadErrorMessage(err: unknown) {
   return '上传失败，可稍后重试。'
 }
 
+function updateUploadProgress(item: UploadItem, loaded: number, total: number, percent: number) {
+  const now = Date.now()
+  if (!item.startedAt) item.startedAt = now
+  const previousLoaded = item.lastLoaded ?? 0
+  const previousAt = item.lastProgressAt ?? now
+  const hasPrevious = Boolean(item.lastProgressAt)
+  const deltaSeconds = Math.max(0.001, (now - previousAt) / 1000)
+  const instant = hasPrevious ? Math.max(0, (loaded - previousLoaded) / deltaSeconds) : 0
+  item.speedBps = hasPrevious ? (item.speedBps ? item.speedBps * 0.7 + instant * 0.3 : instant) : 0
+  item.averageSpeedBps = loaded > 0 ? loaded / Math.max(0.001, (now - item.startedAt) / 1000) : 0
+  item.loaded = total > 0 ? Math.min(loaded, total) : loaded
+  item.total = total || item.file.size
+  item.progress = percent
+  if (item.averageSpeedBps > 0 && item.total > item.loaded) item.etaSeconds = (item.total - item.loaded) / item.averageSpeedBps
+  item.lastLoaded = loaded
+  item.lastProgressAt = now
+}
+
+async function ensureUploadLease(item: UploadItem) {
+  if (item.uploadLease) return
+  const lease = await api.createUploadLease({ dirId: selectedDirId.value, path: targetPath.value, fileName: item.file.name, fileSize: item.file.size })
+  item.uploadLease = lease
+}
+
 function onFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   if (input.files?.length) addUploadFiles(input.files)
@@ -145,17 +181,22 @@ async function uploadItem(item: UploadItem) {
   item.progress = 0
   item.loaded = 0
   item.total = item.file.size
+  item.speedBps = 0
+  item.averageSpeedBps = 0
+  item.etaSeconds = undefined
+  item.startedAt = undefined
+  item.lastLoaded = 0
+  item.lastProgressAt = undefined
   item.error = undefined
   const controller = new AbortController()
   item.controller = controller
   try {
+    await ensureUploadLease(item)
     // 队列逐个调用单文件接口，失败项可以单独重试，不影响已完成项。
-    await api.uploadOne(selectedDirId.value, targetPath.value, item.file, {
+    await api.uploadByLease(item.uploadLease!, item.file, {
       signal: controller.signal,
       onProgress: (progress) => {
-        item.loaded = progress.total > 0 ? Math.min(progress.loaded, progress.total) : progress.loaded
-        item.total = progress.total || item.file.size
-        item.progress = progress.percent
+        updateUploadProgress(item, progress.loaded, progress.total || item.file.size, progress.percent)
       },
     })
     item.progress = 100
@@ -164,6 +205,7 @@ async function uploadItem(item: UploadItem) {
   } catch (err) {
     item.status = 'error'
     item.error = uploadErrorMessage(err)
+    item.uploadLease = undefined
   } finally {
     item.controller = undefined
   }
@@ -181,14 +223,48 @@ function cancelCurrentUpload() {
 async function uploadAll() {
   if (uploading.value) return
   stopUploadBatch = false
+  uploadBatchActive.value = true
+  setUploadSessionHold(true)
   notice.value = ''
-  for (const item of uploadQueue.value.filter((item) => item.status === 'queued' || item.status === 'error')) {
+  sessionNotice.value = ''
+  const pending = uploadQueue.value.filter((item) => item.status === 'queued' || item.status === 'error')
+  for (const item of pending) {
     if (stopUploadBatch) break
     await uploadItem(item)
+    if (sessionNotice.value && uploadQueue.value.some((entry) => entry.status === 'queued' || entry.status === 'error')) {
+      error.value = '登录状态已过期，当前已授权文件处理完成；队列中未授权文件需要重新登录后继续。'
+      break
+    }
   }
   if (!uploadQueue.value.some((item) => item.status === 'error') && uploadQueue.value.some((item) => item.status === 'success')) {
     notice.value = '上传完成。'
   }
+  if (sessionNotice.value) {
+    window.dispatchEvent(new Event('ft:auth-expired'))
+    notice.value = '上传完成。登录状态已过期，请重新登录后查看文件。'
+  }
+  uploadBatchActive.value = false
+  setUploadSessionHold(false)
+}
+
+async function heartbeatDuringUpload() {
+  try {
+    await api.heartbeat()
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      sessionNotice.value = '登录状态已过期，已授权的当前上传会继续；上传完成后请重新登录查看文件。'
+    }
+  }
+}
+
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (!uploading.value && !uploadBatchActive.value) return
+  event.preventDefault()
+  event.returnValue = '文件正在上传，关闭页面会中断上传。'
+}
+
+function handleUploadSessionExpired() {
+  if (uploading.value || uploadBatchActive.value) sessionNotice.value = '登录状态已过期，已授权的当前上传会继续；上传完成后请重新登录查看文件。'
 }
 
 function removeUpload(id: string) {
@@ -207,6 +283,31 @@ watch(selectedDirId, () => {
 })
 
 onMounted(loadDirs)
+onMounted(() => {
+  window.addEventListener('beforeunload', beforeUnload)
+  window.addEventListener('ft:upload-session-expired', handleUploadSessionExpired)
+})
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', beforeUnload)
+  window.removeEventListener('ft:upload-session-expired', handleUploadSessionExpired)
+  if (uploadHeartbeatTimer) window.clearInterval(uploadHeartbeatTimer)
+  uploadBatchActive.value = false
+  setUploadSessionHold(false)
+})
+
+watch(uploading, (active) => {
+  if (uploadHeartbeatTimer) {
+    window.clearInterval(uploadHeartbeatTimer)
+    uploadHeartbeatTimer = undefined
+  }
+  if (active) {
+    setUploadSessionHold(true)
+    heartbeatDuringUpload()
+    uploadHeartbeatTimer = window.setInterval(heartbeatDuringUpload, 30_000)
+  } else if (!uploadBatchActive.value) {
+    setUploadSessionHold(false)
+  }
+})
 </script>
 
 <template>
@@ -225,6 +326,7 @@ onMounted(loadDirs)
 
     <StateBlock :loading="loading" :error="error" />
     <div v-if="notice" class="alert success">{{ notice }}</div>
+    <div v-if="sessionNotice" class="alert info">{{ sessionNotice }}</div>
 
     <EmptyState v-if="!loading && !dirs.length" title="还没有可用目录" description="请先在后端配置可上传目录。" />
 
@@ -267,6 +369,7 @@ onMounted(loadDirs)
 
         <div v-if="limits" class="upload-limit-note">
           单文件上限 {{ formatBytes(limits.uploadMaxFileBytes) }}；单次请求上限 {{ formatBytes(limits.uploadMaxBytes) }}。
+          每个文件开始传输前会建立临时授权；请不要关闭页面，关闭或断网会中断上传。
         </div>
 
         <ul v-if="uploadQueue.length" class="upload-queue">
@@ -277,7 +380,9 @@ onMounted(loadDirs)
               <div class="upload-progress" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
                 <span :style="{ width: `${item.status === 'success' ? 100 : item.progress}%` }" />
               </div>
-              <small v-if="item.status === 'uploading'" class="upload-progress-text">{{ formatBytes(item.loaded) }} / {{ formatBytes(item.total || item.file.size) }}</small>
+              <small v-if="item.status === 'uploading'" class="upload-progress-text">
+                {{ formatBytes(item.loaded) }} / {{ formatBytes(item.total || item.file.size) }} · {{ formatSpeed(item.speedBps) }} · 剩余 {{ formatDuration(item.etaSeconds) }}
+              </small>
             </div>
             <div class="q-actions">
               <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="uploadItem(item)">重试</button>
@@ -290,7 +395,7 @@ onMounted(loadDirs)
         <div v-if="uploadQueue.length" class="upload-summary">
           <div>
             <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${uploadQueue.length}` }}</strong>
-            <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}</small>
+            <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
           </div>
           <div class="upload-progress wide" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
           <button class="primary-btn" type="button" :disabled="!hasPendingUploads || uploading || !canUpload" @click="uploadAll">

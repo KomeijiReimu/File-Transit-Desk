@@ -7,7 +7,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { DirectoryInfo, FileEntry } from '@/types'
 import { useGsapEntrance } from '@/useGsapEntrance'
-import { formatBytes, formatDate, joinPath, parentPath } from '@/utils'
+import { buildTransferUrl, formatBytes, formatDate, joinPath, parentPath } from '@/utils'
 
 const pageRef = ref<HTMLElement | null>(null)
 const dirs = ref<DirectoryInfo[]>([])
@@ -118,7 +118,7 @@ async function startDownload(entry: FileEntry) {
   try {
     const lease = await api.createDownloadLease(selectedDirId.value, path)
     // 下载使用独立票据地址，页面会话随后空闲过期也不会中断已授权文件传输。
-    window.location.assign(lease.url)
+    window.location.assign(buildTransferUrl(lease.url))
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '下载链接创建失败，请稍后重试。'
   } finally {

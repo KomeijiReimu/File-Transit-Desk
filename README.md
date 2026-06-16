@@ -158,6 +158,20 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1 -FrontendPublicShareOrigin http://192.168.124.9:5173
 ```
 
+如果直接使用一键启动脚本传大文件，默认上传和下载会经过 Vite 开发代理。为了减少这一跳并让大文件传输直连 Go 后端，可以显式指定浏览器能访问到的后端地址：
+
+```bash
+FRONTEND_TRANSFER_ORIGIN=http://192.168.124.9:17878 ./scripts/dev.sh
+```
+
+Windows PowerShell：
+
+```powershell
+pwsh -File scripts/dev.ps1 -FrontendTransferOrigin http://192.168.124.9:17878
+```
+
+配置该项后，页面仍从前端端口打开，但上传票据、下载票据对应的大文件传输会直接访问后端地址。请确保 `backend/config.yaml` 的 `cors.allow_origins` 包含当前前端地址，例如 `http://192.168.124.9:5173`。这是显式极速通道配置，地址写错、后端不可达或 CORS 未允许时不会悄悄改走代理，前端会直接提示连接失败，便于管理员修正配置。
+
 ### 3. 手动分别启动
 
 后端：
@@ -284,13 +298,13 @@ cd backend
 sqlite3 data/filetrans.db "DELETE FROM audit_logs; VACUUM;"
 ```
 
-### 清除会话、令牌和下载票据
+### 清除会话、令牌和传输票据
 
-如果希望让所有登录态、分享链接和已兑换下载票据立即失效，但保留审计日志：
+如果希望让所有登录态、分享链接、已签发上传票据和已兑换下载票据立即失效，但保留审计日志：
 
 ```bash
 cd backend
-sqlite3 data/filetrans.db "DELETE FROM sessions; DELETE FROM download_leases; DELETE FROM tokens; VACUUM;"
+sqlite3 data/filetrans.db "DELETE FROM sessions; DELETE FROM upload_leases; DELETE FROM download_leases; DELETE FROM tokens; VACUUM;"
 ```
 
 ### 清除上传文件
@@ -431,7 +445,7 @@ downloads:
 - `tokens.max_ttl_seconds`：临时令牌最长有效期，避免误创建长期公开链接。
 - `tokens.upload_max_mb`：单个上传令牌累计上传容量，示例默认 5120 MB，`0` 表示不限制。
 
-上传文件名会先规范化再做扩展名判断，尾随空格、尾随点和控制字符不会绕过策略。扩展名策略只是准入规则，不等同于内容安全检测；策略修改后只影响之后的新上传和公开上传令牌。文件会先写入同目录临时文件，完整写入后再提交为最终文件名；如果同一次多文件上传中途失败，本次已保存文件会被清理，公开上传令牌的次数和容量也会回滚。
+上传文件名会先规范化再做扩展名判断，尾随空格、尾随点和控制字符不会绕过策略。扩展名策略只是准入规则，不等同于内容安全检测；策略修改后只影响之后的新上传和公开上传令牌。登录态上传会先创建短期、单次使用的 bearer 上传票据，再把文件流式写入目标目录内的 `.upload-*.tmp`，完整写入后再提交为最终文件名；如果同一次多文件上传中途失败，本次已保存文件会被清理，公开上传令牌的次数和容量也会回滚。上传页面会显示速度、剩余时间，并在上传期间保活页面会话；即使页面登录状态过期，已获得票据的当前上传也会继续，完成后再提示重新登录查看文件。
 
 ### 管理员可视化配置
 
@@ -458,6 +472,7 @@ downloads:
 - 登录下载和公开下载都会显式检查目标存在且不是目录。
 - 公开令牌信息接口只返回有效令牌的有限元数据；过期、撤销、耗尽、上传容量耗尽的令牌只返回失效原因。
 - 上传采用临时文件完整写入后提交，避免半成品以最终文件名可见；同时受数量、大小、扩展名和令牌累计容量限制。
+- 管理员“正在传输”页会展示活跃上传和下载。上传有后端精确进度、速度和可靠取消；下载保持极速发送路径，只做最佳努力观测，不承诺可靠取消。
 - 审计和登录限速默认使用连接 IP；部署在可信反向代理后可启用 `server.trust_proxy_headers` 获取真实客户端 IP。
 - 普通用户获取目录列表时不会返回服务端真实目录路径；管理员配置概览仍可看到目录根路径。
 

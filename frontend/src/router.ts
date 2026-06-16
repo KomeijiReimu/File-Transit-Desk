@@ -16,6 +16,7 @@ const router = createRouter({
     { path: '/files', name: 'files', component: () => import('@/views/FilesView.vue') },
     { path: '/upload', name: 'upload', component: () => import('@/views/UploadView.vue') },
     { path: '/tokens', name: 'tokens', component: () => import('@/views/TokensView.vue'), meta: { adminOnly: true } },
+    { path: '/transfers', name: 'transfers', component: () => import('@/views/TransfersView.vue'), meta: { adminOnly: true } },
     { path: '/audit', name: 'audit', component: () => import('@/views/AuditView.vue'), meta: { adminOnly: true } },
     { path: '/config', name: 'config', component: () => import('@/views/ConfigView.vue'), meta: { adminOnly: true } },
     { path: '/:pathMatch(.*)*', redirect: '/files' },

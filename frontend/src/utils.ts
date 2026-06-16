@@ -6,6 +6,23 @@ export function formatBytes(value?: number) {
   return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
+export function formatSpeed(value?: number) {
+  if (!value || value < 1) return '—'
+  return `${formatBytes(value)}/s`
+}
+
+export function formatDuration(seconds?: number) {
+  if (!seconds || !Number.isFinite(seconds) || seconds < 0) return '—'
+  const rounded = Math.max(1, Math.round(seconds))
+  if (rounded < 60) return `${rounded} 秒`
+  const minutes = Math.floor(rounded / 60)
+  const rest = rounded % 60
+  if (minutes < 60) return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  return mins ? `${hours} 小时 ${mins} 分` : `${hours} 小时`
+}
+
 export function formatDate(value?: string) {
   if (!value) return '—'
   const date = new Date(value)
@@ -64,6 +81,16 @@ export function publicShareOriginConfigured(): boolean {
 
 export function configuredPublicShareOrigin(): string {
   return typeof import.meta !== 'undefined' ? normalizeOrigin(import.meta.env.VITE_PUBLIC_SHARE_ORIGIN || '') : ''
+}
+
+export function configuredTransferOrigin(): string {
+  return typeof import.meta !== 'undefined' ? normalizeOrigin(import.meta.env.VITE_TRANSFER_ORIGIN || '') : ''
+}
+
+export function buildTransferUrl(path: string) {
+  const origin = configuredTransferOrigin()
+  if (!origin) return path
+  return `${origin}${path.startsWith('/') ? path : `/${path}`}`
 }
 
 function normalizeOrigin(origin: string): string {

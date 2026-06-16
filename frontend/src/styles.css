@@ -158,6 +158,8 @@ small, .muted-text { color: var(--muted); }
 .nav-tokens::after { right: 2px; bottom: 6px; width: 11px; height: 8px; border: 1.6px solid currentColor; border-radius: 999px; transform: rotate(-28deg); }
 .nav-audit::before { inset: 2px 4px; border: 1.5px solid currentColor; border-radius: 5px; }
 .nav-audit::after { left: 8px; top: 7px; width: 7px; height: 1.5px; background: currentColor; box-shadow: 0 4px 0 currentColor, 0 8px 0 currentColor; }
+.nav-transfers::before { left: 2px; right: 2px; top: 5px; height: 3px; border-radius: 999px; background: currentColor; box-shadow: 0 7px 0 currentColor, 0 14px 0 currentColor; opacity: .82; }
+.nav-transfers::after { right: 2px; top: 3px; width: 7px; height: 7px; border-top: 1.7px solid currentColor; border-right: 1.7px solid currentColor; transform: rotate(45deg); box-shadow: 5px 5px 0 -3px currentColor; }
 .nav-config::before { inset: 3px; border: 1.6px solid currentColor; border-radius: 50%; }
 .nav-config::after { left: 9px; top: 9px; width: 4px; height: 4px; border-radius: 50%; background: currentColor; box-shadow: 0 -8px 0 -1px currentColor, 0 8px 0 -1px currentColor, 8px 0 0 -1px currentColor, -8px 0 0 -1px currentColor; }
 .nav-list a:hover, .nav-list a.router-link-active { color: var(--text); background: var(--panel-strong); transform: translateX(4px); }
@@ -213,6 +215,7 @@ small, .muted-text { color: var(--muted); }
 .alert { border-radius: var(--radius-md); padding: 14px 16px; border: 1px solid var(--line); line-height: 1.55; }
 .alert.error { color: #ffd5da; background: rgba(255,107,122,.13); border-color: rgba(255,107,122,.35); }
 .alert.success { color: #d8ffe4; background: rgba(115,227,156,.13); border-color: rgba(115,227,156,.35); }
+.alert.info { color: #dff9ff; background: rgba(94,224,198,.12); border-color: rgba(94,224,198,.32); }
 
 .state-block { min-height: 86px; border: 1px dashed var(--line); border-radius: 24px; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); }
 .loader { width: 20px; height: 20px; border-radius: 50%; border: 3px solid rgba(255,255,255,.18); border-top-color: var(--accent); animation: spin .8s linear infinite; }
@@ -302,11 +305,13 @@ small, .muted-text { color: var(--muted); }
   inset: 0;
   background: linear-gradient(90deg, transparent, rgba(255,184,77,.16), transparent);
   animation: sweep 1.4s linear infinite;
+  pointer-events: none;
 }
 @keyframes sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
 .upload-queue li[data-status="success"] { border-color: rgba(115,227,156,.35); background: rgba(115,227,156,.07); }
 .upload-queue li[data-status="error"] { border-color: rgba(255,107,122,.35); background: rgba(255,107,122,.07); }
 .upload-queue .q-file { display: grid; gap: 6px; min-width: 0; flex: 1; }
+.upload-queue .q-file, .upload-queue .q-actions { position: relative; z-index: 1; }
 .upload-queue .q-file strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .upload-queue .q-status { font-weight: 600; }
 .upload-queue li[data-status="success"] .q-status { color: var(--success); }
@@ -342,6 +347,11 @@ small, .muted-text { color: var(--muted); }
 .data-table tbody tr { transition: background var(--motion); }
 .data-table tbody tr:hover { background: rgba(255,255,255,.035); }
 .data-table tr:last-child td { border-bottom: 0; }
+.transfer-table { table-layout: fixed; }
+.transfer-table th, .transfer-table td { overflow-wrap: anywhere; word-break: break-word; }
+.transfer-table td:nth-child(2) strong,
+.transfer-table td:nth-child(2) small,
+.transfer-table td:nth-child(3) { overflow-wrap: anywhere; }
 .data-table td.actions { white-space: nowrap; }
 .data-table td.actions > * + * { margin-left: 6px; }
 .link-cell { border: 0; padding: 0; background: transparent; color: var(--accent-2); text-align: left; }
@@ -367,6 +377,7 @@ small, .muted-text { color: var(--muted); }
 .copy-error { margin-right: auto; color: var(--danger); font-size: 13px; }
 code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; padding: 3px 6px; }
 .insight-card { padding: var(--space-card); display: grid; align-content: center; gap: 12px; min-height: 240px; }
+.insight-card.compact { min-height: 150px; }
 .big-number { font-size: 72px; font-weight: 800; color: var(--accent); line-height: 1; font-family: "Songti SC", serif; }
 
 /* ---------------- Confirmation dialog ---------------- */

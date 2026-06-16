@@ -40,11 +40,14 @@ go run ./cmd/server -config config.yaml
 - Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，`Secure` 由 `auth.cookie_secure` 控制；HTTPS 部署时应启用。服务端数据库只保存会话 ID 哈希，避免数据库只读泄露时直接复用 Cookie 原值。
 - 登录会话同时受绝对有效期和空闲有效期约束。前端只在用户活跃时调用心跳接口刷新空闲时间，页面隐藏或离开后不会持续保活。
 - 文件下载使用短期下载票据。票据绑定具体目录、路径、文件大小、修改时间，并会按 `downloads.content_hash_max_mb` 对文件内容写入 SHA-256 哈希；页面会话空闲过期后，已兑换票据的长下载和 HTTP Range 续传仍可继续，但文件被替换后旧票据会失效。
-- 管理员撤销或删除公开下载令牌时，会同步清理该令牌已兑换但尚未过期的下载票据，用于应急止血。
+- 管理员撤销或删除公开下载令牌时，会同步清理该令牌已兑换但尚未过期的下载票据，用于应急止血。共享资源路径、类型、权限变更或删除时，会同步撤销相关公开令牌并清理对应目录 ID 的下载票据和上传票据，避免旧授权指向新资源。
 - 对 `/api` 下会改变状态的请求，后端会校验非空 `Origin` 必须出现在 `cors.allow_origins` 中，降低 Cookie 凭据接口的跨站请求风险。
 - 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
 - 临时令牌数据库只保存 SHA-256 哈希，明文只在创建响应中返回一次。
-- 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
+- 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；登录态普通上传、上传票据接口和公开分享上传都使用流式 multipart 落盘，不在主路径调用全量 `MultipartForm()`；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
+- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。
+- 服务维护内存传输注册表，管理员可查看活跃上传和下载。上传进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。
+- 上传临时文件写在目标目录内，文件名形如 `.upload-*.tmp`；失败、超限、客户端断开或管理员取消会尽量删除。服务启动和定时任务会按配置清理超过保留期且不在活跃注册表中的临时文件。
 
 ## 配置说明
 
@@ -52,12 +55,13 @@ go run ./cmd/server -config config.yaml
 
 - `server.host/port`：监听地址。
 - `server.trust_proxy_headers`：是否信任反向代理头。为 `true` 时审计日志和登录限速优先使用 `X-Forwarded-For` 第一段，其次 `X-Real-IP`；未部署在可信代理后时必须保持 `false`。
-- `database.path`：SQLite 文件路径，启动自动建表 `sessions`、`tokens`、`download_leases`、`audit_logs` 并创建索引。
+- `database.path`：SQLite 文件路径，启动自动建表 `sessions`、`tokens`、`download_leases`、`upload_leases`、`audit_logs` 并创建索引。
 - `auth.totp_secret`：TOTP Base32 secret。
 - `auth.dev_allow_fixed_code`：本地开发固定码开关，默认关闭。
 - `auth.session_ttl_seconds`：会话绝对最长有效期。
-- `auth.idle_timeout_seconds`：空闲过期时间；前端不活跃或页面隐藏超过该时间后，后续 API 会返回 401。
+- `auth.idle_timeout_seconds`：空闲过期时间，默认 1800 秒；前端不活跃或页面隐藏超过该时间后，后续依赖 Cookie 的 API 会返回 401。已兑换的下载票据和已创建的上传票据不依赖 Cookie。
 - `auth.idle_grace_seconds`：心跳恢复宽限期；普通业务请求不会使用宽限期，只有 `/api/auth/heartbeat` 可在短暂超时后恢复会话。
+- `auth.upload_lease_ttl_seconds`：登录态上传票据有效期，默认 1800 秒，必须小于等于 `auth.session_ttl_seconds`。票据只允许使用一次，过期或用过后会被清理。
 - `auth.cookie_secure`：HTTPS 下启用安全 Cookie。
 - `downloads.lease_ttl_seconds`：下载票据默认有效期，点击下载或公开分享下载时兑换。
 - `downloads.lease_max_ttl_seconds`：下载票据最大有效期上限，防止误配置过长。
@@ -69,6 +73,8 @@ go run ./cmd/server -config config.yaml
 - `storage.upload_max_mb`：单次上传请求总大小限制，同时作为 Fiber 请求体上限；示例默认 5120 MB，可覆盖常见 2G 文件上传。
 - `storage.upload_max_file_mb`：单个文件大小限制，必须小于等于 `storage.upload_max_mb`；示例默认 5120 MB。
 - `storage.upload_max_files`：单次 multipart 请求最多允许的文件数量。
+- `storage.upload_temp_retention_seconds`：`.upload-*.tmp` 临时文件保留时间，默认 86400 秒。超过该时间且不在活跃上传注册表中的临时文件会被清理。
+- `storage.upload_temp_cleanup_interval_seconds`：临时文件定时清理间隔，默认 3600 秒；启动时也会先执行一次清理。
 - `storage.allowed_extensions` / `storage.blocked_extensions`：上传扩展名白名单与黑名单；白名单非空时只允许列出的扩展名，黑名单优先拒绝。默认黑名单为空，可由管理员配置管理页按需维护。
 - `storage.dirs`：开放目录资源，含 `type: directory`、`allow_download/allow_upload`，可由管理员“配置管理”页维护。
 - `storage.shares`：单文件共享资源，含 `type: file`，只允许下载；也可由管理员“配置管理”页维护。
@@ -167,7 +173,9 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `POST /api/files/download-lease`：登录态下载前兑换短期票据，请求 `{ "dirId": "default", "path": "a.txt" }`，返回 `{ "url": "/api/files/download-by-lease?lease=...", "expiresAt": "..." }`。
 - `GET /api/files/download-by-lease?lease=...`：使用下载票据下载文件，支持 HTTP Range 断点续传；不要求页面会话仍然有效，但会校验票据未过期、目录仍允许下载、文件大小、修改时间和可用内容哈希未变化。
 - `GET /api/files/download?dirId=default&path=a.txt`：兼容保留的直接下载接口，仍要求请求开始时有有效会话。
-- `POST /api/files/upload`：`multipart/form-data` 字段 `dirId`、`path`、`file` 或 `files`，兼容多文件。该接口会执行上传数量、单文件大小、请求总量、扩展名策略校验。返回：
+- `POST /api/files/upload-lease`：登录态创建上传票据，请求 `{ "dirId": "default", "path": "subdir", "fileName": "a.bin", "fileSize": 123 }`，返回 `{ "lease": "...", "uploadUrl": "/api/files/upload-by-lease", "expiresAt": "..." }`。票据一次性使用且不依赖 Cookie，适合直连后端或长时间上传。前端或直连客户端应通过 `Authorization: Bearer <lease>` 发送票据，不要把票据放入 URL 查询参数。
+- `POST /api/files/upload-by-lease`：使用上传票据提交 `multipart/form-data` 文件。后端使用票据绑定的目录、路径、文件名和大小，不信任 Cookie 或表单中的目标字段；同名文件仍不覆盖。为兼容旧客户端，查询参数 `?lease=...` 仍可用，但不推荐。
+- `POST /api/files/upload`：兼容保留的登录态 `multipart/form-data` 上传接口，字段 `dirId`、`path`、`file` 或 `files`，兼容多文件。推荐把 `dirId/path` 放在查询参数中；如果放在表单字段中，必须出现在文件字段之前。该接口会流式落盘并执行上传数量、单文件大小、请求总量、扩展名策略校验。返回：
 
 ```json
 { "ok": true, "uploaded": 2, "files": [{ "name": "a-1.txt", "path": "subdir/a-1.txt", "size": 12 }] }
@@ -207,13 +215,15 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `GET /t/download-by-lease?lease=...`：公开票据下载，支持 Range 续传且不重复消耗令牌次数。
 - `GET /t/:token/download`：兼容保留，会显示确认下载页；用户主动点击后才 `POST` 兑换票据，避免链接预览或安全扫描提前消耗一次性下载次数。
 - `GET /t/:token/upload`：后端兼容保留的简易上传页；推荐对外分享前端 `/share/:token` 页面。
-- `POST /t/:token/upload`：`multipart/form-data` 字段 `file` 或 `files`，除普通上传策略外，还会按 `tokens.upload_max_mb` 记录并限制该令牌的累计上传容量。
+- `POST /t/:token/upload`：`multipart/form-data` 字段 `file` 或 `files`，除普通上传策略外，还会按 `tokens.upload_max_mb` 记录并限制该令牌的累计上传容量。公开上传要求请求包含 `Content-Length`，并会在读取文件内容前按请求长度预占使用次数和容量；保存完成后按实际落盘大小校正容量，失败、取消或超限会清理临时/已保存文件并回滚预占。
 
 令牌使用次数与上传累计容量通过 SQLite 条件更新原子预占，避免并发绕过 `maxUses` 或累计容量限制。下载令牌会先确认目标文件存在后再预占次数并创建下载票据；后续同一票据的普通下载或 Range 续传不会重复增加 `uses`。上传令牌在保存失败时会释放预占次数和预占容量。
 
 ### 审计与健康检查
 
 - `GET /api/audit/logs?page=1&pageSize=50`：仅管理员可访问，分页返回 `{ logs, page, pageSize, total, totalPages }`，`pageSize` 最大 200。旧的 `?limit=100` 数组响应仍兼容保留。
+- `GET /api/transfers/active`：仅管理员可访问，返回 `{ "transfers": [...] }`。上传记录包含 `id/type/status/source/dirId/path/fileName/totalBytes/transferredBytes/currentSpeedBps/averageSpeedBps/startedAt/updatedAt/clientIP/cancelable`；公开分享上传的 `source` 为 `public_token`。下载记录带 `bestEffort: true`，速度字段可能为空或不精确。
+- `POST /api/transfers/:id/cancel`：仅管理员可访问。上传会触发取消、打断请求读取、停止写入并清理临时文件；下载保持极速发送路径，不保证可靠取消，通常返回 409 表示不可可靠取消或任务已结束。
 - `GET /api/health`：返回 `{ "ok": true }`。
 
 ### 配置管理
@@ -288,11 +298,11 @@ docker compose -f docker-compose.example.yml up -d --build
   sqlite3 data/filetrans.db "DELETE FROM audit_logs; VACUUM;"
   ```
 
-- **让所有登录态和分享链接立即失效**：保留审计日志，清除会话、下载票据和令牌：
+- **让所有登录态、上传票据和分享链接立即失效**：保留审计日志，清除会话、上传票据、下载票据和令牌：
 
   ```bash
   cd backend
-  sqlite3 data/filetrans.db "DELETE FROM sessions; DELETE FROM download_leases; DELETE FROM tokens; VACUUM;"
+  sqlite3 data/filetrans.db "DELETE FROM sessions; DELETE FROM upload_leases; DELETE FROM download_leases; DELETE FROM tokens; VACUUM;"
   ```
 
 - **清除上传文件**：上传目录以 `storage.dirs[].path` 为准；默认示例目录可这样清理：

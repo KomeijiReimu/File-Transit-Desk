@@ -4,6 +4,11 @@ import { ApiError, api } from '@/api'
 import { authState, clearUser } from '@/auth'
 
 const HEARTBEAT_INTERVAL_MS = 30_000
+let uploadSessionHold = false
+
+export function setUploadSessionHold(active: boolean) {
+  uploadSessionHold = active
+}
 
 export function useSessionActivity() {
   const route = useRoute()
@@ -32,7 +37,13 @@ export function useSessionActivity() {
       // 后端返回新的空闲过期时间，前端只用于展示和本地判断；最终仍以后端鉴权为准。
       if (authState.user && result.idleExpiresAt) authState.user.idleExpiresAt = result.idleExpiresAt
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) expireLocally()
+      if (err instanceof ApiError && err.status === 401) {
+        if (uploadSessionHold) {
+          window.dispatchEvent(new CustomEvent('ft:upload-session-expired'))
+        } else {
+          expireLocally()
+        }
+      }
     } finally {
       heartbeatRunning = false
     }
