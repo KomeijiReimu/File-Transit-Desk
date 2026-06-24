@@ -133,7 +133,7 @@ echo "启动后端：${BACKEND_CONFIG}"
 echo "前端代理目标：${BACKEND_ORIGIN}"
 (
   cd "${ROOT_DIR}/backend"
-  go run ./cmd/server -config "${BACKEND_CONFIG_PATH}"
+  FILE_TRANS_DEV_FRONTEND_PORT="${FRONTEND_PORT}" go run ./cmd/server -config "${BACKEND_CONFIG_PATH}"
 ) >"${BACKEND_STDOUT_LOG}" 2>"${BACKEND_STDERR_LOG}" &
 BACKEND_PID=$!
 wait_for_backend

@@ -484,6 +484,133 @@ func TestOriginFromIPUsesFrontendPort(t *testing.T) {
 	}
 }
 
+func TestDevelopmentFrontendOriginPolicy(t *testing.T) {
+	t.Setenv("FILE_TRANS_DEV_FRONTEND_PORT", "5173")
+	cases := []struct {
+		origin string
+		want   bool
+	}{
+		{"http://localhost:5173", true},
+		{"http://127.0.0.1:5173", true},
+		{"http://192.168.124.9:5173", true},
+		{"http://8.8.8.8:5173", false},
+		{"http://example.com:5173", false},
+		{"http://192.168.124.9:5174", false},
+	}
+	for _, tc := range cases {
+		if got := developmentFrontendOrigin(tc.origin); got != tc.want {
+			t.Fatalf("developmentFrontendOrigin(%q)=%v, want %v", tc.origin, got, tc.want)
+		}
+	}
+}
+
+func TestDevelopmentFrontendOriginUsesConfiguredPort(t *testing.T) {
+	t.Setenv("FILE_TRANS_DEV_FRONTEND_PORT", "5174")
+	if !developmentFrontendOrigin("http://192.168.124.9:5174") {
+		t.Fatalf("expected configured frontend port 5174 to be allowed")
+	}
+	if developmentFrontendOrigin("http://192.168.124.9:5173") {
+		t.Fatalf("expected default port 5173 to be rejected when configured port is 5174")
+	}
+}
+
+func TestDevelopmentFrontendPortRejectsInvalidRange(t *testing.T) {
+	for _, value := range []string{"0", "65536", "not-a-port"} {
+		t.Setenv("FILE_TRANS_DEV_FRONTEND_PORT", value)
+		if got := developmentFrontendPort(); got != "5173" {
+			t.Fatalf("expected invalid dev frontend port %q to fall back to 5173, got %s", value, got)
+		}
+	}
+}
+
+func TestDevelopmentTransferOriginAllowedForSameHost(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(t.TempDir()), st)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/api/files/upload-by-lease", nil)
+	preflight.Host = "192.168.124.9:17878"
+	preflight.Header.Set("Origin", "http://192.168.124.9:5173")
+	preflight.Header.Set("Access-Control-Request-Method", "POST")
+	preflight.Header.Set("Access-Control-Request-Headers", "Authorization")
+	preflightResp, err := app.Test(preflight)
+	if err != nil {
+		t.Fatalf("preflight request: %v", err)
+	}
+	preflightResp.Body.Close()
+	if got := preflightResp.Header.Get("Access-Control-Allow-Origin"); got != "http://192.168.124.9:5173" {
+		t.Fatalf("expected dynamic CORS allow origin, got %q status=%d", got, preflightResp.StatusCode)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.Host = "192.168.124.9:17878"
+	req.Header.Set("Origin", "http://192.168.124.9:5173")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("same-host dev origin request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("same-host development frontend origin should not be blocked by csrf guard")
+	}
+}
+
+func TestDevelopmentTransferOriginAllowedForConfiguredPort(t *testing.T) {
+	t.Setenv("FILE_TRANS_DEV_FRONTEND_PORT", "5174")
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(t.TempDir()), st)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.Host = "192.168.124.9:17878"
+	req.Header.Set("Origin", "http://192.168.124.9:5174")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("configured dev origin request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("configured same-host development frontend origin should not be blocked")
+	}
+}
+
+func TestDevelopmentTransferOriginRejectsDifferentHost(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(t.TempDir()), st)
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.Host = "192.168.124.9:17878"
+	req.Header.Set("Origin", "http://192.168.124.10:5173")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("different-host dev origin request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected different-host development origin to be blocked, got %d", resp.StatusCode)
+	}
+}
+
 func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	// 文件选择器是管理员路径输入辅助：只列允许根内条目，最终选择仍由后端校验。
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)

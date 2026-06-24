@@ -227,15 +227,19 @@ func NewWithConfigPath(cfg *config.Config, st *store.Store, configPath string) *
 		StreamRequestBody: true,
 		ErrorHandler:      jsonErrorHandler,
 	})
-	if len(cfg.CORS.AllowOrigins) > 0 {
-		// 接口使用 Cookie 凭据，CORS 必须显式列出允许来源，不能依赖通配符。
-		app.Use(cors.New(cors.Config{
-			AllowOrigins:     strings.Join(cfg.CORS.AllowOrigins, ","),
-			AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
-			AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
-			AllowCredentials: true,
-		}))
+	allowOrigins := strings.Join(cfg.CORS.AllowOrigins, ",")
+	if allowOrigins == "" {
+		allowOrigins = "http://localhost:5173"
 	}
+	// 接口使用 Cookie 凭据，CORS 必须显式列出允许来源，不能依赖通配符；
+	// 同时动态允许同一主机名的开发前端端口，保证一键启动默认直连后端可用。
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     allowOrigins,
+		AllowOriginsFunc: func(origin string) bool { return developmentFrontendOrigin(origin) },
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
+		AllowCredentials: true,
+	}))
 	app.Use(s.csrfOriginGuard)
 	s.routes(app)
 	s.static(app)
@@ -323,6 +327,9 @@ func (s *Server) csrfOriginGuard(c *fiber.Ctx) error {
 			return c.Next()
 		}
 	}
+	if sameHostDevelopmentFrontendOrigin(origin, requestOrigin(c)) {
+		return c.Next()
+	}
 	_ = s.store.Audit("csrf_denied", s.clientIP(c), origin+" -> "+c.Path())
 	return fiber.ErrForbidden
 }
@@ -345,6 +352,51 @@ func isUnsafeMethod(method string) bool {
 	default:
 		return false
 	}
+}
+
+func developmentFrontendOrigin(origin string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return false
+	}
+	if parsed.Port() != developmentFrontendPort() {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate()
+	}
+	return false
+}
+
+func developmentFrontendPort() string {
+	port := strings.TrimSpace(os.Getenv("FILE_TRANS_DEV_FRONTEND_PORT"))
+	if port == "" {
+		return "5173"
+	}
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value > 65535 {
+		return "5173"
+	}
+	return port
+}
+
+func sameHostDevelopmentFrontendOrigin(origin, request string) bool {
+	if !developmentFrontendOrigin(origin) {
+		return false
+	}
+	originURL, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil {
+		return false
+	}
+	requestURL, err := url.Parse(strings.TrimSpace(request))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(originURL.Hostname(), requestURL.Hostname())
 }
 
 func (s *Server) static(app *fiber.App) {

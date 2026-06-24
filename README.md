@@ -172,7 +172,7 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1 -FrontendTransferOrigin http://192.168.124.9:17878
 ```
 
-无论使用默认直连还是显式指定，页面仍从前端端口打开，但上传票据、下载票据对应的大文件传输会直接访问后端地址。请确保 `backend/config.yaml` 的 `cors.allow_origins` 包含当前前端地址，例如 `http://192.168.124.9:5173`。地址写错、后端不可达或 CORS 未允许时不会悄悄改走代理，前端会直接提示连接失败，便于管理员修正配置。
+无论使用默认直连还是显式指定，页面仍从前端端口打开，但上传票据、下载票据对应的大文件传输会直接访问后端地址。一键开发模式会自动允许“同一主机名 + 前端开发端口”的直连来源，例如 `http://192.168.124.9:5173` 直连 `http://192.168.124.9:17878` 不需要额外写 CORS；如果你显式指定了不同域名、不同主机或生产跨域地址，则仍需把该前端来源加入 `backend/config.yaml` 的 `cors.allow_origins`。地址写错、后端不可达或 CORS 未允许时不会悄悄改走代理，前端会直接提示连接失败，便于管理员修正配置。
 
 ### 3. 手动分别启动
 
@@ -192,6 +192,8 @@ bun run dev
 ```
 
 Vite 会把 `/api` 和 `/t` 代理到 `http://127.0.0.1:17878`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。代理目标默认使用 IPv4 地址，避免部分 Windows/Node 环境把 `localhost` 解析成 `::1` 后连接失败；代理转发时会把 `Origin` 改写为后端同源，避免通过局域网 IP 访问 Vite 时被后端 CSRF Origin 防护误拒绝。
+
+手动分别启动时不会自动给后端注入当前前端端口；如果只执行 `bun run dev -- --port 5174`，前端会安全地继续走 Vite 代理。若手动启动也想启用默认直连传输，需要同时给后端设置 `FILE_TRANS_DEV_FRONTEND_PORT=5174`，并给前端设置 `VITE_FRONTEND_PORT=5174`、`VITE_TRANSFER_PORT=<后端端口>`；更推荐直接使用根目录一键脚本，它会自动处理这些变量。
 
 ## 修改绑定端口
 
@@ -267,7 +269,7 @@ cd frontend
 bun run dev -- --port 5174
 ```
 
-如果仍然通过 Vite 开发代理访问前端，只改前端端口通常不需要修改后端 CORS；代理会把请求转发为后端同源。只有前端直接跨域请求后端时，才需要同步修改 `backend/config.yaml` 的 `cors.allow_origins`：
+一键开发脚本会把当前前端端口同时传给前端和后端，默认直连传输仍会自动允许“同一主机名 + 当前前端端口”的来源。只有显式指定不同域名、不同主机或生产跨域地址时，才需要同步修改 `backend/config.yaml` 的 `cors.allow_origins`：
 
 ```yaml
 cors:
@@ -406,8 +408,8 @@ go run ./cmd/server -config config.yaml
 ### Cookie 与跨站请求防护
 
 - HTTPS 生产部署时应将 `auth.cookie_secure` 设置为 `true`，确保浏览器只通过安全连接发送会话 Cookie。
-- `cors.allow_origins` 必须精确列出前端来源；后端会对 `/api` 下非空 `Origin` 的状态变更请求做白名单校验。
-- 如果修改前端开发端口或生产访问域名，需要同步更新 `cors.allow_origins`，否则登录、上传、令牌管理等 Cookie 凭据请求会被拒绝。
+- `cors.allow_origins` 必须精确列出生产前端来源；后端会对 `/api` 下非空 `Origin` 的状态变更请求做白名单校验。
+- 一键开发默认额外允许同一主机名的开发前端端口来源，用于直连后端传输；如果使用不同域名、不同主机或生产访问域名，需要同步更新 `cors.allow_origins`，否则登录、上传、令牌管理等 Cookie 凭据请求会被拒绝。
 
 ### 空闲会话与长下载部署建议
 

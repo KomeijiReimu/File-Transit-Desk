@@ -136,8 +136,10 @@ $OldPublicShareOrigin = $env:VITE_PUBLIC_SHARE_ORIGIN
 $OldTransferOrigin = $env:VITE_TRANSFER_ORIGIN
 $OldFrontendPort = $env:VITE_FRONTEND_PORT
 $OldTransferPort = $env:VITE_TRANSFER_PORT
+$OldDevFrontendPort = $env:FILE_TRANS_DEV_FRONTEND_PORT
 
 try {
+  $env:FILE_TRANS_DEV_FRONTEND_PORT = [string]$FrontendPort
   Write-Host "启动后端：$BackendConfig"
   Write-Host "前端代理目标：$BackendOrigin"
   $BackendProcess = Start-Process -FilePath 'go' `
@@ -196,4 +198,5 @@ try {
   $env:VITE_TRANSFER_ORIGIN = $OldTransferOrigin
   $env:VITE_FRONTEND_PORT = $OldFrontendPort
   $env:VITE_TRANSFER_PORT = $OldTransferPort
+  $env:FILE_TRANS_DEV_FRONTEND_PORT = $OldDevFrontendPort
 }

@@ -101,6 +101,7 @@ function normalizeOrigin(origin: string): string {
 
 function inferredDevTransferOrigin(): string {
   if (typeof window === 'undefined' || typeof import.meta === 'undefined') return ''
+  if (!import.meta.env.DEV) return ''
   const frontendPort = import.meta.env.VITE_FRONTEND_PORT || '5173'
   const transferPort = import.meta.env.VITE_TRANSFER_PORT || '17878'
   // 一键开发脚本默认走 Vite 前端端口。此时按“用户实际打开页面的主机名”直连后端，
