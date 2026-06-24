@@ -10,8 +10,10 @@ import (
 type transferStatus string
 
 const (
-	transferActive    transferStatus = "active"
-	transferCanceling transferStatus = "canceling"
+	transferActive             transferStatus = "active"
+	transferCanceling          transferStatus = "canceling"
+	transferCompleted          transferStatus = "completed"
+	completedTransferRetention                = 30 * time.Second
 )
 
 type transferRecord struct {
@@ -35,6 +37,7 @@ type transferRecord struct {
 	cancel           context.CancelFunc
 	lastBytes        int64
 	lastSpeedAt      time.Time
+	keepUntil        time.Time
 }
 
 type transferRegistry struct {
@@ -73,10 +76,19 @@ func (r *transferRegistry) update(id string, fn func(*transferRecord)) {
 func (r *transferRegistry) remove(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.records, id)
+	if rec := r.records[id]; rec != nil {
+		now := time.Now()
+		rec.Status = transferCompleted
+		rec.UpdatedAt = now
+		rec.Cancelable = false
+		rec.cancel = nil
+		rec.TempPath = ""
+		rec.keepUntil = now.Add(completedTransferRetention)
+	}
 }
 
 func (r *transferRegistry) list() []transferRecord {
+	r.purgeExpiredCompleted()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]transferRecord, 0, len(r.records))
@@ -102,15 +114,30 @@ func (r *transferRegistry) cancel(id string) bool {
 }
 
 func (r *transferRegistry) activeTempPaths() map[string]struct{} {
+	r.purgeExpiredCompleted()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := map[string]struct{}{}
 	for _, rec := range r.records {
+		if rec.Status == transferCompleted {
+			continue
+		}
 		if normalized := canonicalTempPath(rec.TempPath); normalized != "" {
 			out[normalized] = struct{}{}
 		}
 	}
 	return out
+}
+
+func (r *transferRegistry) purgeExpiredCompleted() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	for id, rec := range r.records {
+		if rec.Status == transferCompleted && !rec.keepUntil.IsZero() && now.After(rec.keepUntil) {
+			delete(r.records, id)
+		}
+	}
 }
 
 func canonicalTempPath(path string) string {

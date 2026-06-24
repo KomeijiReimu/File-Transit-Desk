@@ -1486,6 +1486,7 @@ func TestUploadLeaseSurvivesSessionDeletion(t *testing.T) {
 	if err != nil || string(data) != "hello" {
 		t.Fatalf("expected uploaded content, data=%q err=%v", data, err)
 	}
+	assertNoUploadTempFiles(t, root)
 }
 
 func TestUploadLeaseFingerprintRejectsAfterRestartWithChangedResource(t *testing.T) {
@@ -1879,6 +1880,23 @@ func TestActiveTransfersAPIShape(t *testing.T) {
 	}
 }
 
+func TestCompletedTransferRemainsBrieflyVisibleWithoutProtectingTemp(t *testing.T) {
+	registry := newTransferRegistry()
+	tmpPath := filepath.Join(t.TempDir(), ".upload-live.tmp")
+	registry.add(&transferRecord{ID: "upload-1", Type: "upload", Status: transferActive, TempPath: tmpPath, Cancelable: true})
+	if _, ok := registry.activeTempPaths()[canonicalTempPath(tmpPath)]; !ok {
+		t.Fatalf("expected active temp path to be protected")
+	}
+	registry.remove("upload-1")
+	items := registry.list()
+	if len(items) != 1 || items[0].Status != transferCompleted || items[0].Cancelable {
+		t.Fatalf("expected completed transfer to remain briefly visible, got %+v", items)
+	}
+	if len(registry.activeTempPaths()) != 0 {
+		t.Fatalf("completed transfer must not protect temp files")
+	}
+}
+
 func TestAdminCancelUploadTransfer(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
@@ -1979,6 +1997,19 @@ func TestPublicUploadStreamingLimitCleansTempAndRollsBackToken(t *testing.T) {
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".upload-") || entry.Name() == "too-large.bin" {
 			t.Fatalf("expected failed public upload cleanup, found %s", entry.Name())
+		}
+	}
+}
+
+func assertNoUploadTempFiles(t *testing.T, root string) {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read upload root: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".upload-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("expected successful upload to remove temp file, found %s", entry.Name())
 		}
 	}
 }

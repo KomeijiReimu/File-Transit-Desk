@@ -1864,7 +1864,6 @@ func (s *Server) savePartUniqueAtomic(c *fiber.Ctx, dir, rel, name string, part 
 	ctx, cancel := context.WithCancel(context.Background())
 	id, _, _ := security.NewToken()
 	conn := c.Context().Conn()
-	committed := false
 	rec := &transferRecord{ID: id, Type: "upload", Status: transferActive, Source: source, DirID: dirID, Path: rel, FileName: name, TotalBytes: expectedSize, ClientIP: s.clientIP(c), Cancelable: true, TempPath: tmpName, cancel: func() {
 		cancel()
 		// 管理员取消必须能打断正在阻塞的 multipart 读取；仅取消自建 context 不足以唤醒 part.Read。
@@ -1878,9 +1877,7 @@ func (s *Server) savePartUniqueAtomic(c *fiber.Ctx, dir, rel, name string, part 
 	defer func() {
 		cancel()
 		s.transfers.remove(id)
-		if !committed {
-			_ = os.Remove(tmpName)
-		}
+		_ = os.Remove(tmpName)
 	}()
 
 	buf := make([]byte, 256*1024)
@@ -1953,7 +1950,6 @@ func (s *Server) savePartUniqueAtomic(c *fiber.Ctx, dir, rel, name string, part 
 			return "", written, err
 		}
 		if done {
-			committed = true
 			return dst, written, nil
 		}
 	}

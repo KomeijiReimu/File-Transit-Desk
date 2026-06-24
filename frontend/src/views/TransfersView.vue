@@ -12,8 +12,8 @@ const transfers = ref<TransferRecord[]>([])
 const canceling = ref('')
 let refreshTimer: number | undefined
 
-const uploads = computed(() => transfers.value.filter((item) => item.type === 'upload'))
-const downloads = computed(() => transfers.value.filter((item) => item.type === 'download'))
+const uploads = computed(() => transfers.value.filter((item) => item.type === 'upload' && item.status !== 'completed'))
+const downloads = computed(() => transfers.value.filter((item) => item.type === 'download' && item.status !== 'completed'))
 
 function progressOf(item: TransferRecord) {
   const total = item.totalBytes || 0
@@ -27,8 +27,9 @@ function progressLabel(item: TransferRecord) {
 }
 
 function typeLabel(item: TransferRecord) {
-  if (item.type === 'upload') return '上传'
-  return item.bestEffort ? '下载 · 极速路径' : '下载'
+  const suffix = item.status === 'completed' ? ' · 刚完成' : ''
+  if (item.type === 'upload') return `上传${suffix}`
+  return `${item.bestEffort ? '下载 · 极速路径' : '下载'}${suffix}`
 }
 
 function elapsedOf(item: TransferRecord) {
