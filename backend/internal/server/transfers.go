@@ -54,6 +54,9 @@ func (r *transferRegistry) add(rec *transferRecord) {
 	defer r.mu.Unlock()
 	rec.TempPath = canonicalTempPath(rec.TempPath)
 	now := time.Now()
+	if existing := r.records[rec.ID]; existing != nil && rec.StartedAt.IsZero() {
+		rec.StartedAt = existing.StartedAt
+	}
 	if rec.StartedAt.IsZero() {
 		rec.StartedAt = now
 	}
@@ -88,7 +91,7 @@ func (r *transferRegistry) remove(id string) {
 }
 
 func (r *transferRegistry) list() []transferRecord {
-	r.purgeExpiredCompleted()
+	r.purgeExpiredRecords()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]transferRecord, 0, len(r.records))
@@ -114,7 +117,7 @@ func (r *transferRegistry) cancel(id string) bool {
 }
 
 func (r *transferRegistry) activeTempPaths() map[string]struct{} {
-	r.purgeExpiredCompleted()
+	r.purgeExpiredRecords()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := map[string]struct{}{}
@@ -129,12 +132,12 @@ func (r *transferRegistry) activeTempPaths() map[string]struct{} {
 	return out
 }
 
-func (r *transferRegistry) purgeExpiredCompleted() {
+func (r *transferRegistry) purgeExpiredRecords() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
 	for id, rec := range r.records {
-		if rec.Status == transferCompleted && !rec.keepUntil.IsZero() && now.After(rec.keepUntil) {
+		if !rec.keepUntil.IsZero() && now.After(rec.keepUntil) {
 			delete(r.records, id)
 		}
 	}

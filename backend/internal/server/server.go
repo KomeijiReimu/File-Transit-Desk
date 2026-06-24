@@ -1593,6 +1593,8 @@ func (s *Server) createUploadLease(c *fiber.Ctx) error {
 	if err := s.store.CreateUploadLease(&lease); err != nil {
 		return err
 	}
+	transferID := uploadLeaseTransferID(lease.ID)
+	s.transfers.add(&transferRecord{ID: transferID, Type: "upload", Status: transferActive, Source: "upload_lease", DirID: dir.ID, Path: safeRel, FileName: name, TotalBytes: in.FileSize, ClientIP: s.clientIP(c), Cancelable: false, keepUntil: expiresAt})
 	_ = s.store.Audit("upload_lease_create", s.clientIP(c), fmt.Sprintf("目录 %s，路径 %s，文件 %s", dir.ID, displayPath(safeRel), name))
 	return c.JSON(uploadLeaseResponse{Lease: plain, UploadURL: "/api/files/upload-by-lease", ExpiresAt: expiresAt})
 }
@@ -1631,7 +1633,7 @@ func (s *Server) uploadByLease(c *fiber.Ctx) error {
 		_ = s.store.Audit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
 		return fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
 	}
-	resp, err := s.saveStreamingMultipart(c, streamUploadOptions{dir: dir, rel: lease.Path, source: "upload_lease", lease: &lease, fixedFileName: lease.FileName, expectedSize: lease.FileSize})
+	resp, err := s.saveStreamingMultipart(c, streamUploadOptions{dir: dir, rel: lease.Path, source: "upload_lease", transferID: uploadLeaseTransferID(lease.ID), lease: &lease, fixedFileName: lease.FileName, expectedSize: lease.FileSize})
 	if err != nil {
 		_ = s.store.Audit("upload_lease_failed", s.clientIP(c), fmt.Sprint(lease.ID))
 		return err
@@ -1696,6 +1698,7 @@ type streamUploadOptions struct {
 	dir                     config.Dir
 	rel                     string
 	source                  string
+	transferID              string
 	requireTargetBeforeFile bool
 	lease                   *store.UploadLease
 	fixedFileName           string
@@ -1825,7 +1828,7 @@ func (s *Server) saveStreamingMultipart(c *fiber.Ctx, opts streamUploadOptions) 
 			cleanupPaths(saved)
 			return uploadResponse{}, fiber.NewError(fiber.StatusForbidden, "该文件扩展名不允许上传")
 		}
-		dst, size, err := s.savePartUniqueAtomic(c, targetDir, safeRel, safeName, part, opts.source, opts.dir.ID, opts.expectedSize)
+		dst, size, err := s.savePartUniqueAtomic(c, targetDir, safeRel, safeName, part, opts.source, opts.transferID, opts.dir.ID, opts.expectedSize)
 		_ = part.Close()
 		if err != nil {
 			cleanupPaths(saved)
@@ -1849,7 +1852,7 @@ func (s *Server) saveStreamingMultipart(c *fiber.Ctx, opts streamUploadOptions) 
 	return resp, nil
 }
 
-func (s *Server) savePartUniqueAtomic(c *fiber.Ctx, dir, rel, name string, part *multipart.Part, source, dirID string, expectedSize int64) (string, int64, error) {
+func (s *Server) savePartUniqueAtomic(c *fiber.Ctx, dir, rel, name string, part *multipart.Part, source, transferID, dirID string, expectedSize int64) (string, int64, error) {
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
 	maxBytes := mbToBytes(s.cfg().Storage.UploadMaxFileMB)
@@ -1862,7 +1865,10 @@ func (s *Server) savePartUniqueAtomic(c *fiber.Ctx, dir, rel, name string, part 
 	}
 	tmpName := tmp.Name()
 	ctx, cancel := context.WithCancel(context.Background())
-	id, _, _ := security.NewToken()
+	id := transferID
+	if id == "" {
+		id, _, _ = security.NewToken()
+	}
 	conn := c.Context().Conn()
 	rec := &transferRecord{ID: id, Type: "upload", Status: transferActive, Source: source, DirID: dirID, Path: rel, FileName: name, TotalBytes: expectedSize, ClientIP: s.clientIP(c), Cancelable: true, TempPath: tmpName, cancel: func() {
 		cancel()
@@ -2757,6 +2763,10 @@ func bearerToken(header string) string {
 		return strings.TrimSpace(fields[1])
 	}
 	return ""
+}
+
+func uploadLeaseTransferID(id int64) string {
+	return fmt.Sprintf("upload-lease-%d", id)
 }
 
 func tokenTypeLabel(tokenType string) string {

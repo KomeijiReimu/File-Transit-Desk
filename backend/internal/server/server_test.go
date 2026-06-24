@@ -1489,6 +1489,40 @@ func TestUploadLeaseSurvivesSessionDeletion(t *testing.T) {
 	assertNoUploadTempFiles(t, root)
 }
 
+func TestUploadLeaseRegistersTransferBeforeBodyUpload(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	s := &Server{config: testConfig(root), store: st, loginLimiter: newLoginLimiter(), transfers: newTransferRegistry()}
+	app := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
+	s.routes(app)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"visible.bin","fileSize":7}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("create lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, resp, &lease)
+	if resp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", resp.StatusCode, lease)
+	}
+	items := s.transfers.list()
+	if len(items) != 1 || items[0].Type != "upload" || items[0].Status != transferActive || items[0].FileName != "visible.bin" || items[0].TotalBytes != 7 {
+		t.Fatalf("expected lease creation to pre-register visible transfer, got %+v", items)
+	}
+	if items[0].Cancelable {
+		t.Fatalf("pre-upload transfer must not be cancelable before request connection exists")
+	}
+}
+
 func TestUploadLeaseFingerprintRejectsAfterRestartWithChangedResource(t *testing.T) {
 	base := t.TempDir()
 	oldRoot := filepath.Join(base, "old")
