@@ -1489,7 +1489,7 @@ func TestUploadLeaseSurvivesSessionDeletion(t *testing.T) {
 	assertNoUploadTempFiles(t, root)
 }
 
-func TestUploadLeaseRegistersTransferBeforeBodyUpload(t *testing.T) {
+func TestUploadLeaseDoesNotRegisterTransferBeforeBodyUpload(t *testing.T) {
 	root := t.TempDir()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
@@ -1514,13 +1514,179 @@ func TestUploadLeaseRegistersTransferBeforeBodyUpload(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || lease.Lease == "" {
 		t.Fatalf("expected upload lease, status=%d lease=%+v", resp.StatusCode, lease)
 	}
-	items := s.transfers.list()
-	if len(items) != 1 || items[0].Type != "upload" || items[0].Status != transferActive || items[0].FileName != "visible.bin" || items[0].TotalBytes != 7 {
-		t.Fatalf("expected lease creation to pre-register visible transfer, got %+v", items)
+	if items := s.transfers.list(); len(items) != 0 {
+		t.Fatalf("expected lease creation not to pre-register active transfer, got %+v", items)
 	}
-	if items[0].Cancelable {
-		t.Fatalf("pre-upload transfer must not be cancelable before request connection exists")
+}
+
+func TestRawUploadLeaseSuccessAndSingleUse(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	defer st.DB.Close()
+	app := New(testConfig(root), st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	lease := createTestUploadLease(t, app, "raw.txt", int64(len("hello raw")))
+	if lease.RawUploadURL != "/api/files/upload-raw-by-lease" || lease.UploadURL != "/api/files/upload-by-lease" {
+		t.Fatalf("unexpected upload urls: %+v", lease)
+	}
+	req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello raw"))
+	req.Header.Set("Authorization", "Bearer "+lease.Lease)
+	req.ContentLength = int64(len("hello raw"))
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("raw upload: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected raw upload ok, got %d body=%s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	data, err := os.ReadFile(filepath.Join(root, "raw.txt"))
+	if err != nil || string(data) != "hello raw" {
+		t.Fatalf("expected uploaded raw content, data=%q err=%v", data, err)
+	}
+	assertNoUploadTempFiles(t, root)
+	retry := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello raw"))
+	retry.Header.Set("Authorization", "Bearer "+lease.Lease)
+	retry.ContentLength = int64(len("hello raw"))
+	retryResp, err := app.Test(retry)
+	if err != nil {
+		t.Fatalf("raw retry: %v", err)
+	}
+	retryResp.Body.Close()
+	if retryResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected used lease retry to be unauthorized, got %d", retryResp.StatusCode)
+	}
+}
+
+func TestRawUploadLengthMismatchDoesNotConsumeLease(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(root), st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	lease := createTestUploadLease(t, app, "bad-len.txt", 5)
+	req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hey"))
+	req.Header.Set("Authorization", "Bearer "+lease.Lease)
+	req.ContentLength = 3
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("raw length mismatch: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected length mismatch bad request, got %d", resp.StatusCode)
+	}
+	stored, err := st.UploadLeaseByHash(security.HashToken(lease.Lease))
+	if err != nil || stored.UsedAt.Valid {
+		t.Fatalf("expected length mismatch not to consume lease, lease=%+v err=%v", stored, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bad-len.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no final file, stat=%v", err)
+	}
+	zero := createTestUploadLease(t, app, "zero.txt", 0)
+	zeroReq := httptest.NewRequest(http.MethodPost, zero.RawUploadURL, http.NoBody)
+	zeroReq.Header.Set("Authorization", "Bearer "+zero.Lease)
+	zeroReq.ContentLength = 0
+	zeroResp, err := app.Test(zeroReq)
+	if err != nil {
+		t.Fatalf("zero raw upload: %v", err)
+	}
+	zeroResp.Body.Close()
+	if zeroResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected zero-byte upload ok, got %d", zeroResp.StatusCode)
+	}
+}
+
+func TestRawUploadVisibleAndCancelableDuringTransfer(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(root), st)
+	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
+	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
+	const slowTotal = int64(2 * 1024 * 1024)
+	lease := createTestUploadLease(t, app, "slow-raw.bin", slowTotal)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- app.Listener(ln) }()
+	defer func() {
+		_ = app.Shutdown()
+		select {
+		case err := <-serverErr:
+			if err != nil && !strings.Contains(err.Error(), "Server closed") {
+				t.Fatalf("fiber listener: %v", err)
+			}
+		case <-time.After(time.Second):
+		}
+	}()
+	baseURL := "http://" + ln.Addr().String()
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, baseURL+lease.RawUploadURL, reader)
+	if err != nil {
+		t.Fatalf("new raw request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+lease.Lease)
+	req.ContentLength = slowTotal
+	done := make(chan error, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if resp != nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+	if _, err := writer.Write(bytes.Repeat([]byte("x"), 512*1024)); err != nil {
+		t.Fatalf("write first chunk: %v", err)
+	}
+	transferID := waitForSlowUploadTransfer(t, client, baseURL)
+	cancelReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/transfers/"+url.PathEscape(transferID)+"/cancel", nil)
+	if err != nil {
+		t.Fatalf("new cancel request: %v", err)
+	}
+	cancelReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	cancelResp, err := client.Do(cancelReq)
+	if err != nil {
+		t.Fatalf("cancel request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, cancelResp.Body)
+	_ = cancelResp.Body.Close()
+	if cancelResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected cancel ok, got %d", cancelResp.StatusCode)
+	}
+	_ = writer.CloseWithError(io.ErrClosedPipe)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("raw upload request did not finish after admin cancel")
+	}
+	if _, err := os.Stat(filepath.Join(root, "slow-raw.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected canceled raw upload not to create final file, stat=%v", err)
+	}
+	assertNoUploadTempFiles(t, root)
 }
 
 func TestUploadLeaseFingerprintRejectsAfterRestartWithChangedResource(t *testing.T) {
@@ -2035,6 +2201,60 @@ func TestPublicUploadStreamingLimitCleansTempAndRollsBackToken(t *testing.T) {
 	}
 }
 
+func TestPublicUploadLeaseCannotUseSessionMultipartEndpoint(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	app := New(testConfig(root), st)
+	tok := &store.Token{Hash: security.HashToken("public-raw-token"), Type: "upload", DirID: "default", Path: "", MaxUses: 1, ExpiresAt: sqlNullTime(time.Now().Add(time.Hour))}
+	if err := st.CreateToken(tok); err != nil {
+		t.Fatalf("create upload token: %v", err)
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/t/public-raw-token/upload-lease", strings.NewReader(`{"fileName":"bypass.txt","fileSize":6}`))
+	leaseReq.Header.Set("Content-Type", "application/json")
+	leaseResp, err := app.Test(leaseReq)
+	if err != nil {
+		t.Fatalf("create public upload lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, leaseResp, &lease)
+	if leaseResp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected public upload lease, status=%d lease=%+v", leaseResp.StatusCode, lease)
+	}
+	body, contentType := multipartUploadBody(t, "bypass.txt", []byte("bypass"))
+	bypassReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-by-lease", body)
+	bypassReq.Header.Set("Content-Type", contentType)
+	bypassReq.Header.Set("Authorization", "Bearer "+lease.Lease)
+	bypassResp, err := app.Test(bypassReq)
+	if err != nil {
+		t.Fatalf("bypass multipart upload: %v", err)
+	}
+	bypassResp.Body.Close()
+	if bypassResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected public lease rejected by session multipart endpoint, got %d", bypassResp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bypass.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected bypass file not to be written, stat=%v", err)
+	}
+	storedLease, err := st.UploadLeaseByHash(security.HashToken(lease.Lease))
+	if err != nil {
+		t.Fatalf("reload public upload lease: %v", err)
+	}
+	if storedLease.UsedAt.Valid {
+		t.Fatalf("expected rejected public lease not to be consumed")
+	}
+	loadedToken, err := st.TokenByHash(security.HashToken("public-raw-token"))
+	if err != nil {
+		t.Fatalf("reload public token: %v", err)
+	}
+	if loadedToken.Uses != 0 || loadedToken.UploadedBytes != 0 {
+		t.Fatalf("expected rejected bypass not to affect token, uses=%d bytes=%d", loadedToken.Uses, loadedToken.UploadedBytes)
+	}
+}
+
 func assertNoUploadTempFiles(t *testing.T, root string) {
 	t.Helper()
 	entries, err := os.ReadDir(root)
@@ -2066,6 +2286,60 @@ func multipartUploadBody(t *testing.T, fileName string, content []byte) (*bytes.
 		t.Fatalf("close multipart writer: %v", err)
 	}
 	return body, writer.FormDataContentType()
+}
+
+func createTestUploadLease(t *testing.T, app *fiber.App, fileName string, fileSize int64) uploadLeaseResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(fmt.Sprintf(`{"dirId":"default","path":"","fileName":%q,"fileSize":%d}`, fileName, fileSize)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("create upload lease: %v", err)
+	}
+	var lease uploadLeaseResponse
+	decodeJSON(t, resp, &lease)
+	if resp.StatusCode != http.StatusOK || lease.Lease == "" {
+		t.Fatalf("expected upload lease, status=%d lease=%+v", resp.StatusCode, lease)
+	}
+	return lease
+}
+
+func waitForSlowUploadTransfer(t *testing.T, client *http.Client, baseURL string) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var last []transferRecord
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/api/transfers/active", nil)
+		if err != nil {
+			t.Fatalf("new active transfers request: %v", err)
+		}
+		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("active transfers request: %v", err)
+		}
+		var payload struct {
+			Transfers []transferRecord `json:"transfers"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode active transfers: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected active transfers ok, got %d", resp.StatusCode)
+		}
+		last = payload.Transfers
+		for _, item := range payload.Transfers {
+			if item.Type == "upload" && item.FileName == "slow-raw.bin" && item.Cancelable && item.TotalBytes > 0 && item.TransferredBytes > 0 && item.TransferredBytes < item.TotalBytes {
+				return item.ID
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected slow raw upload to be visible and cancelable during transfer, last=%+v", last)
+	return ""
 }
 
 func testConfig(root string) *config.Config {

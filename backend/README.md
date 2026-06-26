@@ -44,9 +44,9 @@ go run ./cmd/server -config config.yaml
 - 对 `/api` 下会改变状态的请求，后端会校验非空 `Origin`，降低 Cookie 凭据接口的跨站请求风险。一键开发模式会额外允许同一主机名的前端开发端口来源，用于默认直连传输；生产或不同域名跨域访问仍必须写入 `cors.allow_origins`。
 - 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
 - 临时令牌数据库只保存 SHA-256 哈希，明文只在创建响应中返回一次。
-- 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；登录态普通上传、上传票据接口和公开分享上传都使用流式 multipart 落盘，不在主路径调用全量 `MultipartForm()`；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
-- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。
-- 服务维护内存传输注册表，管理员可查看活跃上传和下载。上传进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。
+- 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；登录态和公开分享前端默认走原始字节流上传，后端从连接开始直接读取请求体、写临时文件并更新传输进度。旧的 `multipart/form-data` 上传接口仍兼容保留，但不再是前端默认路径；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
+- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-raw-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。
+- 服务维护内存传输注册表，管理员可查看活跃上传和下载。原始字节流上传的进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。若部署在反向代理后，应关闭上传请求体缓冲，例如 Nginx `proxy_request_buffering off;`，否则代理缓冲会让后端观测滞后。
 - 上传临时文件写在目标目录内，文件名形如 `.upload-*.tmp`；成功提交最终文件后会立即删除临时文件，失败、超限、客户端断开或管理员取消也会尽量删除。服务启动和定时任务会按配置清理超过保留期且不在活跃注册表中的崩溃残留临时文件。
 
 ## 配置说明
@@ -173,8 +173,9 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `POST /api/files/download-lease`：登录态下载前兑换短期票据，请求 `{ "dirId": "default", "path": "a.txt" }`，返回 `{ "url": "/api/files/download-by-lease?lease=...", "expiresAt": "..." }`。
 - `GET /api/files/download-by-lease?lease=...`：使用下载票据下载文件，支持 HTTP Range 断点续传；不要求页面会话仍然有效，但会校验票据未过期、目录仍允许下载、文件大小、修改时间和可用内容哈希未变化。
 - `GET /api/files/download?dirId=default&path=a.txt`：兼容保留的直接下载接口，仍要求请求开始时有有效会话。
-- `POST /api/files/upload-lease`：登录态创建上传票据，请求 `{ "dirId": "default", "path": "subdir", "fileName": "a.bin", "fileSize": 123 }`，返回 `{ "lease": "...", "uploadUrl": "/api/files/upload-by-lease", "expiresAt": "..." }`。票据一次性使用且不依赖 Cookie，适合直连后端或长时间上传。前端或直连客户端应通过 `Authorization: Bearer <lease>` 发送票据，不要把票据放入 URL 查询参数。
-- `POST /api/files/upload-by-lease`：使用上传票据提交 `multipart/form-data` 文件，必须带 `Authorization: Bearer <lease>`。后端使用票据绑定的目录、路径、文件名、大小和资源授权指纹，不信任 Cookie、查询参数或表单中的目标字段；同名文件仍不覆盖。
+- `POST /api/files/upload-lease`：登录态创建上传票据，请求 `{ "dirId": "default", "path": "subdir", "fileName": "a.bin", "fileSize": 123 }`，返回 `{ "lease": "...", "uploadUrl": "/api/files/upload-by-lease", "rawUploadUrl": "/api/files/upload-raw-by-lease", "expiresAt": "..." }`。票据一次性使用且不依赖 Cookie，适合直连后端或长时间上传。前端或直连客户端应通过 `Authorization: Bearer <lease>` 发送票据，不要把票据放入 URL 查询参数。
+- `POST /api/files/upload-raw-by-lease`：推荐路径。使用上传票据提交原始文件字节流，必须带 `Authorization: Bearer <lease>`，请求体就是文件内容，`Content-Length` 必须等于创建票据时的 `fileSize`，允许 `0` 字节文件。后端使用票据绑定的目录、路径、文件名、大小和资源授权指纹，不信任 Cookie、查询参数或请求体里的目标字段；同名文件仍不覆盖。该入口会从连接开始登记传输记录，管理员页可实时看到进度并取消。
+- `POST /api/files/upload-by-lease`：兼容保留路径。仅接受登录态上传票据，使用 `multipart/form-data` 文件，必须带 `Authorization: Bearer <lease>`；新前端默认不再使用它。公开上传票据不能调用该接口，公开 raw 上传必须走 `/t/upload-raw-by-lease`，公开旧客户端继续使用 `/t/:token/upload`。
 - `POST /api/files/upload`：兼容保留的登录态 `multipart/form-data` 上传接口，字段 `dirId`、`path`、`file` 或 `files`，兼容多文件。推荐把 `dirId/path` 放在查询参数中；如果放在表单字段中，必须出现在文件字段之前。该接口会流式落盘并执行上传数量、单文件大小、请求总量、扩展名策略校验。返回：
 
 ```json
@@ -215,7 +216,9 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `GET /t/download-by-lease?lease=...`：公开票据下载，支持 Range 续传且不重复消耗令牌次数。
 - `GET /t/:token/download`：兼容保留，会显示确认下载页；用户主动点击后才 `POST` 兑换票据，避免链接预览或安全扫描提前消耗一次性下载次数。
 - `GET /t/:token/upload`：后端兼容保留的简易上传页；推荐对外分享前端 `/share/:token` 页面。
-- `POST /t/:token/upload`：`multipart/form-data` 字段 `file` 或 `files`，除普通上传策略外，还会按 `tokens.upload_max_mb` 记录并限制该令牌的累计上传容量。公开上传要求请求包含 `Content-Length`，并会在读取文件内容前按请求长度预占使用次数和容量；保存完成后按实际落盘大小校正容量，失败、取消或超限会清理临时/已保存文件并回滚预占。
+- `POST /t/:token/upload-lease`：公开上传令牌兑换短期上传票据，请求 `{ "fileName": "a.bin", "fileSize": 123 }`，返回 `{ "lease": "...", "uploadUrl": "/t/{token}/upload", "rawUploadUrl": "/t/upload-raw-by-lease", "expiresAt": "..." }`。创建票据时不会最终消耗公开令牌次数和容量；真正开始 raw 上传时才预占。
+- `POST /t/upload-raw-by-lease`：推荐路径。使用公开上传票据提交原始文件字节流，必须带 `Authorization: Bearer <lease>`，`Content-Length` 必须等于票据文件大小。成功上传会按实际落盘大小校正公开令牌累计容量；失败、取消、断线或超限会清理临时/已保存文件并回滚预占。
+- `POST /t/:token/upload`：兼容保留的 `multipart/form-data` 上传接口，字段 `file` 或 `files`。旧客户端可继续使用；新前端默认先兑换公开上传票据并走 raw 上传。
 
 令牌使用次数与上传累计容量通过 SQLite 条件更新原子预占，避免并发绕过 `maxUses` 或累计容量限制。下载令牌会先确认目标文件存在后再预占次数并创建下载票据；后续同一票据的普通下载或 Range 续传不会重复增加 `uses`。上传令牌在保存失败时会释放预占次数和预占容量。
 

@@ -94,9 +94,10 @@ type uploadLeaseRequest struct {
 }
 
 type uploadLeaseResponse struct {
-	Lease     string    `json:"lease"`
-	UploadURL string    `json:"uploadUrl"`
-	ExpiresAt time.Time `json:"expiresAt"`
+	Lease        string    `json:"lease"`
+	UploadURL    string    `json:"uploadUrl"`
+	RawUploadURL string    `json:"rawUploadUrl"`
+	ExpiresAt    time.Time `json:"expiresAt"`
 }
 
 type tokenDTO struct {
@@ -284,6 +285,7 @@ func (s *Server) routes(app *fiber.App) {
 	app.Post("/api/files/download-lease", s.auth(s.createDownloadLease))
 	app.Get("/api/files/download-by-lease", s.downloadByLease)
 	app.Post("/api/files/upload-lease", s.auth(s.createUploadLease))
+	app.Post("/api/files/upload-raw-by-lease", s.uploadRawByLease)
 	app.Post("/api/files/upload-by-lease", s.uploadByLease)
 	app.Post("/api/files/upload", s.auth(s.uploadFiles))
 	app.Get("/api/transfers/active", s.adminOnly(s.activeTransfers))
@@ -305,7 +307,9 @@ func (s *Server) routes(app *fiber.App) {
 	app.Get("/t/:token/info", s.publicTokenInfo)
 	app.Get("/t/:token/upload", s.publicUploadPage)
 	app.Post("/t/:token/download-lease", s.createPublicDownloadLease)
+	app.Post("/t/:token/upload-lease", s.createPublicUploadLease)
 	app.Get("/t/download-by-lease", s.downloadByLease)
+	app.Post("/t/upload-raw-by-lease", s.publicUploadRawByLease)
 	app.Get("/t/:token/download", s.publicDownload)
 	app.Post("/t/:token/upload", s.publicUpload)
 }
@@ -1588,15 +1592,13 @@ func (s *Server) createUploadLease(c *fiber.Ctx) error {
 	}
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(s.cfg().Auth.UploadLeaseTTLSeconds) * time.Second)
-	lease := store.UploadLease{Hash: hash, SessionID: fmt.Sprint(c.Locals("sessionID")), Role: fmt.Sprint(c.Locals("role")), DirID: dir.ID, Path: safeRel, FileName: name, FileSize: in.FileSize, ResourceFingerprint: uploadLeaseResourceFingerprint(dir), ExpiresAt: expiresAt, CreatedAt: now, ClientIP: s.clientIP(c)}
+	lease := store.UploadLease{Hash: hash, Source: "session", SessionID: fmt.Sprint(c.Locals("sessionID")), Role: fmt.Sprint(c.Locals("role")), DirID: dir.ID, Path: safeRel, FileName: name, FileSize: in.FileSize, ResourceFingerprint: uploadLeaseResourceFingerprint(dir), ExpiresAt: expiresAt, CreatedAt: now, ClientIP: s.clientIP(c)}
 	_ = s.store.DeleteExpiredUploadLeases(now)
 	if err := s.store.CreateUploadLease(&lease); err != nil {
 		return err
 	}
-	transferID := uploadLeaseTransferID(lease.ID)
-	s.transfers.add(&transferRecord{ID: transferID, Type: "upload", Status: transferActive, Source: "upload_lease", DirID: dir.ID, Path: safeRel, FileName: name, TotalBytes: in.FileSize, ClientIP: s.clientIP(c), Cancelable: false, keepUntil: expiresAt})
 	_ = s.store.Audit("upload_lease_create", s.clientIP(c), fmt.Sprintf("目录 %s，路径 %s，文件 %s", dir.ID, displayPath(safeRel), name))
-	return c.JSON(uploadLeaseResponse{Lease: plain, UploadURL: "/api/files/upload-by-lease", ExpiresAt: expiresAt})
+	return c.JSON(uploadLeaseResponse{Lease: plain, UploadURL: "/api/files/upload-by-lease", RawUploadURL: "/api/files/upload-raw-by-lease", ExpiresAt: expiresAt})
 }
 
 func (s *Server) uploadByLease(c *fiber.Ctx) error {
@@ -1613,6 +1615,12 @@ func (s *Server) uploadByLease(c *fiber.Ctx) error {
 	}
 	if lease.UsedAt.Valid || !now.Before(lease.ExpiresAt) {
 		_ = s.store.DeleteExpiredUploadLeases(now)
+		return fiber.ErrUnauthorized
+	}
+	if lease.Source == "" {
+		lease.Source = "session"
+	}
+	if lease.Source != "session" {
 		return fiber.ErrUnauthorized
 	}
 	dir, ok := s.cfg().Dir(lease.DirID)
@@ -1640,6 +1648,141 @@ func (s *Server) uploadByLease(c *fiber.Ctx) error {
 	}
 	_ = s.store.Audit("upload_lease_use", s.clientIP(c), fmt.Sprintf("票据 #%d", lease.ID))
 	return c.JSON(resp)
+}
+
+func (s *Server) uploadRawByLease(c *fiber.Ctx) error {
+	resp, err := s.handleRawUploadByLease(c, "session")
+	if err != nil {
+		return err
+	}
+	return c.JSON(resp)
+}
+
+func (s *Server) publicUploadRawByLease(c *fiber.Ctx) error {
+	resp, err := s.handleRawUploadByLease(c, "public_token")
+	if err != nil {
+		return err
+	}
+	return c.JSON(resp)
+}
+
+func (s *Server) handleRawUploadByLease(c *fiber.Ctx, wantSource string) (uploadResponse, error) {
+	plain := bearerToken(c.Get("Authorization"))
+	if plain == "" {
+		return uploadResponse{}, fiber.ErrUnauthorized
+	}
+	hash := security.HashToken(plain)
+	now := time.Now()
+	lease, err := s.store.UploadLeaseByHash(hash)
+	if err != nil {
+		_ = s.store.DeleteExpiredUploadLeases(now)
+		return uploadResponse{}, fiber.ErrUnauthorized
+	}
+	if lease.Source == "" {
+		lease.Source = "session"
+	}
+	if lease.Source != wantSource || lease.UsedAt.Valid || !now.Before(lease.ExpiresAt) {
+		_ = s.store.DeleteExpiredUploadLeases(now)
+		return uploadResponse{}, fiber.ErrUnauthorized
+	}
+	dir, ok := s.cfg().Dir(lease.DirID)
+	if !ok || !dir.AllowUpload {
+		return uploadResponse{}, fiber.ErrForbidden
+	}
+	if !uploadLeaseResourceFingerprintMatches(lease, dir) {
+		_ = s.store.Audit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
+		return uploadResponse{}, fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
+	}
+	contentLength := int64(c.Request().Header.ContentLength())
+	if contentLength < 0 {
+		return uploadResponse{}, fiber.NewError(fiber.StatusLengthRequired, "原始上传需要 Content-Length。")
+	}
+	if contentLength != lease.FileSize {
+		return uploadResponse{}, fiber.NewError(fiber.StatusBadRequest, "上传内容大小与票据不一致。")
+	}
+	lease, err = s.store.ReserveUploadLease(hash, now)
+	if err != nil {
+		_ = s.store.DeleteExpiredUploadLeases(time.Now())
+		return uploadResponse{}, fiber.ErrUnauthorized
+	}
+	dir, ok = s.cfg().Dir(lease.DirID)
+	if !ok || !dir.AllowUpload || !uploadLeaseResourceFingerprintMatches(lease, dir) {
+		_ = s.store.Audit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
+		return uploadResponse{}, fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
+	}
+	var reservedToken store.Token
+	publicReserved := false
+	if wantSource == "public_token" {
+		if !lease.TokenID.Valid {
+			return uploadResponse{}, fiber.ErrUnauthorized
+		}
+		reservedToken, err = s.store.ReserveTokenUseByID(lease.TokenID.Int64, "upload", time.Now(), contentLength, s.tokenUploadMaxBytes())
+		if err != nil {
+			if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
+				return uploadResponse{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+			}
+			return uploadResponse{}, fiber.ErrForbidden
+		}
+		if reservedToken.DirID != lease.DirID || reservedToken.Path != lease.Path {
+			_ = s.store.ReleaseTokenUse(reservedToken.ID, contentLength)
+			return uploadResponse{}, fiber.ErrForbidden
+		}
+		publicReserved = true
+	}
+	resp, err := s.saveRawUpload(c, dir, lease)
+	if err != nil {
+		if publicReserved {
+			_ = s.store.ReleaseTokenUse(reservedToken.ID, contentLength)
+		}
+		_ = s.store.Audit("upload_lease_failed", s.clientIP(c), fmt.Sprint(lease.ID))
+		return uploadResponse{}, err
+	}
+	if publicReserved {
+		actualBytes := uploadResponseBytes(resp)
+		if err := s.store.AdjustTokenUploadedBytes(reservedToken.ID, actualBytes-contentLength, s.tokenUploadMaxBytes()); err != nil {
+			cleanupUploadedResponse(dir, resp)
+			_ = s.store.ReleaseTokenUse(reservedToken.ID, contentLength)
+			if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
+				return uploadResponse{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+			}
+			return uploadResponse{}, err
+		}
+	}
+	_ = s.store.Audit("upload_lease_use", s.clientIP(c), fmt.Sprintf("票据 #%d", lease.ID))
+	return resp, nil
+}
+
+func (s *Server) saveRawUpload(c *fiber.Ctx, dir config.Dir, lease store.UploadLease) (uploadResponse, error) {
+	if err := os.MkdirAll(dir.Path, 0755); err != nil {
+		return uploadResponse{}, friendlyPathError(err, "上传目录不存在或不可访问。")
+	}
+	targetDir, safeRel, err := fsutil.ResolveForCreate(dir.Path, lease.Path)
+	if err != nil {
+		_ = s.store.Audit("illegal_access", s.clientIP(c), fmt.Sprintf("目录 %s 上传路径校验失败", dir.ID))
+		return uploadResponse{}, fiber.ErrBadRequest
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return uploadResponse{}, err
+	}
+	if err := fsutil.EnsureInside(dir.Path, targetDir); err != nil {
+		return uploadResponse{}, friendlyPathError(err, "上传目录不存在或不可访问。")
+	}
+	body := c.Request().BodyStream()
+	if body == nil {
+		if lease.FileSize == 0 {
+			body = bytes.NewReader(nil)
+		} else {
+			return uploadResponse{}, fiber.NewError(fiber.StatusBadRequest, "原始上传请求流不可用，请使用直连后端上传。")
+		}
+	}
+	dst, size, err := s.saveRawUniqueAtomic(c, targetDir, safeRel, lease.FileName, body, lease.Source, uploadLeaseTransferID(lease.ID), dir.ID, lease.FileSize)
+	if err != nil {
+		return uploadResponse{}, err
+	}
+	name := filepath.Base(dst)
+	resp := uploadResponse{OK: true, Uploaded: 1, Files: []uploadedFile{{Name: name, Path: filepath.ToSlash(filepath.Join(safeRel, name)), Size: size}}}
+	_ = s.store.Audit("upload", s.clientIP(c), fmt.Sprintf("目录 %s，路径 %s，上传 1 个文件", dir.ID, displayPath(safeRel)))
+	return resp, nil
 }
 
 func (s *Server) activeTransfers(c *fiber.Ctx) error {
@@ -1902,6 +2045,115 @@ func (s *Server) savePartUniqueAtomic(c *fiber.Ctx, dir, rel, name string, part 
 		if n > 0 {
 			written += int64(n)
 			if written > maxBytes {
+				_ = tmp.Close()
+				return "", written, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单个文件不能超过 %d MB", s.cfg().Storage.UploadMaxFileMB))
+			}
+			if _, err := tmp.Write(buf[:n]); err != nil {
+				_ = tmp.Close()
+				return "", written, err
+			}
+			now := time.Now()
+			s.transfers.update(id, func(r *transferRecord) {
+				deltaBytes := written - r.lastBytes
+				deltaSeconds := now.Sub(r.lastSpeedAt).Seconds()
+				if deltaSeconds > 0 {
+					r.CurrentSpeedBps = int64(float64(deltaBytes) / deltaSeconds)
+				}
+				avgSeconds := now.Sub(r.StartedAt).Seconds()
+				if avgSeconds > 0 {
+					r.AverageSpeedBps = int64(float64(written) / avgSeconds)
+				}
+				r.TransferredBytes = written
+				r.UpdatedAt = now
+				r.lastBytes = written
+				r.lastSpeedAt = now
+			})
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			_ = tmp.Close()
+			return "", written, readErr
+		}
+	}
+	if expectedSize >= 0 && written != expectedSize {
+		_ = tmp.Close()
+		return "", written, fiber.NewError(fiber.StatusBadRequest, "上传内容大小与票据不一致。")
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return "", written, err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", written, err
+	}
+	for i := 0; i < maxUploadNameAttempts; i++ {
+		candidateName := name
+		if i > 0 {
+			candidateName = fmt.Sprintf("%s-%d%s", stem, i, ext)
+		}
+		dst := filepath.Join(dir, candidateName)
+		done, err := commitTempFile(tmpName, dst)
+		if err != nil {
+			return "", written, err
+		}
+		if done {
+			return dst, written, nil
+		}
+	}
+	return "", written, fiber.NewError(fiber.StatusConflict, "同名文件过多，请更换文件名后重试。")
+}
+
+func (s *Server) saveRawUniqueAtomic(c *fiber.Ctx, dir, rel, name string, reader io.Reader, source, transferID, dirID string, expectedSize int64) (string, int64, error) {
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	tmp, err := os.CreateTemp(dir, ".upload-*.tmp")
+	if err != nil {
+		return "", 0, err
+	}
+	tmpName := tmp.Name()
+	ctx, cancel := context.WithCancel(context.Background())
+	id := transferID
+	if id == "" {
+		id, _, _ = security.NewToken()
+	}
+	conn := c.Context().Conn()
+	rec := &transferRecord{ID: id, Type: "upload", Status: transferActive, Source: source, DirID: dirID, Path: rel, FileName: name, TotalBytes: expectedSize, ClientIP: s.clientIP(c), Cancelable: true, TempPath: tmpName, cancel: func() {
+		cancel()
+		_ = tmp.Close()
+		if conn != nil {
+			_ = conn.SetReadDeadline(time.Now())
+			_ = conn.Close()
+		}
+	}}
+	s.transfers.add(rec)
+	defer func() {
+		cancel()
+		s.transfers.remove(id)
+		_ = os.Remove(tmpName)
+	}()
+
+	buf := make([]byte, 256*1024)
+	var written int64
+	for {
+		select {
+		case <-ctx.Done():
+			_ = tmp.Close()
+			return "", written, fiber.NewError(fiber.StatusRequestTimeout, "上传已取消。")
+		case <-c.Context().Done():
+			_ = tmp.Close()
+			return "", written, fiber.NewError(fiber.StatusRequestTimeout, "上传连接已断开。")
+		default:
+		}
+		n, readErr := reader.Read(buf)
+		if n > 0 {
+			written += int64(n)
+			if expectedSize >= 0 && written > expectedSize {
+				_ = tmp.Close()
+				return "", written, fiber.NewError(fiber.StatusBadRequest, "上传内容大小与票据不一致。")
+			}
+			if written > mbToBytes(s.cfg().Storage.UploadMaxFileMB) {
 				_ = tmp.Close()
 				return "", written, fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单个文件不能超过 %d MB", s.cfg().Storage.UploadMaxFileMB))
 			}
@@ -2452,6 +2704,47 @@ func (s *Server) publicUploadPage(c *fiber.Ctx) error {
 </main>
 </body>
 </html>`, htmlEscape(dir.Name), htmlEscape(filePath)))
+}
+
+func (s *Server) createPublicUploadLease(c *fiber.Ctx) error {
+	var in uploadLeaseRequest
+	if err := c.BodyParser(&in); err != nil {
+		return fiber.ErrBadRequest
+	}
+	t, dir, err := s.lookupPublicToken(c, "upload")
+	if err != nil {
+		return err
+	}
+	if in.FileSize < 0 || in.FileSize > mbToBytes(s.cfg().Storage.UploadMaxFileMB) || in.FileSize > mbToBytes(s.cfg().Storage.UploadMaxMB) {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单个文件不能超过 %d MB", s.cfg().Storage.UploadMaxFileMB))
+	}
+	if maxBytes := s.tokenUploadMaxBytes(); maxBytes > 0 && t.UploadedBytes+in.FileSize > maxBytes {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+	}
+	name := fsutil.SafeName(in.FileName)
+	if name == "" || !s.extensionAllowed(name) {
+		return fiber.NewError(fiber.StatusForbidden, "该文件扩展名不允许上传")
+	}
+	if err := os.MkdirAll(dir.Path, 0755); err != nil {
+		return friendlyPathError(err, "上传目录不存在或不可访问。")
+	}
+	_, safeRel, err := fsutil.ResolveForCreate(dir.Path, t.Path)
+	if err != nil {
+		return friendlyPathError(err, "路径不存在，请先在文件浏览页确认后再创建令牌。")
+	}
+	plain, hash, err := security.NewToken()
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	expiresAt := publicLeaseExpiry(now, time.Duration(s.cfg().Auth.UploadLeaseTTLSeconds)*time.Second, t.ExpiresAt)
+	lease := store.UploadLease{Hash: hash, Source: "public_token", TokenID: sql.NullInt64{Int64: t.ID, Valid: true}, Role: "public", DirID: dir.ID, Path: safeRel, FileName: name, FileSize: in.FileSize, ResourceFingerprint: uploadLeaseResourceFingerprint(dir), ExpiresAt: expiresAt, CreatedAt: now, ClientIP: s.clientIP(c)}
+	_ = s.store.DeleteExpiredUploadLeases(now)
+	if err := s.store.CreateUploadLease(&lease); err != nil {
+		return err
+	}
+	_ = s.store.Audit("upload_lease_create", s.clientIP(c), fmt.Sprintf("公开令牌 #%d，目录 %s，路径 %s，文件 %s", t.ID, dir.ID, displayPath(safeRel), name))
+	return c.JSON(uploadLeaseResponse{Lease: plain, UploadURL: "/t/" + url.PathEscape(c.Params("token")) + "/upload", RawUploadURL: "/t/upload-raw-by-lease", ExpiresAt: expiresAt})
 }
 
 func (s *Server) publicDownload(c *fiber.Ctx) error {

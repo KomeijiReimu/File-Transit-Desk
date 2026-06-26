@@ -200,8 +200,16 @@ export interface UploadLeaseRequest {
 export interface UploadLeaseResponse {
   lease: string
   uploadUrl: string
+  rawUploadUrl?: string
   expiresAt: string
 }
+
+export interface PublicUploadLeaseRequest {
+  fileName: string
+  fileSize: number
+}
+
+export interface PublicUploadLeaseResponse extends UploadLeaseResponse {}
 
 export interface TransferRecord {
   id: string

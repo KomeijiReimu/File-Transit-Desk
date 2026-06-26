@@ -66,7 +66,9 @@ type DownloadLease struct {
 type UploadLease struct {
 	ID                  int64
 	Hash                string
+	Source              string
 	SessionID           string
+	TokenID             sql.NullInt64
 	Role                string
 	DirID               string
 	Path                string
@@ -171,7 +173,9 @@ CREATE INDEX IF NOT EXISTS idx_download_leases_expires_at ON download_leases(exp
 CREATE TABLE IF NOT EXISTS upload_leases(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   lease_hash TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL DEFAULT 'session',
   session_id TEXT NOT NULL DEFAULT '',
+  token_id INTEGER,
   role TEXT NOT NULL DEFAULT '',
   dir_id TEXT NOT NULL,
   path TEXT NOT NULL,
@@ -205,6 +209,12 @@ CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires
 		return err
 	}
 	if err := s.addColumnIfMissing("upload_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("upload_leases", "source", "TEXT NOT NULL DEFAULT 'session'"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("upload_leases", "token_id", "INTEGER"); err != nil {
 		return err
 	}
 	// 旧版本 sessions 没有空闲会话字段，迁移时用既有创建时间和绝对过期时间回填。
@@ -343,12 +353,15 @@ func (s *Store) DeleteExpiredUploadLeases(now time.Time) error {
 
 func (s *Store) CreateUploadLease(lease *UploadLease) error {
 	now := time.Now()
+	if lease.Source == "" {
+		lease.Source = "session"
+	}
 	if lease.CreatedAt.IsZero() {
 		lease.CreatedAt = now
 	}
 	res, err := s.DB.Exec(
-		`INSERT INTO upload_leases(lease_hash, session_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		lease.Hash, lease.SessionID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP,
+		`INSERT INTO upload_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP,
 	)
 	if err != nil {
 		return err
@@ -374,8 +387,8 @@ func (s *Store) ReserveUploadLease(hash string, now time.Time) (UploadLease, err
 
 func (s *Store) UploadLeaseByHash(hash string) (UploadLease, error) {
 	var lease UploadLease
-	err := s.DB.QueryRow(`SELECT id, lease_hash, session_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, used_at, client_ip FROM upload_leases WHERE lease_hash = ?`, hash).Scan(
-		&lease.ID, &lease.Hash, &lease.SessionID, &lease.Role, &lease.DirID, &lease.Path, &lease.FileName, &lease.FileSize, &lease.ResourceFingerprint, &lease.ExpiresAt, &lease.CreatedAt, &lease.UsedAt, &lease.ClientIP,
+	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, used_at, client_ip FROM upload_leases WHERE lease_hash = ?`, hash).Scan(
+		&lease.ID, &lease.Hash, &lease.Source, &lease.SessionID, &lease.TokenID, &lease.Role, &lease.DirID, &lease.Path, &lease.FileName, &lease.FileSize, &lease.ResourceFingerprint, &lease.ExpiresAt, &lease.CreatedAt, &lease.UsedAt, &lease.ClientIP,
 	)
 	return lease, err
 }
@@ -451,6 +464,9 @@ func (s *Store) DeleteExpiredTokens(now time.Time) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`DELETE FROM download_leases WHERE token_id IN (SELECT id FROM tokens WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?))`, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM upload_leases WHERE token_id IN (SELECT id FROM tokens WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?))`, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM tokens WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, now); err != nil {
@@ -551,6 +567,24 @@ func (s *Store) TokenByHash(hash string) (Token, error) {
 	return t, err
 }
 
+func (s *Store) TokenByID(id int64) (Token, error) {
+	var t Token
+	err := s.DB.QueryRow(`SELECT id, token_hash, type, dir_id, path, expires_at, max_uses, uses, uploaded_bytes, revoked, created_at FROM tokens WHERE id = ?`, id).Scan(
+		&t.ID,
+		&t.Hash,
+		&t.Type,
+		&t.DirID,
+		&t.Path,
+		&t.ExpiresAt,
+		&t.MaxUses,
+		&t.Uses,
+		&t.UploadedBytes,
+		&t.Revoked,
+		&t.CreatedAt,
+	)
+	return t, err
+}
+
 func (s *Store) ReserveTokenUse(hash, tokenType string, now time.Time, uploadBytes, uploadMaxBytes int64) (Token, error) {
 	// 使用单条条件 UPDATE 原子预占次数和上传容量，防止并发请求同时越过 max_uses 或容量限制。
 	res, err := s.DB.Exec(`
@@ -580,6 +614,36 @@ WHERE token_hash = ?
 		return Token{}, ErrTokenNotUsable
 	}
 	return s.TokenByHash(hash)
+}
+
+func (s *Store) ReserveTokenUseByID(id int64, tokenType string, now time.Time, uploadBytes, uploadMaxBytes int64) (Token, error) {
+	res, err := s.DB.Exec(`
+UPDATE tokens
+SET uses = uses + 1,
+    uploaded_bytes = uploaded_bytes + ?
+WHERE id = ?
+  AND type = ?
+  AND revoked = 0
+  AND (expires_at IS NULL OR datetime(expires_at) > datetime(?))
+  AND (max_uses <= 0 OR uses < max_uses)
+  AND (? <= 0 OR uploaded_bytes + ? <= ?)
+`, uploadBytes, id, tokenType, now, uploadMaxBytes, uploadBytes, uploadMaxBytes)
+	if err != nil {
+		return Token{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Token{}, err
+	}
+	if affected != 1 {
+		if uploadBytes > 0 && uploadMaxBytes > 0 {
+			if t, loadErr := s.TokenByID(id); loadErr == nil && t.Type == tokenType && t.UploadedBytes+uploadBytes > uploadMaxBytes {
+				return Token{}, ErrTokenUploadLimitExceeded
+			}
+		}
+		return Token{}, ErrTokenNotUsable
+	}
+	return s.TokenByID(id)
 }
 
 func (s *Store) ReleaseTokenUse(id int64, uploadBytes int64) error {
@@ -651,6 +715,9 @@ func (s *Store) RevokeTokenAndLeases(id string) error {
 	if _, err := tx.Exec(`DELETE FROM download_leases WHERE token_id = ?`, numericID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM upload_leases WHERE token_id = ?`, numericID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -702,6 +769,9 @@ func (s *Store) DeleteTokenAndLeases(id string) error {
 		return sql.ErrNoRows
 	}
 	if _, err := tx.Exec(`DELETE FROM download_leases WHERE token_id = ?`, numericID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM upload_leases WHERE token_id = ?`, numericID); err != nil {
 		return err
 	}
 	return tx.Commit()

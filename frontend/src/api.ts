@@ -12,6 +12,8 @@ import type {
   FilePickerRoot,
   FilePickerSelection,
   ListFilesResponse,
+  PublicUploadLeaseRequest,
+  PublicUploadLeaseResponse,
   ResourcePayload,
   SafeConfig,
   ShareOriginCandidate,
@@ -147,6 +149,64 @@ function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {})
   })
 }
 
+function uploadRaw<T>(rawUploadUrl: string, lease: string, file: File, options: UploadOptions = {}): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const { onProgress, signal, suppressAuthRedirect = true } = options
+    let settled = false
+    const abortHandler = () => xhr.abort()
+    const cleanup = () => signal?.removeEventListener('abort', abortHandler)
+    const rejectOnce = (err: ApiError) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(err)
+    }
+    const resolveOnce = (value: T) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(value)
+    }
+    if (signal?.aborted) {
+      rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
+      return
+    }
+    signal?.addEventListener('abort', abortHandler, { once: true })
+    xhr.open('POST', buildTransferUrl(rawUploadUrl))
+    xhr.withCredentials = false
+    xhr.setRequestHeader('Authorization', `Bearer ${lease}`)
+    xhr.upload.onprogress = (event) => {
+      const total = event.lengthComputable && event.total > 0 ? event.total : 0
+      const loaded = event.loaded || 0
+      const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+      onProgress?.({ loaded, total, percent })
+    }
+    xhr.onerror = () => rejectOnce(new ApiError('上传连接中断。请检查网络、后端是否仍在运行，或文件是否超过服务端/代理上传上限。', 0))
+    xhr.ontimeout = () => rejectOnce(new ApiError('上传超时。请检查网络稳定性，或调高反向代理上传超时时间。', 0))
+    xhr.onabort = () => rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
+    xhr.onload = () => {
+      const contentType = xhr.getResponseHeader('content-type') || ''
+      const text = xhr.responseText || ''
+      const payload = contentType.includes('application/json') && text ? safeJSON(text) : text
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const message =
+          (payload && typeof payload === 'object' && ('message' in payload || 'error' in payload)
+            ? String((payload as { message?: string; error?: string }).message || (payload as { error?: string }).error)
+            : '') || `请求失败（${xhr.status}）`
+        if (!suppressAuthRedirect && xhr.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
+          window.dispatchEvent(new Event('ft:auth-expired'))
+          router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
+        }
+        rejectOnce(new ApiError(message, xhr.status, payload))
+        return
+      }
+      resolveOnce((payload || {}) as T)
+    }
+    xhr.send(file)
+  })
+}
+
 function safeJSON(text: string) {
   try {
     return JSON.parse(text)
@@ -206,6 +266,12 @@ export const api = {
   createUploadLease: (payload: UploadLeaseRequest) =>
     request<UploadLeaseResponse>('/api/files/upload-lease', { method: 'POST', body: JSON.stringify(payload) }),
   uploadByLease: (lease: UploadLeaseResponse, file: File, options: UploadOptions = {}) => {
+    if (lease.rawUploadUrl) {
+      return uploadRaw<{ ok: boolean; uploaded?: number }>(lease.rawUploadUrl, lease.lease, file, {
+        ...options,
+        suppressAuthRedirect: true,
+      })
+    }
     const form = new FormData()
     form.append('files', file)
     return uploadForm<{ ok: boolean; uploaded?: number }>(buildTransferUrl(lease.uploadUrl), form, {
@@ -257,12 +323,41 @@ export const api = {
   publicUpload: (token: string, file: File, options: UploadOptions = {}) => {
     const form = new FormData()
     form.append('files', file)
-    return uploadForm<{ ok: boolean; uploaded?: number }>(buildTransferUrl(`/t/${encodeURIComponent(token)}/upload`), form, {
+    const fallbackMultipart = () => uploadForm<{ ok: boolean; uploaded?: number }>(buildTransferUrl(`/t/${encodeURIComponent(token)}/upload`), form, {
       ...options,
       suppressAuthRedirect: true,
       withCredentials: false,
     })
+    const payload: PublicUploadLeaseRequest = { fileName: file.name, fileSize: file.size }
+    return api.createPublicUploadLease(token, payload)
+      .then((lease) => {
+        if (lease.rawUploadUrl) {
+          return uploadRaw<{ ok: boolean; uploaded?: number }>(lease.rawUploadUrl, lease.lease, file, {
+            ...options,
+            suppressAuthRedirect: true,
+          })
+        }
+        if (lease.uploadUrl) {
+          return uploadForm<{ ok: boolean; uploaded?: number }>(buildTransferUrl(lease.uploadUrl), form, {
+            ...options,
+            suppressAuthRedirect: true,
+            withCredentials: false,
+            headers: { ...(options.headers || {}), Authorization: `Bearer ${lease.lease}` },
+          })
+        }
+        return fallbackMultipart()
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && (err.status === 404 || err.status === 405)) return fallbackMultipart()
+        throw err
+      })
   },
+  createPublicUploadLease: (token: string, payload: PublicUploadLeaseRequest) =>
+    request<PublicUploadLeaseResponse>(`/t/${encodeURIComponent(token)}/upload-lease`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      suppressAuthRedirect: true,
+    }),
   createPublicDownloadLease: (token: string) =>
     request<DownloadLeaseResponse>(`/t/${encodeURIComponent(token)}/download-lease`, { method: 'POST' }),
 }
