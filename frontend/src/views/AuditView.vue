@@ -65,6 +65,10 @@ function logTone(log: AuditLog) {
   if (/token|令牌/.test(text)) return 'token'
   return 'ok'
 }
+
+function statusText(log: AuditLog) {
+  return logTone(log) === 'failed' ? '需关注' : log.status || '完成'
+}
 </script>
 
 <template>
@@ -97,7 +101,11 @@ function logTone(log: AuditLog) {
         <div>
           <strong>{{ log.actionLabel || log.action }}</strong>
           <p>{{ log.detail || [log.dirId, log.path].filter(Boolean).join(' / ') || '无附加信息' }}</p>
-          <small>{{ formatDate(log.createdAt || log.time) }} · {{ log.ip || '未知 IP' }} · {{ log.status || '完成' }}</small>
+          <div class="audit-meta">
+            <span>{{ formatDate(log.createdAt || log.time) }}</span>
+            <span>{{ log.ip || '未知 IP' }}</span>
+            <span>{{ statusText(log) }}</span>
+          </div>
         </div>
       </article>
     </div>

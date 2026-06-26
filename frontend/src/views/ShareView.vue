@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
+import AppIcon from '@/components/AppIcon.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { TokenInfo } from '@/types'
@@ -345,7 +346,10 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
         <!-- Download mode -->
         <template v-if="isDownload">
           <div v-if="validFlag" class="share-actions">
-            <button class="primary-btn big" type="button" :disabled="downloading" @click="startPublicDownload">{{ downloading ? '准备下载…' : '⇩ 立即下载' }}</button>
+            <button class="primary-btn big" type="button" :disabled="downloading" @click="startPublicDownload">
+              <AppIcon name="download" :size="20" />
+              {{ downloading ? '准备下载…' : '立即下载' }}
+            </button>
           </div>
           <div v-else class="alert error">{{ reasonLabel }}</div>
         </template>
@@ -388,7 +392,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
                     : item.status === 'success' ? '已完成'
                     : item.error || '失败'
                   }}</span></small>
-                  <div class="upload-progress" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
+                  <div class="upload-progress" role="progressbar" :aria-valuenow="item.status === 'success' ? 100 : item.progress" aria-valuemin="0" aria-valuemax="100" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
                     <span :style="{ width: `${item.status === 'success' ? 100 : item.progress}%` }" />
                   </div>
                   <small v-if="item.status === 'uploading'" class="upload-progress-text">
@@ -409,7 +413,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
                   <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${queue.length}` }}</strong>
                   <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
                 </div>
-                <div class="upload-progress wide" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
+                <div class="upload-progress wide" role="progressbar" :aria-valuenow="overallProgress" aria-valuemin="0" aria-valuemax="100" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
               </div>
               <button class="primary-btn big" type="button" :disabled="!hasPendingUploads || uploading" @click="uploadAll">
                 {{ uploading ? '上传中…' : '开始上传' }}

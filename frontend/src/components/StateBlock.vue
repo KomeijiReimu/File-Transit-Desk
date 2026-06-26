@@ -7,5 +7,5 @@ defineProps<{ loading?: boolean; error?: string; title?: string }>()
     <span class="loader" />
     <strong>{{ title || '正在加载' }}</strong>
   </div>
-  <div v-else-if="error" class="alert error">{{ error }}</div>
+  <div v-else-if="error" class="alert error" role="alert">{{ error }}</div>
 </template>

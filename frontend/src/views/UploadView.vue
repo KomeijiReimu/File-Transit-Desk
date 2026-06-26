@@ -377,7 +377,7 @@ watch(uploading, (active) => {
             <div class="q-file">
               <strong>{{ item.file.name }}</strong>
               <small>{{ formatBytes(item.file.size) }} · {{ item.status === 'queued' ? '待上传' : item.status === 'uploading' ? item.progress >= 100 ? '处理中…' : `上传中 ${item.progress}%` : item.status === 'success' ? '已完成' : item.error }}</small>
-              <div class="upload-progress" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
+              <div class="upload-progress" role="progressbar" :aria-valuenow="item.status === 'success' ? 100 : item.progress" aria-valuemin="0" aria-valuemax="100" :aria-label="`${item.file.name} 上传进度 ${item.status === 'success' ? 100 : item.progress}%`">
                 <span :style="{ width: `${item.status === 'success' ? 100 : item.progress}%` }" />
               </div>
               <small v-if="item.status === 'uploading'" class="upload-progress-text">
@@ -397,7 +397,7 @@ watch(uploading, (active) => {
             <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${uploadQueue.length}` }}</strong>
             <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
           </div>
-          <div class="upload-progress wide" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
+          <div class="upload-progress wide" role="progressbar" :aria-valuenow="overallProgress" aria-valuemin="0" aria-valuemax="100" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
           <button class="primary-btn" type="button" :disabled="!hasPendingUploads || uploading || !canUpload" @click="uploadAll">
             {{ uploading ? '上传中…' : '开始上传' }}
           </button>

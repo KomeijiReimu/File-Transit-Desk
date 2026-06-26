@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ApiError, api } from '@/api'
+import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
@@ -279,7 +280,9 @@ onMounted(load)
 
     <section class="cards-grid" aria-label="共享资源列表">
       <article v-for="resource in resources" :key="resource.id" class="config-card resource-card">
-        <div class="config-icon" :data-type="resourceType(resource)">{{ resourceType(resource) === 'file' ? '文' : '目' }}</div>
+        <div class="config-icon" :data-type="resourceType(resource)" aria-hidden="true">
+          <AppIcon :name="resourceType(resource) === 'file' ? 'file-cog' : 'folder-cog'" :size="28" />
+        </div>
         <div class="resource-card-body">
           <div class="resource-head">
             <div>

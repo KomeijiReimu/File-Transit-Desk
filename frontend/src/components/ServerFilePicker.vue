@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ApiError, api } from '@/api'
+import AppIcon from '@/components/AppIcon.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import type { FilePickerItem, FilePickerRoot, FilePickerSelection } from '@/types'
 
@@ -238,6 +239,12 @@ function itemTypeLabel(item: FilePickerItem) {
   return '其他'
 }
 
+function itemIcon(item: FilePickerItem) {
+  if (item.symlink) return 'link'
+  if (item.type === 'directory') return 'folder'
+  return 'file'
+}
+
 watch(rootId, () => {
   if (suppressRootWatch.value) return
   currentPath.value = '/'
@@ -310,7 +317,7 @@ onBeforeUnmount(() => close())
                 <span>名称</span><span>类型</span><span>大小</span><span>修改时间</span><span>操作</span>
               </div>
               <div v-for="item in items" :key="item.path" class="picker-row" :data-muted="!item.readable || item.symlink" @dblclick="enter(item)">
-                <span class="picker-name"><span class="picker-icon">{{ item.type === 'directory' ? '📁' : item.symlink ? '↪' : '📄' }}</span>{{ item.name }}</span>
+                <span class="picker-name"><span class="picker-icon"><AppIcon :name="itemIcon(item)" :size="18" /></span>{{ item.name }}</span>
                 <span>{{ itemTypeLabel(item) }}</span>
                 <span>{{ formatSize(item.size) }}</span>
                 <span>{{ item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : '—' }}</span>

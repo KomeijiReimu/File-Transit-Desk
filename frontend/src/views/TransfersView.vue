@@ -4,13 +4,17 @@ import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { TransferRecord } from '@/types'
+import { useGsapEntrance } from '@/useGsapEntrance'
 import { formatBytes, formatDate, formatDuration, formatSpeed } from '@/utils'
 
+const pageRef = ref<HTMLElement | null>(null)
 const loading = ref(true)
 const error = ref('')
 const transfers = ref<TransferRecord[]>([])
 const canceling = ref('')
 let refreshTimer: number | undefined
+
+useGsapEntrance(pageRef)
 
 const uploads = computed(() => transfers.value.filter((item) => item.type === 'upload' && item.status !== 'completed'))
 const downloads = computed(() => transfers.value.filter((item) => item.type === 'download' && item.status !== 'completed'))
@@ -22,14 +26,48 @@ function progressOf(item: TransferRecord) {
 }
 
 function progressLabel(item: TransferRecord) {
-  if (!item.totalBytes) return item.bestEffort ? '观测中' : '总量未知'
+  if (!item.totalBytes) return item.bestEffort ? '传输状态观测中' : '总量未知'
   return `${formatBytes(item.transferredBytes)} / ${formatBytes(item.totalBytes)} · ${progressOf(item)}%`
 }
 
-function typeLabel(item: TransferRecord) {
-  const suffix = item.status === 'completed' ? ' · 刚完成' : ''
-  if (item.type === 'upload') return `上传${suffix}`
-  return `${item.bestEffort ? '下载 · 极速路径' : '下载'}${suffix}`
+function fileTitle(item: TransferRecord) {
+  if (item.fileName) return item.fileName
+  const cleanPath = (item.path || '').split('/').filter(Boolean)
+  return cleanPath[cleanPath.length - 1] || item.path || '未命名传输任务'
+}
+
+function resourcePath(item: TransferRecord) {
+  return item.path || '/'
+}
+
+function resourceTitle(item: TransferRecord) {
+  return `${item.dirId || '未指定资源'} · ${resourcePath(item)}`
+}
+
+function transferKind(item: TransferRecord) {
+  return item.type === 'upload' ? '上传' : '下载'
+}
+
+function statusLabel(item: TransferRecord) {
+  if (item.status === 'canceling') return '正在取消'
+  if (item.status === 'completed') return '刚完成'
+  if (item.type === 'upload') return '上传中'
+  if (item.bestEffort) return '下载通道运行中'
+  return '下载中'
+}
+
+function observerNote(item: TransferRecord) {
+  if (item.totalBytes) return ''
+  if (item.bestEffort) return '下载走极速通道，进度可能稍后更新。'
+  return '后端暂未返回总量，正在持续观察传输状态。'
+}
+
+function speedOf(item: TransferRecord) {
+  return formatSpeed(item.currentSpeedBps || item.averageSpeedBps)
+}
+
+function sourceOf(item: TransferRecord) {
+  return item.clientIP || '未知 IP'
 }
 
 function elapsedOf(item: TransferRecord) {
@@ -75,7 +113,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page-stack transfers-page">
+  <section ref="pageRef" class="page-stack transfers-page">
     <header class="page-header split">
       <div>
         <p class="eyebrow">Transfers</p>
@@ -87,7 +125,7 @@ onUnmounted(() => {
 
     <StateBlock :loading="loading" :error="error" />
 
-    <div v-if="!loading" class="grid two transfer-summary-grid">
+    <div v-if="!loading" class="grid two transfer-summary-grid" data-motion>
       <div class="panel insight-card compact">
         <span class="big-number">{{ uploads.length }}</span>
         <strong>上传中</strong>
@@ -98,37 +136,80 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div v-if="!loading" class="panel table-panel">
+    <div v-if="!loading" class="panel table-panel transfer-panel" data-motion>
       <div class="panel-head">
-        <h2>活跃传输</h2>
-        <p class="muted-text">速度为后端观测值；下载因走极速发送路径，可能只显示最佳努力状态。</p>
+        <div>
+          <h2>活跃传输</h2>
+          <p class="muted-text">自动观察当前上传与下载；下载通道以速度优先，进度可能延迟更新。</p>
+        </div>
+        <span class="pill muted">每 2 秒刷新</span>
       </div>
-      <table v-if="transfers.length" class="data-table transfer-table">
-        <thead>
-          <tr><th>类型</th><th>资源 / 文件</th><th>来源</th><th>进度</th><th>速度</th><th>开始</th><th>操作</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in transfers" :key="item.id">
-            <td data-label="类型"><span class="pill" :class="item.type === 'upload' ? 'ok' : 'muted'">{{ typeLabel(item) }}</span></td>
-            <td data-label="资源 / 文件">
-              <strong>{{ item.fileName || item.path || '—' }}</strong><br />
-              <small>{{ item.dirId || '—' }} · {{ item.path || '/' }}</small>
-            </td>
-            <td data-label="来源">{{ item.clientIP || '—' }}<br /><small>{{ item.source || '—' }}</small></td>
-            <td data-label="进度">
-              <div v-if="item.totalBytes" class="upload-progress"><span :style="{ width: `${progressOf(item)}%` }" /></div>
-              <small>{{ progressLabel(item) }}</small>
-            </td>
-            <td data-label="速度">{{ formatSpeed(item.currentSpeedBps || item.averageSpeedBps) }}<br /><small>{{ item.bestEffort ? '最佳努力观测' : `已用 ${elapsedOf(item)}` }}</small></td>
-            <td data-label="开始">{{ formatDate(item.startedAt) }}</td>
-            <td data-label="操作" class="actions">
-              <button class="mini-btn danger" type="button" :disabled="!item.cancelable || canceling === item.id" @click="cancelTransfer(item)">
-                {{ item.cancelable ? (canceling === item.id ? '取消中…' : '取消') : '不可取消' }}
+      <div v-if="transfers.length" class="transfer-list">
+        <article v-for="item in transfers" :key="item.id" class="transfer-card" :data-kind="item.type === 'upload' ? 'upload' : 'download'">
+          <div class="transfer-card-main">
+            <header class="transfer-card-head">
+              <div class="transfer-title-block">
+                <div class="transfer-title-row">
+                  <span class="pill" :class="item.type === 'upload' ? 'ok' : 'muted'">{{ transferKind(item) }}</span>
+                  <span class="transfer-status">{{ statusLabel(item) }}</span>
+                </div>
+                <h3 :title="fileTitle(item)">{{ fileTitle(item) }}</h3>
+              </div>
+              <button v-if="item.cancelable" class="mini-btn danger transfer-cancel" type="button" :disabled="Boolean(canceling)" @click="cancelTransfer(item)">
+                {{ canceling === item.id ? '取消中…' : '取消传输' }}
               </button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+              <span v-else class="transfer-passive-status">仅观测</span>
+            </header>
+
+            <div class="transfer-path" :title="resourceTitle(item)">
+              <span>{{ item.dirId || '未指定资源' }}</span>
+              <strong>{{ resourcePath(item) }}</strong>
+            </div>
+
+            <div class="transfer-progress-zone">
+              <div class="transfer-progress-head">
+                <strong>{{ item.totalBytes ? `${progressOf(item)}%` : '观测中' }}</strong>
+                <small>{{ progressLabel(item) }}</small>
+              </div>
+              <div
+                v-if="item.totalBytes"
+                class="upload-progress transfer-progress"
+                role="progressbar"
+                :aria-valuenow="progressOf(item)"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-label="`${fileTitle(item)} 传输进度 ${progressOf(item)}%`"
+              >
+                <span :style="{ width: `${progressOf(item)}%` }" />
+              </div>
+              <div v-else class="upload-progress transfer-progress indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-label="`${fileTitle(item)} 正在观测传输状态`">
+                <span />
+              </div>
+              <small v-if="observerNote(item)" class="transfer-note">{{ observerNote(item) }}</small>
+            </div>
+          </div>
+
+          <div class="transfer-metrics" aria-label="传输指标">
+            <div>
+              <span>速度</span>
+              <strong>{{ speedOf(item) }}</strong>
+            </div>
+            <div>
+              <span>已用</span>
+              <strong>{{ elapsedOf(item) }}</strong>
+            </div>
+            <div>
+              <span>来源 IP</span>
+              <strong>{{ sourceOf(item) }}</strong>
+              <small>{{ item.source || '—' }}</small>
+            </div>
+            <div>
+              <span>开始时间</span>
+              <strong>{{ formatDate(item.startedAt) }}</strong>
+            </div>
+          </div>
+        </article>
+      </div>
       <EmptyState v-else title="没有活跃传输" description="当前没有正在上传或下载的任务。" />
     </div>
   </section>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = withDefaults(defineProps<{
   open: boolean
@@ -99,7 +100,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           :aria-labelledby="titleId"
           tabindex="-1"
         >
-          <div class="confirm-icon" aria-hidden="true">!</div>
+          <div class="confirm-icon" aria-hidden="true"><AppIcon name="alert-triangle" :size="26" /></div>
           <div class="confirm-copy">
             <p class="eyebrow">Confirm</p>
             <h2 :id="titleId">{{ title }}</h2>
