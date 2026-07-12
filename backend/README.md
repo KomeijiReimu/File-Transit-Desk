@@ -16,7 +16,7 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1
 ```
 
-脚本默认读取 `backend/config.yaml`，后端端口仍以该配置文件中的 `server.port` 为准。
+脚本默认读取 `backend/config.yaml`，后端端口仍以该配置文件中的 `server.port` 为准，并显式传入 `-dev` 与 `-dev-frontend-port`。直接运行后端默认为生产模式，固定验证码及开发 CORS/CSRF 例外均不会启用。
 如果后端启动失败，一键脚本会显示中文错误、后端日志尾部和日志文件路径。若看到 YAML 格式错误，请优先检查提示行附近的缩进；`file_picker` 是顶层配置，应该与 `storage` 同级，不能写到 `storage.shares` 下面。
 
 如只运行后端：
@@ -36,7 +36,7 @@ go run ./cmd/server -config config.yaml
 - 启动时会校验 `auth.totp_secret` 是否为有效且长度足够的 Base32 Secret，并拒绝占位符、空密钥和危险 CORS 通配符。
 - 登录接口带有内存级失败限速：同一来源短时间内多次失败会被临时拒绝，降低 TOTP 在线猜测风险。
 - 普通 TOTP 登录用户角色为 `user`，只能浏览目录/文件、上传下载、退出和查看自身登录状态；临时令牌管理与审计日志只允许 `admin` 角色访问。
-- 管理员通过独立接口登录，配置中只保存管理员密码的 SHA-256 十六进制摘要，后端使用常量时间比较校验。
+- 管理员通过独立接口登录，优先使用 Argon2id PHC；旧 SHA-256 配置仅保留迁移兼容。用户名使用固定长度常量时间比较，错误用户名也会执行密码验证。
 - Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，`Secure` 由 `auth.cookie_secure` 控制；HTTPS 部署时应启用。服务端数据库只保存会话 ID 哈希，避免数据库只读泄露时直接复用 Cookie 原值。
 - 登录会话同时受绝对有效期和空闲有效期约束。前端只在用户活跃时调用心跳接口刷新空闲时间，页面隐藏或离开后不会持续保活。
 - 文件下载使用短期下载票据。票据绑定具体目录、路径、文件大小、修改时间，并会按 `downloads.content_hash_max_mb` 对文件内容写入 SHA-256 哈希；页面会话空闲过期后，已兑换票据的长下载和 HTTP Range 续传仍可继续，但文件被替换后旧票据会失效。
@@ -45,7 +45,7 @@ go run ./cmd/server -config config.yaml
 - 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
 - 临时令牌数据库只保存 SHA-256 哈希，明文只在创建响应中返回一次。
 - 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；登录态和公开分享前端默认走原始字节流上传，后端从连接开始直接读取请求体、写临时文件并更新传输进度。旧的 `multipart/form-data` 上传接口仍兼容保留，但不再是前端默认路径；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
-- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-raw-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。
+- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-raw-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。所有 `/t/...` capability 响应以及 token/lease 创建与使用响应都会设置 `no-store`、`no-referrer` 和 `noindex` 等安全头。内置 nginx 会脱敏 `/t/<token>` 并忽略查询参数，但部署在它之前的外部 LB、CDN、WAF 和代理日志仍需独立禁止记录 capability、Referer 与 Authorization。
 - 服务维护内存传输注册表，管理员可查看活跃上传和下载。原始字节流上传的进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。若部署在反向代理后，应关闭上传请求体缓冲，例如 Nginx `proxy_request_buffering off;`，否则代理缓冲会让后端观测滞后。
 - 上传临时文件写在目标目录内，文件名形如 `.upload-*.tmp`；成功提交最终文件后会立即删除临时文件，失败、超限、客户端断开或管理员取消也会尽量删除。服务启动和定时任务会按配置清理超过保留期且不在活跃注册表中的崩溃残留临时文件。
 
@@ -54,7 +54,9 @@ go run ./cmd/server -config config.yaml
 见 `config.example.yaml`：
 
 - `server.host/port`：监听地址。
-- `server.trust_proxy_headers`：是否信任反向代理头。为 `true` 时审计日志和登录限速优先使用 `X-Forwarded-For` 第一段，其次 `X-Real-IP`；未部署在可信代理后时必须保持 `false`。
+- `server.trust_proxy_headers`：是否启用可信代理头；直接运行必须保持 `false`。
+- `server.trusted_proxy_cidrs`：可信代理 socket 来源 CIDR。启用后必填、最多 64 项；只剥离链右侧可信代理，非法链回退 `X-Real-IP`，再失败回退 socket remote IP。
+- `server.keepalive_idle_timeout_seconds`：HTTP keep-alive 请求之间的空闲超时，默认 120 秒。安全配置摘要只读展示，修改后需要重启；它不是上传、下载或单个请求的总时长，服务端不会设置固定 ReadTimeout/WriteTimeout。
 - `database.path`：SQLite 文件路径，启动自动建表 `sessions`、`tokens`、`download_leases`、`upload_leases`、`audit_logs` 并创建索引。
 - `auth.totp_secret`：TOTP Base32 secret。
 - `auth.dev_allow_fixed_code`：本地开发固定码开关，默认关闭。
@@ -65,20 +67,37 @@ go run ./cmd/server -config config.yaml
 - `auth.cookie_secure`：HTTPS 下启用安全 Cookie。
 - `downloads.lease_ttl_seconds`：下载票据默认有效期，点击下载或公开分享下载时兑换。
 - `downloads.lease_max_ttl_seconds`：下载票据最大有效期上限，防止误配置过长。
-- `downloads.content_hash_max_mb`：下载票据内容哈希阈值。小于等于该大小的文件会记录 SHA-256 并在每次票据下载前复核；`0` 表示所有文件都做内容哈希。阈值越大，替换检测越强，但创建票据和 Range 续传前需要读取完整文件。
+- `downloads.content_hash_max_mb`：下载票据内容哈希阈值。小于等于该大小的文件在创建票据时记录 SHA-256；`0` 表示所有文件都记录内容哈希。
+- `downloads.max_concurrent_hashes`：全局并发内容哈希上限，默认 2，范围 1–16。满载时立即返回 503，不占用下载传输连接等待。
+- `downloads.verify_hash_on_every_request`：默认 `false`，有内容哈希的 lease 仅在首次使用时复核一次，后续 Range 只复核普通文件身份、大小和 mtime，以避免每段续传都读取完整文件。若服务器目录可能被不可信本地写者修改，可设为 `true`，让每次请求都复核内容哈希。
+
+上述两个下载哈希配置修改后需要重启。首次使用状态持久化在数据库中；并发首次 Range 会合并为一次实际哈希和一次首次使用审计。超过 `content_hash_max_mb` 而未记录内容哈希的大文件仍会在首次成功复核后标记为已使用。
 - `auth.admin.username`：管理员用户名。
-- `auth.admin.password_sha256`：管理员密码的 SHA-256 十六进制摘要。
+- `auth.admin.password_hash`：管理员密码的 Argon2id PHC。
+- `auth.admin.password_sha256`：deprecated 旧 SHA-256 摘要；仅在 `password_hash` 为空时使用。
+- `abuse.login.max_concurrent_admin_verifications`：Argon2id 验证并发槽，默认 2；`0` 表示不限制。
+- `abuse.login.global_per_minute` 与 IP 失败窗口参数：分别限制 user/admin 单实例登录总速率，并按可信客户端 IP 隔离失败封禁。
+- `abuse.creation.*`：限制 token/lease 创建速率、活跃 token 数量和未使用/未过期 lease 数量；所有字段设为 `0` 可单独关闭对应限制。
+- `audit.unauthorized_sample_seconds` / `unauthorized_global_per_minute`：仅对认证噪声中的未授权和非管理员 forbidden 按规范客户端 IP 与路由模板采样，默认 60 秒一次并按 action 分别限制为 120 次/分钟；`0` 表示不限制审计写入，而不是关闭审计。CSRF 使用独立 action 全局桶。路径 allowlist、资源策略、登录、配置、token 和 capability 等关键事件始终完整审计。
+- `audit.prune_every_writes`：审计 INSERT 累计到该次数后批量按主键阈值清理，默认 100；`0` 表示只在启动或维护任务中显式清理。若自动 prune 失败，触发它的审计事件已经写入，但调用会返回错误并输出不含敏感 detail 的高优先级诊断。
+- `abuse.uploads.*`：单实例上传并发准入，分别限制全局、资源、session 和公开 token；达到上限立即拒绝，不等待，也不影响下载。
 - `web.static_dir`：前端构建产物目录，存在时自动托管并回退到 `index.html`；不会吞掉 `/api` 与 `/t` 路由。
-- `cors.allow_origins`：允许来源，本地默认 `http://localhost:5173`；由于接口使用 Cookie 凭据，配置中禁止使用 `*`。一键开发模式额外允许同一主机名的前端开发端口来源，便于 `192.168.x.x:5173` 默认直连 `192.168.x.x:17878`。
+- `cors.allow_origins`：生产仅允许同源或显式列出的来源，空列表不会自动允许 localhost；配置中禁止使用 `*`。只有通过 `-dev` 显式启动时，才额外允许同一主机名的 `-dev-frontend-port` 来源。
 - `storage.upload_max_mb`：单次上传请求总大小限制，同时作为 Fiber 请求体上限；示例默认 5120 MB，可覆盖常见 2G 文件上传。
 - `storage.upload_max_file_mb`：单个文件大小限制，必须小于等于 `storage.upload_max_mb`；示例默认 5120 MB。
+- `storage.min_free_mb` / `storage.min_free_percent`：上传开始前的磁盘保留阈值，两者取较大值；默认 1024 MB / 5%，单项 `0` 表示关闭该阈值。该检查是准入时的磁盘空间快照，不是长期空间 reservation 账本。
 - `storage.upload_max_files`：单次 multipart 请求最多允许的文件数量。
 - `storage.upload_temp_retention_seconds`：`.upload-*.tmp` 临时文件保留时间，默认 86400 秒。超过该时间且不在活跃上传注册表中的临时文件会被清理。
-- `storage.upload_temp_cleanup_interval_seconds`：临时文件定时清理间隔，默认 3600 秒；启动时也会先执行一次清理。
+- `storage.upload_temp_cleanup_max_entries` / `upload_temp_cleanup_max_duration_seconds`：单次后台清理最多扫描的原始目录项和执行秒数，默认 50000 项/5 秒，修改后需重启。启动与资源配置发布只触发后台任务，不同步等待目录扫描；达到预算会记录 `truncated=true`，审计和固定日志不包含真实路径。
+- `storage.upload_temp_cleanup_interval_seconds`：临时文件定时清理间隔，默认 3600 秒；启动时会异步触发一次相同的有界清理。
+- `storage.directory_list_scan_limit` / `directory_list_max_page_size`：普通目录单请求扫描窗口与显式分页上限，默认 5000/200。超过扫描窗口时返回 `truncated=true`，客户端不会自动拉取目录剩余部分。
+- `file_picker.max_scan_entries` / `max_page_size`：管理员 picker 的扫描窗口与分页上限，默认 5000/200。
+
+上述列表边界属于启动配置，修改后需重启。客户端提交的合法正 `pageSize` 超过配置上限时，服务端会安全夹紧，并在响应 `pageSize` 中返回实际值；页 offset 始终按该实际值计算。列表响应通过 `hasMore` 表示当前已扫描集合还有下一页，通过 `truncated` 表示目录在扫描窗口之外仍可能存在条目；`truncated=true` 并不意味着客户端应自动扫描全目录。`scannedEntries` 表示实际纳入处理的原始扫描窗口，始终不超过 `scanLimit`；被过滤的 `.upload-*.tmp` 同样消耗该窗口预算，第 N+1 项仅用于判断是否截断，不计入 `scannedEntries`。
 - `storage.allowed_extensions` / `storage.blocked_extensions`：上传扩展名白名单与黑名单；白名单非空时只允许列出的扩展名，黑名单优先拒绝。默认黑名单为空，可由管理员配置管理页按需维护。
 - `storage.dirs`：开放目录资源，含 `type: directory`、`allow_download/allow_upload`，可由管理员“配置管理”页维护。
 - `storage.shares`：单文件共享资源，含 `type: file`，只允许下载；也可由管理员“配置管理”页维护。
-- `file_picker.roots`：管理员服务端文件选择器的常用位置快捷入口；未配置也会提供系统入口。选择器仅辅助填写共享资源路径，不提供删除、重命名、移动、上传或编辑能力。
+- `file_picker.roots`：新增或修改资源路径的唯一允许范围；未配置时不会自动提供系统入口。选择器仅辅助填写共享资源路径，不提供删除、重命名、移动、上传或编辑能力。
 - `file_picker.max_page_size` / `file_picker.deny_names` / `file_picker.deny_patterns`：文件选择器分页上限和可选隐藏规则。
 - `tokens.default_ttl_seconds`：令牌默认有效期。
 - `tokens.max_ttl_seconds`：令牌最长有效期，管理员传入更长的 `expiresAt` 或 `ttlSeconds` 会被夹紧到该上限。
@@ -121,28 +140,25 @@ python3 scripts/generate-totp-secret.py
 
 ## 生成管理员密码摘要
 
-运行脚本后按提示隐藏输入管理员密码，输出写入 `auth.admin.password_sha256`：
+运行脚本后按提示隐藏输入管理员密码。默认 YAML 同时输出 Argon2id PHC 和旧二进制短期回滚所需的 SHA-256，两个摘要来自同一次输入：
 
 ```bash
 cd ..
 python3 scripts/hash-admin-password.py
 ```
 
-如果需要在非交互环境生成，也可以使用管道：
-
-```bash
-printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
-```
+脚本内部以 `shell=False` 调用 `go run ./cmd/hash-admin-password`。自动化环境只能从 Secret Manager 或受保护的标准输入提供密码，不能把密码放入命令行、脚本或日志。`--format phc` 仅输出 PHC，不提供旧二进制回滚字段；`--format legacy-sha256` 仅供单独生成旧格式。迁移时可暂时同时保留 PHC 和旧 SHA-256，但 PHC 非空时绝不降级；回滚必须显式移除 `password_hash` 并重启，稳定后应删除旧值。
 
 ## API 契约摘要
 
-所有错误统一返回 JSON：`{"error":"..."}`。
+所有错误统一返回 JSON：`{"error":"..."}`；需要稳定机器判断时会额外返回 `code`。
 
 ### 认证
 
 - `POST /api/auth/login`：普通用户 TOTP 登录，JSON `{ "code": "123456" }`，成功返回 `{ "authenticated": true, "role": "user", "expiresAt": "...", "idleExpiresAt": "..." }` 并写入 Cookie。
 - `POST /api/auth/admin-login`：管理员账号登录，JSON `{ "username": "admin", "password": "..." }`，成功后角色为 `admin`。
 - 登录失败过多时返回 `429 Too Many Requests`。
+- Argon2id 管理员验证并发槽已满时返回 `503`、`code=auth_capacity_exhausted` 和 `Retry-After: 1`，不会排队占用请求。
 - `GET /api/auth/me`：返回 `{ "authenticated": true, "role": "user", "expiresAt": "...", "idleExpiresAt": "..." }` 或管理员信息。
 - `POST /api/auth/heartbeat`：登录后由前端在页面可见且用户活跃时调用，刷新 `idleExpiresAt`；空闲过期后返回 401。
 - `POST /api/auth/logout`：清理服务端会话和 Cookie，返回 `{ "ok": true }`。
@@ -199,7 +215,7 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 }
 ```
 
-下载令牌的 `path` 必须指向已存在的具体文件，不能指向不存在的路径或目录；上传令牌的 `path` 表示接收目录，允许后续创建不存在的子目录。若下载路径不存在，会返回 `404` 和 `下载文件不存在，请先在文件浏览页确认文件路径。`，便于前端直接提示管理员修正。
+下载令牌的 `path` 必须指向已存在的具体普通文件，不能指向不存在的路径、目录、FIFO、socket 或设备；符号链接解析后的目标也必须是普通文件。若下载路径不存在或不可安全共享，会返回不包含系统文件类型和真实路径的稳定错误。
 
 也兼容 `dir_id`、`ttl_seconds`、`expires_at`、`max_uses`。响应中的明文 token 只出现一次：
 
@@ -227,7 +243,9 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 - `GET /api/audit/logs?page=1&pageSize=50`：仅管理员可访问，分页返回 `{ logs, page, pageSize, total, totalPages }`，`pageSize` 最大 200。旧的 `?limit=100` 数组响应仍兼容保留。
 - `GET /api/transfers/active`：仅管理员可访问，返回 `{ "transfers": [...] }`。上传记录包含 `id/type/status/source/dirId/path/fileName/totalBytes/transferredBytes/currentSpeedBps/averageSpeedBps/startedAt/updatedAt/clientIP/cancelable`；公开分享上传的 `source` 为 `public_token`。下载记录带 `bestEffort: true`，速度字段可能为空或不精确。
 - `POST /api/transfers/:id/cancel`：仅管理员可访问。上传会触发取消、打断请求读取、停止写入并清理临时文件；下载保持极速发送路径，不保证可靠取消，通常返回 409 表示不可可靠取消或任务已结束。
-- `GET /api/health`：返回 `{ "ok": true }`。
+- `GET /api/health/live`：仅表示进程仍可响应，不查询数据库；draining 期间仍返回 200。
+- `GET /api/health/ready`：检查初始化、draining 状态和最多 2 秒的数据库 Ping；不可接收新流量时返回 503。
+- `GET /api/health`：保留为 readiness 兼容别名。
 
 ### 配置管理
 
@@ -250,33 +268,17 @@ printf '%s' 'your-password' | python3 scripts/hash-admin-password.py
 
 ## Docker
 
-镜像不会把示例配置复制成生产配置；运行时必须把配置目录挂载到 `/app/config`，并提供 `/app/config/config.yaml`。配置管理页使用原子重命名写回配置，单文件挂载通常不支持这种写法。
+完整且唯一的部署步骤、Compose 命令、端口与挂载权限说明见[仓库根 README 的“部署方式”](../README.md#部署方式)。
 
-```bash
-docker build -t filetrans-backend .
-mkdir -p config
-cp config.example.yaml config/config.yaml
-docker run --rm \
-  -p 17878:17878 \
-  -v "$PWD/config:/app/config" \
-  -v "$PWD/data:/app/data" \
-  -v "$PWD/uploads:/app/uploads" \
-  filetrans-backend
-```
+示例 Compose 的前后端固定加入 `172.28.0.0/24`。使用内置 Nginx 时，后端配置必须启用 `trust_proxy_headers` 并将该 CIDR 写入 `trusted_proxy_cidrs`；若 subnet 冲突，必须同时修改 Compose subnet 和可信 CIDR。直接运行后端时保持 `false` 和空列表。
 
-镜像内包含 `wget`，Dockerfile 已配置 `HEALTHCHECK` 调用 `/api/health`。
-最终镜像使用非 root 用户 `filetrans` 运行。若挂载宿主机目录，请确保容器用户对 `config/`、`data`、上传目录有读写权限；如果希望完全禁止管理员页面写回配置，可把配置目录挂载为只读，此时配置管理页的保存操作会失败但只读查看不受影响。
-Dockerfile 使用受支持的 Go/Alpine 基础镜像，并在依赖下载阶段复制 `go.mod` 与 `go.sum` 进行校验。
+后端镜像不会包含本地配置、数据库、上传文件或构建产物；最终以非 root 用户 `filetrans` 运行，并通过 `wget` 调用 `/api/health/ready` 做 readiness 检查。部署时必须将宿主机 `backend/config/` 目录挂载到 `/app/config/`，使 `backend/config/config.yaml` 对应容器内 `/app/config/config.yaml`，不能只挂载单个配置文件。
 
-如果希望前后端分容器运行，可以先准备 `config.yaml`，再使用仓库内的示例编排文件：
+首次 SIGTERM/SIGINT 会先将 readiness 置为 503，再无限等待活跃上传、`c.Download`、Range 和其他请求自然完成，然后停止 maintenance 并关闭数据库；不会撤销 lease、删除 session 或主动取消传输。Compose 示例的 `stop_grace_period: 24h` 是容器运行时最终强杀上限，不是应用传输 timeout；可能超过 24 小时的部署必须提高该值。Kubernetes 应相应设置足够大的 `terminationGracePeriodSeconds`，并使用 readiness endpoint 摘除流量。keep-alive IdleTimeout 只帮助关闭请求间空闲连接，ReadTimeout/WriteTimeout 仍为 0。
 
-```bash
-cp config.example.yaml config.yaml
-# 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs/storage.shares 等配置
-docker compose -f docker-compose.example.yml up -d --build
-```
+生产入口 `cmd/server` 使用 `server.Runtime` 统一管理 readiness、maintenance、Fiber 和数据库关闭。旧的 `server.New*` 构造器仅为已有测试和嵌入兼容保留；新的生产集成应使用 `NewRuntimeWithOptions` 并调用 `Runtime.Shutdown`。
 
-该编排文件会构建当前后端目录，并使用相邻的 `../frontend` 目录构建 nginx 前端镜像。浏览器访问 `http://服务器地址:17878`，前端容器会代理 `/api` 和 `/t` 到监听 `17878` 的后端服务。
+上传和下载可以持续数小时。反向代理的传输超时应表示“连续无数据进展的空闲超时”，而不是从请求开始计算的固定总时长；不要用固定总传输超时中断仍在持续传送数据的连接。
 
 ## 前端 dist 放置
 
