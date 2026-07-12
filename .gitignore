@@ -40,4 +40,5 @@ __pycache__/
 
 .opencode/
 .slim/deepwork/
+.cortexkit
 .agent-context/
