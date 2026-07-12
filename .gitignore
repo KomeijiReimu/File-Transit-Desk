@@ -16,6 +16,7 @@ backend/*.db-*
 backend/bin/
 backend/filetrans-server
 backend/server
+backend/hash-admin-password
 
 # 前端依赖与构建产物
 frontend/node_modules/
@@ -39,3 +40,4 @@ __pycache__/
 
 .opencode/
 .slim/deepwork/
+.agent-context/

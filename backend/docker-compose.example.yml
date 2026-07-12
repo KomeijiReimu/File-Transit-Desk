@@ -4,19 +4,42 @@ services:
       context: .
     container_name: file-trans-backend
     restart: unless-stopped
+    stop_grace_period: 24h
     volumes:
-      - ./config:/app/config
+      # Host backend/config/config.yaml is exposed as /app/config/config.yaml.
+      # Mount the directory (not the file) so atomic configuration updates work.
+      - type: bind
+        source: ./config
+        target: /app/config
       - ./data:/app/data
       - ./uploads:/app/uploads
     expose:
       - "17878"
+    networks:
+      - file-trans-internal
 
   frontend:
     build:
       context: ../frontend
     container_name: file-trans-frontend
     restart: unless-stopped
+    stop_grace_period: 24h
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "17878:80"
+    networks:
+      - file-trans-internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+networks:
+  file-trans-internal:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

@@ -108,7 +108,7 @@ if (-not (Test-Path -LiteralPath $BackendConfigPath -PathType Leaf)) {
   Write-Host '请先编辑配置文件，至少替换：'
   Write-Host '  - auth.totp_secret'
   Write-Host '  - auth.admin.username'
-  Write-Host '  - auth.admin.password_sha256'
+  Write-Host '  - auth.admin.password_hash'
   Write-Host '  - storage.dirs'
   Write-Host ''
   Write-Host '配置完成后再次运行：pwsh -File scripts/dev.ps1'
@@ -136,14 +136,12 @@ $OldPublicShareOrigin = $env:VITE_PUBLIC_SHARE_ORIGIN
 $OldTransferOrigin = $env:VITE_TRANSFER_ORIGIN
 $OldFrontendPort = $env:VITE_FRONTEND_PORT
 $OldTransferPort = $env:VITE_TRANSFER_PORT
-$OldDevFrontendPort = $env:FILE_TRANS_DEV_FRONTEND_PORT
 
 try {
-  $env:FILE_TRANS_DEV_FRONTEND_PORT = [string]$FrontendPort
   Write-Host "启动后端：$BackendConfig"
   Write-Host "前端代理目标：$BackendOrigin"
   $BackendProcess = Start-Process -FilePath 'go' `
-    -ArgumentList @('run', './cmd/server', '-config', $BackendConfigPath) `
+    -ArgumentList @('run', './cmd/server', '-config', $BackendConfigPath, '-dev', '-dev-frontend-port', [string]$FrontendPort) `
     -WorkingDirectory (Join-Path $RootDir 'backend') `
     -RedirectStandardOutput $BackendStdoutLog `
     -RedirectStandardError $BackendStderrLog `
@@ -198,5 +196,4 @@ try {
   $env:VITE_TRANSFER_ORIGIN = $OldTransferOrigin
   $env:VITE_FRONTEND_PORT = $OldFrontendPort
   $env:VITE_TRANSFER_PORT = $OldTransferPort
-  $env:FILE_TRANS_DEV_FRONTEND_PORT = $OldDevFrontendPort
 }

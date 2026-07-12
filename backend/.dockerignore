@@ -1,9 +1,33 @@
 .git
-bin
-data
-uploads
-config.yaml
+.github
+
+# Runtime configuration and backups must never enter the image context.
+config/
+config.yaml*
+*.bak
+
+# Runtime data and uploads.
+data/
+uploads/
 *.db
 *.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*-wal
+*-shm
+
+# Local and generated build output.
+bin/
+build/
+dist/
+server
+coverage.out
+*.test
+*.out
+tmp/
+
 Dockerfile
+docker-compose*.yml
 README.md

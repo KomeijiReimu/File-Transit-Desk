@@ -35,7 +35,7 @@ if [[ ! -f "${BACKEND_CONFIG_PATH}" ]]; then
 请先编辑配置文件，至少替换：
   - auth.totp_secret
   - auth.admin.username
-  - auth.admin.password_sha256
+  - auth.admin.password_hash
   - storage.dirs
 
 配置完成后再次运行：./scripts/dev.sh
@@ -133,7 +133,7 @@ echo "启动后端：${BACKEND_CONFIG}"
 echo "前端代理目标：${BACKEND_ORIGIN}"
 (
   cd "${ROOT_DIR}/backend"
-  FILE_TRANS_DEV_FRONTEND_PORT="${FRONTEND_PORT}" go run ./cmd/server -config "${BACKEND_CONFIG_PATH}"
+  go run ./cmd/server -config "${BACKEND_CONFIG_PATH}" -dev -dev-frontend-port "${FRONTEND_PORT}"
 ) >"${BACKEND_STDOUT_LOG}" 2>"${BACKEND_STDERR_LOG}" &
 BACKEND_PID=$!
 wait_for_backend
