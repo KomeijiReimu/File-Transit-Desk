@@ -1,17 +1,19 @@
 package server
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"filetrans-backend/internal/config"
+	"filetrans-backend/internal/fsutil"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -35,27 +37,34 @@ type filePickerRootDTO struct {
 }
 
 type filePickerItemDTO struct {
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	Type       string `json:"type"`
-	Size       *int64 `json:"size"`
-	ModifiedAt string `json:"modifiedAt,omitempty"`
-	Hidden     bool   `json:"hidden"`
-	Symlink    bool   `json:"symlink"`
-	Selectable bool   `json:"selectable"`
-	Readable   bool   `json:"readable"`
+	Name          string `json:"name"`
+	Path          string `json:"path"`
+	Type          string `json:"type"`
+	Size          *int64 `json:"size"`
+	ModifiedAt    string `json:"modifiedAt,omitempty"`
+	Hidden        bool   `json:"hidden"`
+	Symlink       bool   `json:"symlink"`
+	Selectable    bool   `json:"selectable"`
+	Readable      bool   `json:"readable"`
+	MetadataKnown bool   `json:"metadataKnown"`
+	Downloadable  bool   `json:"downloadable"`
 }
 
 type filePickerListResponse struct {
-	RootID     string              `json:"rootId"`
-	Path       string              `json:"path"`
-	ParentPath string              `json:"parentPath"`
-	Sort       string              `json:"sort"`
-	Order      string              `json:"order"`
-	Page       int                 `json:"page"`
-	PageSize   int                 `json:"pageSize"`
-	HasMore    bool                `json:"hasMore"`
-	Items      []filePickerItemDTO `json:"items"`
+	RootID         string              `json:"rootId"`
+	Path           string              `json:"path"`
+	ParentPath     string              `json:"parentPath"`
+	Sort           string              `json:"sort"`
+	Order          string              `json:"order"`
+	Page           int64               `json:"page"`
+	PageSize       int64               `json:"pageSize"`
+	HasMore        bool                `json:"hasMore"`
+	Truncated      bool                `json:"truncated"`
+	TotalKnown     bool                `json:"totalKnown"`
+	Total          *int64              `json:"total"`
+	ScannedEntries int                 `json:"scannedEntries"`
+	ScanLimit      int                 `json:"scanLimit"`
+	Items          []filePickerItemDTO `json:"items"`
 }
 
 type filePickerValidateRequest struct {
@@ -92,17 +101,16 @@ func (s *Server) filePickerRoots(c *fiber.Ctx) error {
 
 func (s *Server) filePickerList(c *fiber.Ctx) error {
 	rootID := strings.TrimSpace(c.Query("rootId"))
-	page := c.QueryInt("page", 1)
-	if page < 1 {
-		page = 1
+	cfg := s.cfg().FilePicker
+	page, err := parseListingPage(c, cfg.MaxPageSize, cfg.MaxScanEntries, false)
+	if err != nil {
+		return err
 	}
-	maxPageSize := s.cfg().FilePicker.MaxPageSize
-	pageSize := clampPositive(c.QueryInt("pageSize", maxPageSize), maxPageSize)
 	sortBy := normalizePickerSort(c.Query("sort", "name"))
 	order := normalizePickerOrder(c.Query("order", "asc"))
 	resolved, err := s.resolvePickerPath(rootID, c.Query("path"))
 	if err != nil {
-		_ = s.store.Audit("file_picker_denied", s.clientIP(c), fmt.Sprintf("根 %s 路径校验失败", rootID))
+		s.criticalAudit("file_picker_denied", s.clientIP(c), fmt.Sprintf("根 %s 路径校验失败", rootID))
 		return err
 	}
 	info, err := os.Stat(resolved.absolutePath)
@@ -112,11 +120,11 @@ func (s *Server) filePickerList(c *fiber.Ctx) error {
 	if !info.IsDir() {
 		return fiber.NewError(fiber.StatusBadRequest, "只能浏览目录。")
 	}
-	items, hasMore, err := s.readPickerDir(resolved, page, pageSize, sortBy, order)
+	result, err := s.readPickerDir(resolved, page.Page, page.PageSize, sortBy, order, cfg.MaxScanEntries)
 	if err != nil {
 		return friendlyPathError(err, "目录无法读取，请检查服务端权限。")
 	}
-	return c.JSON(filePickerListResponse{RootID: resolved.root.ID, Path: resolved.virtualPath, ParentPath: pickerParentPath(resolved.virtualPath), Sort: sortBy, Order: order, Page: page, PageSize: pageSize, HasMore: hasMore, Items: items})
+	return c.JSON(filePickerListResponse{RootID: resolved.root.ID, Path: resolved.virtualPath, ParentPath: pickerParentPath(resolved.virtualPath), Sort: sortBy, Order: order, Page: page.Page, PageSize: page.PageSize, HasMore: result.HasMore, Truncated: result.Truncated, TotalKnown: result.TotalKnown, Total: result.Total, ScannedEntries: result.ScannedEntries, ScanLimit: result.ScanLimit, Items: result.Items})
 }
 
 func (s *Server) filePickerValidate(c *fiber.Ctx) error {
@@ -126,7 +134,7 @@ func (s *Server) filePickerValidate(c *fiber.Ctx) error {
 	}
 	resolved, err := s.resolvePickerPath(in.RootID, in.Path)
 	if err != nil {
-		_ = s.store.Audit("file_picker_denied", s.clientIP(c), fmt.Sprintf("根 %s 选择校验失败", in.RootID))
+		s.criticalAudit("file_picker_denied", s.clientIP(c), fmt.Sprintf("根 %s 选择校验失败", in.RootID))
 		return err
 	}
 	info, err := os.Stat(resolved.absolutePath)
@@ -136,6 +144,11 @@ func (s *Server) filePickerValidate(c *fiber.Ctx) error {
 	pickedType := config.ResourceFile
 	if info.IsDir() {
 		pickedType = config.ResourceDirectory
+	} else if !info.Mode().IsRegular() {
+		pickedType = "other"
+	}
+	if pickedType == "other" {
+		return newCodedAPIError(fiber.StatusBadRequest, "resource_file_not_regular", "只能选择普通文件或目录。")
 	}
 	expected := strings.ToLower(strings.TrimSpace(in.ExpectedType))
 	if expected == "dir" || expected == "folder" {
@@ -150,15 +163,42 @@ func (s *Server) filePickerValidate(c *fiber.Ctx) error {
 	if pickedType == config.ResourceFile && !resolved.root.AllowSelectFiles || pickedType == config.ResourceDirectory && !resolved.root.AllowSelectDirs {
 		return fiber.NewError(fiber.StatusForbidden, "当前根目录不允许选择该类型资源。")
 	}
+	if err := s.validateResourceSelection(s.cfg(), config.Dir{Type: pickedType, Path: resolved.absolutePath}); err != nil {
+		return err
+	}
 	_ = s.store.Audit("file_picker_select", s.clientIP(c), fmt.Sprintf("%s:%s", resolved.root.ID, resolved.virtualPath))
 	return c.JSON(filePickerValidateResponse{Valid: true, RootID: resolved.root.ID, Path: resolved.virtualPath, RelativePath: resolved.relativePath, Type: pickedType, AbsolutePath: resolved.absolutePath})
 }
 
-func (s *Server) readPickerDir(resolved resolvedPickerPath, page, pageSize int, sortBy, order string) ([]filePickerItemDTO, bool, error) {
-	entries, err := os.ReadDir(resolved.absolutePath)
-	if err != nil {
-		return nil, false, err
+type pickerListResult struct {
+	Items          []filePickerItemDTO
+	HasMore        bool
+	Truncated      bool
+	TotalKnown     bool
+	Total          *int64
+	ScannedEntries int
+	ScanLimit      int
+}
+
+func (s *Server) readPickerDir(resolved resolvedPickerPath, page, pageSize int64, sortBy, order string, scanLimit int) (pickerListResult, error) {
+	opener := s.openDirectory
+	if opener == nil {
+		opener = func(path string) (fsutil.DirectoryReader, error) { return os.Open(path) }
 	}
+	dir, err := opener(resolved.absolutePath)
+	if err != nil {
+		return pickerListResult{}, err
+	}
+	defer dir.Close()
+	entries, readErr := dir.ReadDir(scanLimit + 1)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return pickerListResult{}, readErr
+	}
+	truncated := len(entries) > scanLimit
+	if truncated {
+		entries = entries[:scanLimit]
+	}
+	scannedEntries := len(entries)
 	all := make([]filePickerItemDTO, 0, len(entries))
 	for _, entry := range entries {
 		item, include := s.pickerItem(resolved, entry)
@@ -168,14 +208,19 @@ func (s *Server) readPickerDir(resolved resolvedPickerPath, page, pageSize int, 
 	}
 	sortPickerItems(all, sortBy, order)
 	start := (page - 1) * pageSize
-	if start >= len(all) {
-		return []filePickerItemDTO{}, false, nil
+	if start > int64(len(all)) {
+		start = int64(len(all))
 	}
 	end := start + pageSize
-	if end > len(all) {
-		end = len(all)
+	if end < start || end > int64(len(all)) {
+		end = int64(len(all))
 	}
-	return all[start:end], end < len(all), nil
+	var total *int64
+	if !truncated {
+		value := int64(len(all))
+		total = &value
+	}
+	return pickerListResult{Items: append([]filePickerItemDTO(nil), all[start:end]...), HasMore: end < int64(len(all)), Truncated: truncated, TotalKnown: !truncated, Total: total, ScannedEntries: scannedEntries, ScanLimit: scanLimit}, nil
 }
 
 func sortPickerItems(items []filePickerItemDTO, sortBy, order string) {
@@ -264,6 +309,9 @@ func normalizePickerOrder(value string) string {
 
 func (s *Server) pickerItem(resolved resolvedPickerPath, entry os.DirEntry) (filePickerItemDTO, bool) {
 	name := entry.Name()
+	if strings.HasPrefix(name, ".upload-") && strings.HasSuffix(name, ".tmp") {
+		return filePickerItemDTO{}, false
+	}
 	hidden := strings.HasPrefix(name, ".")
 	if s.pickerNameDenied(resolved.root, name, hidden) {
 		return filePickerItemDTO{}, false
@@ -273,35 +321,61 @@ func (s *Server) pickerItem(resolved resolvedPickerPath, entry os.DirEntry) (fil
 	rel := filepath.ToSlash(filepath.Join(resolved.relativePath, name))
 	info, err := os.Lstat(entryPath)
 	readable := err == nil
-	itemType := "other"
+	contained := true
+	itemType := "unknown"
 	var size *int64
 	modifiedAt := ""
+	metadataKnown := false
+	downloadable := false
+	selectableType := "unknown"
 	if err == nil {
+		metadataKnown = true
 		modifiedAt = info.ModTime().Format(time.RFC3339)
 		if info.IsDir() {
 			itemType = config.ResourceDirectory
+			selectableType = config.ResourceDirectory
 		} else if symlink {
 			itemType = "symlink"
 		} else if info.Mode().IsRegular() {
 			itemType = config.ResourceFile
+			selectableType = config.ResourceFile
+			downloadable = true
 			value := info.Size()
 			size = &value
+		} else {
+			itemType = "other"
 		}
 	}
 	if symlink && resolved.root.FollowSymlinks {
+		if inside, insideErr := fsutil.IsInside(resolved.rootReal, entryPath); insideErr != nil || !inside {
+			contained = false
+		}
 		if targetInfo, statErr := os.Stat(entryPath); statErr == nil {
-			itemType = config.ResourceFile
+			metadataKnown = true
+			selectableType = "other"
 			if targetInfo.IsDir() {
-				itemType = config.ResourceDirectory
-			} else {
+				selectableType = config.ResourceDirectory
+				if contained {
+					itemType = config.ResourceDirectory
+				}
+			} else if targetInfo.Mode().IsRegular() {
+				selectableType = config.ResourceFile
+				downloadable = contained
+				if contained {
+					itemType = config.ResourceFile
+				}
 				value := targetInfo.Size()
 				size = &value
 			}
 			modifiedAt = targetInfo.ModTime().Format(time.RFC3339)
+		} else {
+			metadataKnown = false
+			selectableType = "unknown"
+			downloadable = false
 		}
 	}
-	selectable := readable && (!symlink || resolved.root.FollowSymlinks) && (itemType == config.ResourceFile && resolved.root.AllowSelectFiles || itemType == config.ResourceDirectory && resolved.root.AllowSelectDirs)
-	return filePickerItemDTO{Name: name, Path: "/" + rel, Type: itemType, Size: size, ModifiedAt: modifiedAt, Hidden: hidden, Symlink: symlink, Selectable: selectable, Readable: readable}, true
+	selectable := readable && metadataKnown && contained && (!symlink || resolved.root.FollowSymlinks) && (selectableType == config.ResourceFile && resolved.root.AllowSelectFiles || selectableType == config.ResourceDirectory && resolved.root.AllowSelectDirs)
+	return filePickerItemDTO{Name: name, Path: "/" + rel, Type: itemType, Size: size, ModifiedAt: modifiedAt, Hidden: hidden, Symlink: symlink, Selectable: selectable, Readable: readable, MetadataKnown: metadataKnown, Downloadable: downloadable}, true
 }
 
 func (s *Server) resolvePickerPath(rootID, virtualPath string) (resolvedPickerPath, error) {
@@ -309,41 +383,30 @@ func (s *Server) resolvePickerPath(rootID, virtualPath string) (resolvedPickerPa
 	if !ok {
 		return resolvedPickerPath{}, fiber.NewError(fiber.StatusNotFound, "文件选择器根目录不存在。")
 	}
-	rootAbs, err := filepath.Abs(root.Path)
-	if err != nil {
-		return resolvedPickerPath{}, err
-	}
-	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	rootReal, err := fsutil.Canonical(root.Path)
 	if err != nil {
 		return resolvedPickerPath{}, friendlyPathError(err, "文件选择器根目录不存在或不可访问。")
-	}
-	rootReal, err = filepath.Abs(rootReal)
-	if err != nil {
-		return resolvedPickerPath{}, err
 	}
 	rel, err := cleanPickerVirtualPath(virtualPath)
 	if err != nil {
 		return resolvedPickerPath{}, err
 	}
 	target := filepath.Join(rootReal, filepath.FromSlash(rel))
-	if err := ensurePathInside(rootReal, target); err != nil {
-		return resolvedPickerPath{}, fiber.NewError(fiber.StatusForbidden, "路径超出文件选择器根目录。")
+	canonicalTarget, err := fsutil.Canonical(target)
+	if err != nil {
+		return resolvedPickerPath{}, friendlyPathError(err, "路径不存在或不可访问。")
+	}
+	inside, err := fsutil.IsInside(rootReal, canonicalTarget)
+	if err != nil || !inside {
+		return resolvedPickerPath{}, newCodedAPIError(fiber.StatusForbidden, "resource_path_outside_allowlist", "路径超出文件选择器允许范围。")
 	}
 	if !root.FollowSymlinks && rel != "" {
 		// 文件选择器默认不跟随符号链接，避免管理员在弹窗内误入指向系统目录的链接。
 		if hasSymlinkAncestor(rootReal, rel) {
 			return resolvedPickerPath{}, fiber.NewError(fiber.StatusForbidden, "默认不允许进入符号链接路径。")
 		}
-	} else if root.FollowSymlinks {
-		realTarget, err := filepath.EvalSymlinks(target)
-		if err == nil {
-			if err := ensurePathInside(rootReal, realTarget); err != nil {
-				return resolvedPickerPath{}, fiber.NewError(fiber.StatusForbidden, "符号链接目标超出文件选择器根目录。")
-			}
-			target = realTarget
-		}
 	}
-	return resolvedPickerPath{root: root, rootReal: rootReal, relativePath: rel, virtualPath: "/" + rel, absolutePath: target}, nil
+	return resolvedPickerPath{root: root, rootReal: rootReal, relativePath: rel, virtualPath: "/" + rel, absolutePath: canonicalTarget}, nil
 }
 
 func (s *Server) filePickerRoot(id string) (config.FilePickerRoot, bool) {
@@ -356,33 +419,7 @@ func (s *Server) filePickerRoot(id string) (config.FilePickerRoot, bool) {
 }
 
 func (s *Server) filePickerRootsForRuntime() []config.FilePickerRoot {
-	// 系统入口是管理员快速选路径的主入口；配置中的 roots 只作为常用位置快捷方式。
-	roots := systemPickerRoots()
-	seen := map[string]struct{}{}
-	for _, root := range roots {
-		seen[root.ID] = struct{}{}
-	}
-	for _, root := range s.cfg().FilePicker.Roots {
-		if _, ok := seen[root.ID]; ok {
-			continue
-		}
-		roots = append(roots, root)
-	}
-	return roots
-}
-
-func systemPickerRoots() []config.FilePickerRoot {
-	if runtime.GOOS == "windows" {
-		roots := make([]config.FilePickerRoot, 0, 26)
-		for drive := 'C'; drive <= 'Z'; drive++ {
-			path := string(drive) + `:\`
-			if _, err := os.Stat(path); err == nil {
-				roots = append(roots, config.FilePickerRoot{ID: "drive_" + strings.ToLower(string(drive)), Name: path, Path: path, AllowSelectFiles: true, AllowSelectDirs: true, ShowHidden: true, FollowSymlinks: true})
-			}
-		}
-		return roots
-	}
-	return []config.FilePickerRoot{{ID: "system_root", Name: "系统根目录", Path: string(os.PathSeparator), AllowSelectFiles: true, AllowSelectDirs: true, ShowHidden: true, FollowSymlinks: true}}
+	return append([]config.FilePickerRoot{}, s.cfg().FilePicker.Roots...)
 }
 
 func cleanPickerVirtualPath(input string) (string, error) {
@@ -412,21 +449,6 @@ func cleanPickerVirtualPath(input string) (string, error) {
 		return "", fiber.NewError(fiber.StatusBadRequest, "路径不能包含上级目录跳转。")
 	}
 	return rel, nil
-}
-
-func ensurePathInside(baseReal, target string) error {
-	targetAbs, err := filepath.Abs(target)
-	if err != nil {
-		return err
-	}
-	rel, err := filepath.Rel(baseReal, targetAbs)
-	if err != nil {
-		return err
-	}
-	if rel == "." || rel == "" || rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel) {
-		return nil
-	}
-	return os.ErrPermission
 }
 
 func hasSymlinkAncestor(rootReal, rel string) bool {
@@ -476,14 +498,4 @@ func pickerParentPath(value string) string {
 		return "/"
 	}
 	return parent
-}
-
-func clampPositive(value, max int) int {
-	if value < 1 {
-		return 1
-	}
-	if max > 0 && value > max {
-		return max
-	}
-	return value
 }

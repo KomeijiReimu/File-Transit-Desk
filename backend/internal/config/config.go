@@ -2,11 +2,15 @@ package config
 
 import (
 	"encoding/base32"
+	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"filetrans-backend/internal/security"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,12 +26,15 @@ type Config struct {
 	FilePicker FilePickerConfig `yaml:"file_picker"`
 	Tokens     TokensConfig     `yaml:"tokens"`
 	Audit      AuditConfig      `yaml:"audit"`
+	Abuse      AbuseConfig      `yaml:"abuse"`
 }
 
 type ServerConfig struct {
-	Host              string `yaml:"host"`
-	Port              int    `yaml:"port"`
-	TrustProxyHeaders bool   `yaml:"trust_proxy_headers"`
+	Host                        string   `yaml:"host"`
+	Port                        int      `yaml:"port"`
+	KeepaliveIdleTimeoutSeconds int64    `yaml:"keepalive_idle_timeout_seconds"`
+	TrustProxyHeaders           bool     `yaml:"trust_proxy_headers"`
+	TrustedProxyCIDRs           []string `yaml:"trusted_proxy_cidrs"`
 }
 
 type DatabaseConfig struct {
@@ -46,14 +53,49 @@ type AuthConfig struct {
 }
 
 type DownloadsConfig struct {
-	LeaseTTLSeconds    int64 `yaml:"lease_ttl_seconds"`
-	LeaseMaxTTLSeconds int64 `yaml:"lease_max_ttl_seconds"`
-	ContentHashMaxMB   int   `yaml:"content_hash_max_mb"`
+	LeaseTTLSeconds          int64 `yaml:"lease_ttl_seconds"`
+	LeaseMaxTTLSeconds       int64 `yaml:"lease_max_ttl_seconds"`
+	ContentHashMaxMB         int   `yaml:"content_hash_max_mb"`
+	MaxConcurrentHashes      int   `yaml:"max_concurrent_hashes"`
+	VerifyHashOnEveryRequest bool  `yaml:"verify_hash_on_every_request"`
 }
 
 type AdminConfig struct {
 	Username       string `yaml:"username"`
+	PasswordHash   string `yaml:"password_hash,omitempty"`
 	PasswordSHA256 string `yaml:"password_sha256"`
+}
+
+type AbuseConfig struct {
+	Login    LoginAbuseConfig    `yaml:"login"`
+	Creation CreationAbuseConfig `yaml:"creation"`
+	Uploads  UploadAbuseConfig   `yaml:"uploads"`
+}
+
+type LoginAbuseConfig struct {
+	MaxConcurrentAdminVerifications int `yaml:"max_concurrent_admin_verifications"`
+	GlobalPerMinute                 int `yaml:"global_per_minute"`
+	IPMaxFailures                   int `yaml:"ip_max_failures"`
+	WindowSeconds                   int `yaml:"window_seconds"`
+	BlockSeconds                    int `yaml:"block_seconds"`
+}
+
+type CreationAbuseConfig struct {
+	TokenGlobalPerMinute      int `yaml:"token_global_per_minute"`
+	TokenPerSessionPerMinute  int `yaml:"token_per_session_per_minute"`
+	LeaseGlobalPerMinute      int `yaml:"lease_global_per_minute"`
+	LeasePerOwnerPerMinute    int `yaml:"lease_per_owner_per_minute"`
+	PublicLeasePerIPPerMinute int `yaml:"public_lease_per_ip_per_minute"`
+	MaxActiveTokens           int `yaml:"max_active_tokens"`
+	MaxOutstandingLeasesTotal int `yaml:"max_outstanding_leases_total"`
+	MaxOutstandingLeasesOwner int `yaml:"max_outstanding_leases_per_owner"`
+}
+
+type UploadAbuseConfig struct {
+	Global      int `yaml:"global"`
+	PerResource int `yaml:"per_resource"`
+	PerSession  int `yaml:"per_session"`
+	PerToken    int `yaml:"per_token"`
 }
 
 type WebConfig struct {
@@ -65,22 +107,29 @@ type CORSConfig struct {
 }
 
 type StorageConfig struct {
-	UploadMaxMB                      int      `yaml:"upload_max_mb"`
-	UploadMaxFileMB                  int      `yaml:"upload_max_file_mb"`
-	UploadMaxFiles                   int      `yaml:"upload_max_files"`
-	UploadTempRetentionSeconds       int64    `yaml:"upload_temp_retention_seconds"`
-	UploadTempCleanupIntervalSeconds int64    `yaml:"upload_temp_cleanup_interval_seconds"`
-	AllowedExtensions                []string `yaml:"allowed_extensions"`
-	BlockedExtensions                []string `yaml:"blocked_extensions"`
-	Dirs                             []Dir    `yaml:"dirs"`
-	Shares                           []Dir    `yaml:"shares,omitempty"`
+	UploadMaxMB                         int      `yaml:"upload_max_mb"`
+	UploadMaxFileMB                     int      `yaml:"upload_max_file_mb"`
+	UploadMaxFiles                      int      `yaml:"upload_max_files"`
+	UploadTempRetentionSeconds          int64    `yaml:"upload_temp_retention_seconds"`
+	UploadTempCleanupIntervalSeconds    int64    `yaml:"upload_temp_cleanup_interval_seconds"`
+	UploadTempCleanupMaxEntries         int      `yaml:"upload_temp_cleanup_max_entries"`
+	UploadTempCleanupMaxDurationSeconds int      `yaml:"upload_temp_cleanup_max_duration_seconds"`
+	DirectoryListScanLimit              int      `yaml:"directory_list_scan_limit"`
+	DirectoryListMaxPageSize            int      `yaml:"directory_list_max_page_size"`
+	MinFreeMB                           int      `yaml:"min_free_mb"`
+	MinFreePercent                      int      `yaml:"min_free_percent"`
+	AllowedExtensions                   []string `yaml:"allowed_extensions"`
+	BlockedExtensions                   []string `yaml:"blocked_extensions"`
+	Dirs                                []Dir    `yaml:"dirs"`
+	Shares                              []Dir    `yaml:"shares,omitempty"`
 }
 
 type FilePickerConfig struct {
-	Roots        []FilePickerRoot `yaml:"roots"`
-	MaxPageSize  int              `yaml:"max_page_size"`
-	DenyNames    []string         `yaml:"deny_names"`
-	DenyPatterns []string         `yaml:"deny_patterns"`
+	Roots          []FilePickerRoot `yaml:"roots"`
+	MaxScanEntries int              `yaml:"max_scan_entries"`
+	MaxPageSize    int              `yaml:"max_page_size"`
+	DenyNames      []string         `yaml:"deny_names"`
+	DenyPatterns   []string         `yaml:"deny_patterns"`
 }
 
 type FilePickerRoot struct {
@@ -100,7 +149,10 @@ type TokensConfig struct {
 }
 
 type AuditConfig struct {
-	Retain int `yaml:"retain"`
+	Retain                      int `yaml:"retain"`
+	UnauthorizedSampleSeconds   int `yaml:"unauthorized_sample_seconds"`
+	UnauthorizedGlobalPerMinute int `yaml:"unauthorized_global_per_minute"`
+	PruneEveryWrites            int `yaml:"prune_every_writes"`
 }
 
 type Dir struct {
@@ -111,6 +163,17 @@ type Dir struct {
 	AllowDownload bool   `yaml:"allow_download" json:"allowDownload"`
 	AllowUpload   bool   `yaml:"allow_upload" json:"allowUpload"`
 }
+
+type PreparedSave struct {
+	path       string
+	dir        string
+	tempPath   string
+	published  bool
+	rename     func(string, string) error
+	syncParent func(string) error
+}
+
+var ErrInvalidConfig = errors.New("invalid config content")
 
 const (
 	ResourceDirectory = "directory"
@@ -143,25 +206,90 @@ func displayPath(path string) string {
 }
 
 func SaveAtomic(path string, c *Config) error {
-	next, err := c.NormalizedClone()
+	prepared, _, err := PrepareAtomic(path, c)
 	if err != nil {
 		return err
+	}
+	defer prepared.Abort()
+	_, err = prepared.Commit()
+	return err
+}
+
+func PrepareAtomic(path string, c *Config) (*PreparedSave, *Config, error) {
+	next, err := c.NormalizedClone()
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
 	b, err := yaml.Marshal(next)
 	if err != nil {
-		return err
+		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if old, err := os.ReadFile(path); err == nil {
 		// 写回前保留一份备份，便于管理员误操作后手工恢复敏感配置和目录列表。
 		if err := writeFileAtomic(path+".bak", old, 0600); err != nil {
-			return err
+			return nil, nil, err
 		}
+	} else if !os.IsNotExist(err) {
+		return nil, nil, err
 	}
-	return writeFileAtomic(path, b, 0600)
+	tmp, err := os.CreateTemp(dir, ".config-*.yaml.tmp")
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
+	if _, err := tmp.Write(b); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, nil, err
+	}
+	return &PreparedSave{path: path, dir: dir, tempPath: tmpName, rename: os.Rename, syncParent: syncDir}, next, nil
+}
+
+func (p *PreparedSave) Commit() (bool, error) {
+	if p == nil {
+		return false, fmt.Errorf("prepared config is nil")
+	}
+	if p.published {
+		return true, nil
+	}
+	if p.tempPath == "" {
+		return false, fmt.Errorf("prepared config is not available")
+	}
+	if err := p.rename(p.tempPath, p.path); err != nil {
+		return false, err
+	}
+	p.published = true
+	if err := p.syncParent(p.dir); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (p *PreparedSave) Abort() {
+	if p == nil || p.published || p.tempPath == "" {
+		return
+	}
+	_ = os.Remove(p.tempPath)
+	p.tempPath = ""
 }
 
 func (c *Config) NormalizedClone() (*Config, error) {
@@ -199,17 +327,7 @@ func writeFileAtomic(path string, content []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	_ = syncDir(dir)
-	return nil
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return syncDir(dir)
 }
 
 func (c *Config) Clone() *Config {
@@ -225,6 +343,7 @@ func Default() *Config {
 	c := &Config{}
 	c.Server.Host = "0.0.0.0"
 	c.Server.Port = 17878
+	c.Server.KeepaliveIdleTimeoutSeconds = 120
 	c.Database.Path = "./data/filetrans.db"
 	c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
 	c.Auth.IdleTimeoutSeconds = int64((30 * time.Minute) / time.Second)
@@ -233,17 +352,41 @@ func Default() *Config {
 	c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
 	c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
 	c.Downloads.ContentHashMaxMB = 64
+	c.Downloads.MaxConcurrentHashes = 2
 	c.Storage.UploadMaxMB = 5120
 	c.Storage.UploadMaxFileMB = 5120
 	c.Storage.UploadMaxFiles = 20
 	c.Storage.UploadTempRetentionSeconds = 86400
 	c.Storage.UploadTempCleanupIntervalSeconds = 3600
+	c.Storage.UploadTempCleanupMaxEntries = 50000
+	c.Storage.UploadTempCleanupMaxDurationSeconds = 5
+	c.Storage.DirectoryListScanLimit = 5000
+	c.Storage.DirectoryListMaxPageSize = 200
+	c.FilePicker.MaxScanEntries = 5000
 	c.FilePicker.MaxPageSize = 200
 	c.Tokens.DefaultTTLSeconds = 3600
 	c.Tokens.MaxTTLSeconds = int64((24 * time.Hour) / time.Second)
 	c.Tokens.UploadMaxMB = 5120
 	c.Audit.Retain = 1000
-	c.CORS.AllowOrigins = []string{"http://localhost:5173"}
+	c.Audit.UnauthorizedSampleSeconds = 60
+	c.Audit.UnauthorizedGlobalPerMinute = 120
+	c.Audit.PruneEveryWrites = 100
+	c.Abuse.Login.MaxConcurrentAdminVerifications = 2
+	c.Abuse.Login.GlobalPerMinute = 120
+	c.Abuse.Login.IPMaxFailures = 10
+	c.Abuse.Login.WindowSeconds = 180
+	c.Abuse.Login.BlockSeconds = 90
+	c.Abuse.Creation.TokenGlobalPerMinute = 120
+	c.Abuse.Creation.TokenPerSessionPerMinute = 30
+	c.Abuse.Creation.LeaseGlobalPerMinute = 600
+	c.Abuse.Creation.LeasePerOwnerPerMinute = 60
+	c.Abuse.Creation.PublicLeasePerIPPerMinute = 120
+	c.Abuse.Creation.MaxActiveTokens = 1000
+	c.Abuse.Creation.MaxOutstandingLeasesTotal = 5000
+	c.Abuse.Creation.MaxOutstandingLeasesOwner = 64
+	c.Abuse.Uploads = UploadAbuseConfig{Global: 16, PerResource: 8, PerSession: 4, PerToken: 2}
+	c.Storage.MinFreeMB = 1024
+	c.Storage.MinFreePercent = 5
 	return c
 }
 
@@ -252,11 +395,15 @@ func (c *Config) normalize() {
 	c.Auth.TOTPSecret = normalizeTOTPSecret(c.Auth.TOTPSecret)
 	c.Auth.Admin.Username = strings.TrimSpace(c.Auth.Admin.Username)
 	c.Auth.Admin.PasswordSHA256 = strings.TrimSpace(c.Auth.Admin.PasswordSHA256)
+	c.Auth.Admin.PasswordHash = strings.TrimSpace(c.Auth.Admin.PasswordHash)
 	if c.Server.Host == "" {
 		c.Server.Host = "0.0.0.0"
 	}
 	if c.Server.Port <= 0 {
 		c.Server.Port = 17878
+	}
+	if c.Server.KeepaliveIdleTimeoutSeconds <= 0 {
+		c.Server.KeepaliveIdleTimeoutSeconds = 120
 	}
 	if c.Database.Path == "" {
 		c.Database.Path = "./data/filetrans.db"
@@ -297,6 +444,12 @@ func (c *Config) normalize() {
 	if c.Storage.UploadTempCleanupIntervalSeconds <= 0 {
 		c.Storage.UploadTempCleanupIntervalSeconds = 3600
 	}
+	if c.Storage.DirectoryListScanLimit <= 0 {
+		c.Storage.DirectoryListScanLimit = 5000
+	}
+	if c.Storage.DirectoryListMaxPageSize <= 0 {
+		c.Storage.DirectoryListMaxPageSize = 200
+	}
 	c.Storage.AllowedExtensions = normalizeExtensions(c.Storage.AllowedExtensions)
 	c.Storage.BlockedExtensions = normalizeExtensions(c.Storage.BlockedExtensions)
 	c.Storage.Dirs = normalizeResources(c.Storage.Dirs, ResourceDirectory)
@@ -304,6 +457,9 @@ func (c *Config) normalize() {
 	c.FilePicker.Roots = normalizeFilePickerRoots(c.FilePicker.Roots)
 	if c.FilePicker.MaxPageSize <= 0 {
 		c.FilePicker.MaxPageSize = 200
+	}
+	if c.FilePicker.MaxScanEntries <= 0 {
+		c.FilePicker.MaxScanEntries = 5000
 	}
 	c.FilePicker.DenyNames = normalizeNames(c.FilePicker.DenyNames)
 	c.FilePicker.DenyPatterns = normalizeNames(c.FilePicker.DenyPatterns)
@@ -322,9 +478,21 @@ func (c *Config) normalize() {
 }
 
 func (c *Config) validate() error {
+	if c.Audit.UnauthorizedSampleSeconds < 0 || c.Audit.UnauthorizedSampleSeconds > 86400 {
+		return fmt.Errorf("audit.unauthorized_sample_seconds must be between 0 and 86400")
+	}
+	if c.Audit.UnauthorizedGlobalPerMinute < 0 || c.Audit.UnauthorizedGlobalPerMinute > 100000 {
+		return fmt.Errorf("audit.unauthorized_global_per_minute must be between 0 and 100000")
+	}
+	if c.Audit.PruneEveryWrites < 0 || c.Audit.PruneEveryWrites > 100000 {
+		return fmt.Errorf("audit.prune_every_writes must be between 0 and 100000")
+	}
 	// 启动阶段集中拒绝危险配置，避免服务运行后才在请求路径上暴露问题。
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535")
+	}
+	if c.Server.KeepaliveIdleTimeoutSeconds < 1 || c.Server.KeepaliveIdleTimeoutSeconds > 86400 {
+		return fmt.Errorf("server.keepalive_idle_timeout_seconds must be between 1 and 86400")
 	}
 	if c.Auth.IdleTimeoutSeconds < 30 {
 		return fmt.Errorf("auth.idle_timeout_seconds must be at least 30")
@@ -347,6 +515,9 @@ func (c *Config) validate() error {
 	if c.Downloads.ContentHashMaxMB < 0 || c.Downloads.ContentHashMaxMB > 102400 {
 		return fmt.Errorf("downloads.content_hash_max_mb must be between 0 and 102400")
 	}
+	if c.Downloads.MaxConcurrentHashes < 1 || c.Downloads.MaxConcurrentHashes > 16 {
+		return fmt.Errorf("downloads.max_concurrent_hashes must be between 1 and 16")
+	}
 	if c.Storage.UploadMaxMB < 1 || c.Storage.UploadMaxMB > maxUploadLimitMB {
 		return fmt.Errorf("storage.upload_max_mb must be between 1 and %d", maxUploadLimitMB)
 	}
@@ -355,6 +526,21 @@ func (c *Config) validate() error {
 	}
 	if c.Storage.UploadMaxFiles < 1 || c.Storage.UploadMaxFiles > 1000 {
 		return fmt.Errorf("storage.upload_max_files must be between 1 and 1000")
+	}
+	if c.Storage.UploadTempCleanupMaxEntries < 100 || c.Storage.UploadTempCleanupMaxEntries > 1000000 {
+		return fmt.Errorf("storage.upload_temp_cleanup_max_entries must be between 100 and 1000000")
+	}
+	if c.Storage.UploadTempCleanupMaxDurationSeconds < 1 || c.Storage.UploadTempCleanupMaxDurationSeconds > 60 {
+		return fmt.Errorf("storage.upload_temp_cleanup_max_duration_seconds must be between 1 and 60")
+	}
+	if c.Storage.DirectoryListScanLimit < 100 || c.Storage.DirectoryListScanLimit > 100000 {
+		return fmt.Errorf("storage.directory_list_scan_limit must be between 100 and 100000")
+	}
+	if c.Storage.DirectoryListMaxPageSize < 1 || c.Storage.DirectoryListMaxPageSize > 1000 {
+		return fmt.Errorf("storage.directory_list_max_page_size must be between 1 and 1000")
+	}
+	if c.Storage.DirectoryListMaxPageSize > c.Storage.DirectoryListScanLimit {
+		return fmt.Errorf("storage.directory_list_max_page_size must not exceed directory_list_scan_limit")
 	}
 	if c.Tokens.UploadMaxMB < 0 || c.Tokens.UploadMaxMB > maxUploadLimitMB {
 		return fmt.Errorf("tokens.upload_max_mb must be between 0 and %d", maxUploadLimitMB)
@@ -368,8 +554,28 @@ func (c *Config) validate() error {
 	if err := validateExtensionList("storage.blocked_extensions", c.Storage.BlockedExtensions); err != nil {
 		return err
 	}
-	if c.FilePicker.MaxPageSize < 1 || c.FilePicker.MaxPageSize > 1000 {
-		return fmt.Errorf("file_picker.max_page_size must be between 1 and 1000")
+	if c.FilePicker.MaxScanEntries < 100 || c.FilePicker.MaxScanEntries > 100000 {
+		return fmt.Errorf("file_picker.max_scan_entries must be between 100 and 100000")
+	}
+	if c.FilePicker.MaxPageSize < 1 || c.FilePicker.MaxPageSize > 200 {
+		return fmt.Errorf("file_picker.max_page_size must be between 1 and 200")
+	}
+	if c.FilePicker.MaxPageSize > c.FilePicker.MaxScanEntries {
+		return fmt.Errorf("file_picker.max_page_size must not exceed max_scan_entries")
+	}
+	if c.Server.TrustProxyHeaders && len(c.Server.TrustedProxyCIDRs) == 0 {
+		return fmt.Errorf("server.trusted_proxy_cidrs must not be empty when trust_proxy_headers is true")
+	}
+	if !c.Server.TrustProxyHeaders && len(c.Server.TrustedProxyCIDRs) != 0 {
+		return fmt.Errorf("server.trusted_proxy_cidrs must be empty when trust_proxy_headers is false")
+	}
+	if len(c.Server.TrustedProxyCIDRs) > 64 {
+		return fmt.Errorf("server.trusted_proxy_cidrs must contain at most 64 entries")
+	}
+	for _, value := range c.Server.TrustedProxyCIDRs {
+		if _, err := netip.ParsePrefix(strings.TrimSpace(value)); err != nil {
+			return fmt.Errorf("server.trusted_proxy_cidrs contains an invalid CIDR")
+		}
 	}
 	seenPickerRoots := map[string]struct{}{}
 	for _, root := range c.FilePicker.Roots {
@@ -408,15 +614,47 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.Auth.Admin.Username) == "" {
 		return fmt.Errorf("auth.admin.username must be set")
 	}
-	adminHash := strings.TrimSpace(c.Auth.Admin.PasswordSHA256)
-	if adminHash == "" {
-		return fmt.Errorf("auth.admin.password_sha256 must be set")
+	if len(c.Auth.Admin.Username) > 128 {
+		return fmt.Errorf("auth.admin.username must not exceed 128 bytes")
 	}
-	if strings.Contains(adminHash, "REPLACE_WITH_ADMIN_PASSWORD_SHA256") || strings.Contains(c.Auth.Admin.Username, "REPLACE_WITH_ADMIN_USERNAME") {
+	adminPHC := strings.TrimSpace(c.Auth.Admin.PasswordHash)
+	legacyHash := strings.TrimSpace(c.Auth.Admin.PasswordSHA256)
+	if adminPHC == "" && legacyHash == "" {
+		return fmt.Errorf("auth.admin.password_hash or deprecated password_sha256 must be set")
+	}
+	if strings.Contains(adminPHC, "REPLACE_WITH_ADMIN_PASSWORD_HASH") || strings.Contains(legacyHash, "REPLACE_WITH_ADMIN_PASSWORD_SHA256") || strings.Contains(c.Auth.Admin.Username, "REPLACE_WITH_ADMIN_USERNAME") {
 		return fmt.Errorf("auth.admin still contains the example placeholder")
 	}
-	if len(adminHash) != 64 || strings.Trim(adminHash, "0123456789abcdefABCDEF") != "" {
+	if adminPHC != "" {
+		if err := security.Validate(adminPHC); err != nil {
+			return fmt.Errorf("auth.admin.password_hash must be a valid bounded Argon2id PHC string")
+		}
+	}
+	if legacyHash != "" && (len(legacyHash) != 64 || strings.Trim(legacyHash, "0123456789abcdefABCDEF") != "") {
 		return fmt.Errorf("auth.admin.password_sha256 must be a sha256 hex string")
+	}
+	if c.Abuse.Login.MaxConcurrentAdminVerifications < 0 || c.Abuse.Login.MaxConcurrentAdminVerifications > 8 {
+		return fmt.Errorf("abuse.login.max_concurrent_admin_verifications must be between 0 and 8")
+	}
+	if c.Abuse.Login.GlobalPerMinute < 0 || c.Abuse.Login.GlobalPerMinute > 100000 || c.Abuse.Login.IPMaxFailures < 0 || c.Abuse.Login.IPMaxFailures > 1000 || c.Abuse.Login.WindowSeconds < 0 || c.Abuse.Login.WindowSeconds > 86400 || c.Abuse.Login.BlockSeconds < 0 || c.Abuse.Login.BlockSeconds > 86400 {
+		return fmt.Errorf("abuse.login rate limits are outside the supported range")
+	}
+	creationLimits := []int{c.Abuse.Creation.TokenGlobalPerMinute, c.Abuse.Creation.TokenPerSessionPerMinute, c.Abuse.Creation.LeaseGlobalPerMinute, c.Abuse.Creation.LeasePerOwnerPerMinute, c.Abuse.Creation.PublicLeasePerIPPerMinute}
+	for _, limit := range creationLimits {
+		if limit < 0 || limit > 100000 {
+			return fmt.Errorf("abuse.creation rate limits must be between 0 and 100000")
+		}
+	}
+	if c.Abuse.Creation.MaxActiveTokens < 0 || c.Abuse.Creation.MaxActiveTokens > 1000000 || c.Abuse.Creation.MaxOutstandingLeasesTotal < 0 || c.Abuse.Creation.MaxOutstandingLeasesTotal > 1000000 || c.Abuse.Creation.MaxOutstandingLeasesOwner < 0 || c.Abuse.Creation.MaxOutstandingLeasesOwner > 100000 {
+		return fmt.Errorf("abuse.creation outstanding limits are outside the supported range")
+	}
+	for _, limit := range []int{c.Abuse.Uploads.Global, c.Abuse.Uploads.PerResource, c.Abuse.Uploads.PerSession, c.Abuse.Uploads.PerToken} {
+		if limit < 0 || limit > 10000 {
+			return fmt.Errorf("abuse.uploads limits must be between 0 and 10000")
+		}
+	}
+	if c.Storage.MinFreeMB < 0 || c.Storage.MinFreeMB > 1000000000 || c.Storage.MinFreePercent < 0 || c.Storage.MinFreePercent > 100 {
+		return fmt.Errorf("storage free space reserve is outside the supported range")
 	}
 	for _, origin := range c.CORS.AllowOrigins {
 		if strings.TrimSpace(origin) == "*" {
@@ -443,9 +681,6 @@ func (c *Config) validate() error {
 		if dir.Type == ResourceFile && dir.AllowUpload {
 			return fmt.Errorf("storage file resource %s cannot allow upload", dir.ID)
 		}
-		if !dir.AllowDownload && !dir.AllowUpload {
-			return fmt.Errorf("storage resource %s must allow download or upload", dir.ID)
-		}
 		seenDirs[dir.ID] = struct{}{}
 	}
 	return nil
@@ -463,9 +698,6 @@ func normalizeResources(values []Dir, defaultType string) []Dir {
 		}
 		if dir.Type == ResourceFile {
 			dir.AllowUpload = false
-			if !dir.AllowDownload {
-				dir.AllowDownload = true
-			}
 		}
 		out = append(out, dir)
 	}

@@ -1,14 +1,18 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -16,24 +20,31 @@ import (
 
 var ErrTokenNotUsable = errors.New("token is expired, revoked, exhausted, or wrong type")
 var ErrTokenUploadLimitExceeded = errors.New("token upload quota exceeded")
+var ErrActiveTokenLimitReached = errors.New("active token limit reached")
+var ErrOutstandingLeaseLimit = errors.New("outstanding lease limit reached")
+var ErrAuditMaintenance = errors.New("audit maintenance failed")
 
 type Store struct {
-	DB     *sql.DB
-	Retain int
+	DB              *sql.DB
+	limitMu         sync.Mutex
+	auditRetain     atomic.Int64
+	auditPruneEvery atomic.Uint64
+	auditWriteCount atomic.Uint64
 }
 
 type Token struct {
-	ID            int64
-	Hash          string
-	Type          string
-	DirID         string
-	Path          string
-	ExpiresAt     sql.NullTime
-	MaxUses       int
-	Uses          int
-	UploadedBytes int64
-	Revoked       bool
-	CreatedAt     time.Time
+	ID                  int64
+	Hash                string
+	Type                string
+	DirID               string
+	Path                string
+	ResourceFingerprint string
+	ExpiresAt           sql.NullTime
+	MaxUses             int
+	Uses                int
+	UploadedBytes       int64
+	Revoked             bool
+	CreatedAt           time.Time
 }
 
 type Session struct {
@@ -47,20 +58,21 @@ type Session struct {
 }
 
 type DownloadLease struct {
-	ID         int64
-	Hash       string
-	Source     string
-	SessionID  sql.NullString
-	TokenID    sql.NullInt64
-	Role       string
-	DirID      string
-	Path       string
-	FileSize   int64
-	FileMtime  time.Time
-	FileSHA256 sql.NullString
-	ExpiresAt  time.Time
-	CreatedAt  time.Time
-	LastUsedAt sql.NullTime
+	ID                  int64
+	Hash                string
+	Source              string
+	SessionID           sql.NullString
+	TokenID             sql.NullInt64
+	Role                string
+	DirID               string
+	Path                string
+	ResourceFingerprint string
+	FileSize            int64
+	FileMtime           time.Time
+	FileSHA256          sql.NullString
+	ExpiresAt           time.Time
+	CreatedAt           time.Time
+	LastUsedAt          sql.NullTime
 }
 
 type UploadLease struct {
@@ -104,12 +116,20 @@ func Open(path string, retain int) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	s := &Store{DB: db, Retain: retain}
+	s := &Store{DB: db}
+	s.auditRetain.Store(int64(retain))
 	if err := s.Migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+func (s *Store) PingContext(ctx context.Context) error {
+	if s == nil || s.DB == nil {
+		return errors.New("store is not initialized")
+	}
+	return s.DB.PingContext(ctx)
 }
 
 func (s *Store) Migrate() error {
@@ -132,6 +152,7 @@ CREATE TABLE IF NOT EXISTS tokens(
   type TEXT NOT NULL,
   dir_id TEXT NOT NULL,
   path TEXT NOT NULL,
+  resource_fingerprint TEXT NOT NULL DEFAULT '',
   expires_at DATETIME,
   max_uses INTEGER NOT NULL DEFAULT 0,
   uses INTEGER NOT NULL DEFAULT 0,
@@ -141,6 +162,7 @@ CREATE TABLE IF NOT EXISTS tokens(
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_tokens_active_limit ON tokens(revoked, expires_at);
 
 CREATE TABLE IF NOT EXISTS audit_logs(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,6 +182,7 @@ CREATE TABLE IF NOT EXISTS download_leases(
   role TEXT NOT NULL DEFAULT '',
   dir_id TEXT NOT NULL,
   path TEXT NOT NULL,
+  resource_fingerprint TEXT NOT NULL DEFAULT '',
   file_size INTEGER NOT NULL,
   file_mtime DATETIME NOT NULL,
   file_sha256 TEXT NOT NULL DEFAULT '',
@@ -208,6 +231,9 @@ CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires
 	if err := s.addColumnIfMissing("download_leases", "file_sha256", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.addColumnIfMissing("download_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfMissing("upload_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -228,7 +254,36 @@ CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires
 	if _, err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at)`); err != nil {
 		return err
 	}
-	return s.addColumnIfMissing("tokens", "uploaded_bytes", "INTEGER NOT NULL DEFAULT 0")
+	if err := s.addColumnIfMissing("tokens", "uploaded_bytes", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("tokens", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	for _, statement := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_download_leases_session_outstanding ON download_leases(source, session_id, expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_download_leases_token_outstanding ON download_leases(source, token_id, expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_session_outstanding ON upload_leases(source, session_id, expires_at, used_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_token_outstanding ON upload_leases(source, token_id, expires_at, used_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_expires_datetime ON sessions(datetime(expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_datetime ON sessions(datetime(idle_expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_tokens_active_datetime ON tokens(revoked, datetime(expires_at), max_uses, uses)`,
+		`CREATE INDEX IF NOT EXISTS idx_tokens_expires_datetime ON tokens(datetime(expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_download_leases_expires_datetime ON download_leases(datetime(expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_download_leases_session_datetime ON download_leases(source, session_id, datetime(expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_download_leases_token_datetime ON download_leases(source, token_id, datetime(expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_datetime ON upload_leases(datetime(expires_at), used_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_session_datetime ON upload_leases(source, session_id, datetime(expires_at), used_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_token_datetime ON upload_leases(source, token_id, datetime(expires_at), used_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_outstanding_datetime_v2 ON upload_leases(used_at, datetime(expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_session_datetime_v2 ON upload_leases(source, session_id, used_at, datetime(expires_at))`,
+		`CREATE INDEX IF NOT EXISTS idx_upload_leases_token_datetime_v2 ON upload_leases(source, token_id, used_at, datetime(expires_at))`,
+	} {
+		if _, err := s.DB.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) addColumnIfMissing(table, column, definition string) error {
@@ -370,6 +425,24 @@ func (s *Store) CreateUploadLease(lease *UploadLease) error {
 	return err
 }
 
+func (s *Store) CreateUploadLeaseLimited(lease *UploadLease, maxTotal, maxOwner int) error {
+	if lease.Source == "" {
+		lease.Source = "session"
+	}
+	return s.createLeaseLimited(lease.Source, lease.SessionID, lease.TokenID, maxTotal, maxOwner, func(tx *sql.Tx) error {
+		now := time.Now()
+		if lease.CreatedAt.IsZero() {
+			lease.CreatedAt = now
+		}
+		res, err := tx.Exec(`INSERT INTO upload_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP)
+		if err != nil {
+			return err
+		}
+		lease.ID, err = res.LastInsertId()
+		return err
+	})
+}
+
 func (s *Store) ReserveUploadLease(hash string, now time.Time) (UploadLease, error) {
 	res, err := s.DB.Exec(`UPDATE upload_leases SET used_at = ? WHERE lease_hash = ? AND used_at IS NULL AND datetime(expires_at) > datetime(?)`, now, hash, now)
 	if err != nil {
@@ -409,7 +482,7 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 		lease.CreatedAt = now
 	}
 	res, err := s.DB.Exec(
-		`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, file_sha256, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		lease.Hash,
 		lease.Source,
 		lease.SessionID,
@@ -417,6 +490,7 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 		lease.Role,
 		lease.DirID,
 		lease.Path,
+		lease.ResourceFingerprint,
 		lease.FileSize,
 		lease.FileMtime,
 		lease.FileSHA256,
@@ -430,9 +504,78 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 	return err
 }
 
+func (s *Store) CreateDownloadLeaseLimited(lease *DownloadLease, maxTotal, maxOwner int) error {
+	if lease.Source == "" {
+		lease.Source = "session"
+	}
+	if !lease.FileSHA256.Valid {
+		lease.FileSHA256 = sql.NullString{String: "", Valid: true}
+	}
+	sessionID := ""
+	if lease.SessionID.Valid {
+		sessionID = lease.SessionID.String
+	}
+	return s.createLeaseLimited(lease.Source, sessionID, lease.TokenID, maxTotal, maxOwner, func(tx *sql.Tx) error {
+		if lease.CreatedAt.IsZero() {
+			lease.CreatedAt = time.Now()
+		}
+		res, err := tx.Exec(`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.ResourceFingerprint, lease.FileSize, lease.FileMtime, lease.FileSHA256, lease.ExpiresAt, lease.CreatedAt)
+		if err != nil {
+			return err
+		}
+		lease.ID, err = res.LastInsertId()
+		return err
+	})
+}
+
+func (s *Store) createLeaseLimited(source, sessionID string, tokenID sql.NullInt64, maxTotal, maxOwner int, insert func(*sql.Tx) error) error {
+	s.limitMu.Lock()
+	defer s.limitMu.Unlock()
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now()
+	if maxTotal > 0 {
+		var total int
+		err = tx.QueryRow(`SELECT (SELECT COUNT(*) FROM download_leases WHERE datetime(expires_at) > datetime(?)) + (SELECT COUNT(*) FROM upload_leases WHERE datetime(expires_at) > datetime(?) AND used_at IS NULL)`, now, now).Scan(&total)
+		if err != nil {
+			return err
+		}
+		if total >= maxTotal {
+			return ErrOutstandingLeaseLimit
+		}
+	}
+	if maxOwner > 0 {
+		var downloads, uploads int
+		if source == "session" {
+			err = tx.QueryRow(`SELECT COUNT(*) FROM download_leases WHERE source = 'session' AND session_id = ? AND datetime(expires_at) > datetime(?)`, sessionID, now).Scan(&downloads)
+			if err == nil {
+				err = tx.QueryRow(`SELECT COUNT(*) FROM upload_leases WHERE source = 'session' AND session_id = ? AND datetime(expires_at) > datetime(?) AND used_at IS NULL`, sessionID, now).Scan(&uploads)
+			}
+		} else {
+			err = tx.QueryRow(`SELECT COUNT(*) FROM download_leases WHERE source = 'public_token' AND token_id = ? AND datetime(expires_at) > datetime(?)`, tokenID, now).Scan(&downloads)
+			if err == nil {
+				err = tx.QueryRow(`SELECT COUNT(*) FROM upload_leases WHERE source = 'public_token' AND token_id = ? AND datetime(expires_at) > datetime(?) AND used_at IS NULL`, tokenID, now).Scan(&uploads)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if downloads+uploads >= maxOwner {
+			return ErrOutstandingLeaseLimit
+		}
+	}
+	if err := insert(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
 	var lease DownloadLease
-	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, file_size, file_mtime, file_sha256, expires_at, created_at, last_used_at FROM download_leases WHERE lease_hash = ?`, hash).Scan(
+	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at, last_used_at FROM download_leases WHERE lease_hash = ?`, hash).Scan(
 		&lease.ID,
 		&lease.Hash,
 		&lease.Source,
@@ -441,6 +584,7 @@ func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
 		&lease.Role,
 		&lease.DirID,
 		&lease.Path,
+		&lease.ResourceFingerprint,
 		&lease.FileSize,
 		&lease.FileMtime,
 		&lease.FileSHA256,
@@ -451,9 +595,16 @@ func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
 	return lease, err
 }
 
-func (s *Store) TouchDownloadLease(hash string, now time.Time) error {
-	_, err := s.DB.Exec(`UPDATE download_leases SET last_used_at = ? WHERE lease_hash = ?`, now, hash)
-	return err
+func (s *Store) MarkDownloadLeaseFirstUsed(hash string, now time.Time) (bool, error) {
+	result, err := s.DB.Exec(`UPDATE download_leases SET last_used_at = ? WHERE lease_hash = ? AND last_used_at IS NULL`, now, hash)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return updated == 1, nil
 }
 
 func (s *Store) DeleteExpiredTokens(now time.Time) error {
@@ -486,14 +637,49 @@ func (s *Store) Audit(action, ip, detail string) error {
 	if err != nil {
 		return err
 	}
-	if s.Retain > 0 {
-		// 审计日志按最新 ID 保留固定条数，避免长期运行时数据库无限增长。
-		_, err = s.DB.Exec(
-			`DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT ?)`,
-			s.Retain,
-		)
+	every := s.auditPruneEvery.Load()
+	if every > 0 && s.auditWriteCount.Add(1)%every == 0 {
+		// INSERT 已独立提交；若批量 prune 失败，本次事件仍已持久化，但向调用方返回错误以便关键路径记录高优先级诊断。
+		if err := s.PruneAudit(); err != nil {
+			return fmt.Errorf("%w: %v", ErrAuditMaintenance, err)
+		}
 	}
-	return err
+	return nil
+}
+
+func (s *Store) SetAuditPolicy(retain, pruneEveryWrites int) {
+	s.auditRetain.Store(int64(retain))
+	if pruneEveryWrites < 0 {
+		pruneEveryWrites = 0
+	}
+	s.auditPruneEvery.Store(uint64(pruneEveryWrites))
+	s.auditWriteCount.Store(0)
+}
+
+func (s *Store) PruneAudit() error {
+	retain := s.auditRetain.Load()
+	if retain <= 0 {
+		return nil
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var threshold sql.NullInt64
+	err = tx.QueryRow(`SELECT id FROM audit_logs ORDER BY id DESC LIMIT 1 OFFSET ?`, retain-1).Scan(&threshold)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if threshold.Valid {
+		if _, err := tx.Exec(`DELETE FROM audit_logs WHERE id < ?`, threshold.Int64); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func sanitizeAuditDetail(detail string) string {
@@ -515,11 +701,12 @@ func sanitizeAuditDetail(detail string) string {
 
 func (s *Store) CreateToken(t *Token) error {
 	res, err := s.DB.Exec(
-		`INSERT INTO tokens(token_hash, type, dir_id, path, expires_at, max_uses, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO tokens(token_hash, type, dir_id, path, resource_fingerprint, expires_at, max_uses, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.Hash,
 		t.Type,
 		t.DirID,
 		t.Path,
+		t.ResourceFingerprint,
 		t.ExpiresAt,
 		t.MaxUses,
 		time.Now(),
@@ -531,8 +718,37 @@ func (s *Store) CreateToken(t *Token) error {
 	return err
 }
 
+func (s *Store) CreateTokenLimited(t *Token, maxActive int) error {
+	s.limitMu.Lock()
+	defer s.limitMu.Unlock()
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if maxActive > 0 {
+		var count int
+		now := time.Now()
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM tokens WHERE revoked = 0 AND (expires_at IS NULL OR datetime(expires_at) > datetime(?)) AND (max_uses <= 0 OR uses < max_uses)`, now).Scan(&count); err != nil {
+			return err
+		}
+		if count >= maxActive {
+			return ErrActiveTokenLimitReached
+		}
+	}
+	res, err := tx.Exec(`INSERT INTO tokens(token_hash, type, dir_id, path, resource_fingerprint, expires_at, max_uses, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, t.Hash, t.Type, t.DirID, t.Path, t.ResourceFingerprint, t.ExpiresAt, t.MaxUses, time.Now())
+	if err != nil {
+		return err
+	}
+	t.ID, err = res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Tokens() ([]Token, error) {
-	rows, err := s.DB.Query(`SELECT id, token_hash, type, dir_id, path, expires_at, max_uses, uses, uploaded_bytes, revoked, created_at FROM tokens ORDER BY id DESC`)
+	rows, err := s.DB.Query(`SELECT id, token_hash, type, dir_id, path, resource_fingerprint, expires_at, max_uses, uses, uploaded_bytes, revoked, created_at FROM tokens ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -551,12 +767,13 @@ func (s *Store) Tokens() ([]Token, error) {
 
 func (s *Store) TokenByHash(hash string) (Token, error) {
 	var t Token
-	err := s.DB.QueryRow(`SELECT id, token_hash, type, dir_id, path, expires_at, max_uses, uses, uploaded_bytes, revoked, created_at FROM tokens WHERE token_hash = ?`, hash).Scan(
+	err := s.DB.QueryRow(`SELECT id, token_hash, type, dir_id, path, resource_fingerprint, expires_at, max_uses, uses, uploaded_bytes, revoked, created_at FROM tokens WHERE token_hash = ?`, hash).Scan(
 		&t.ID,
 		&t.Hash,
 		&t.Type,
 		&t.DirID,
 		&t.Path,
+		&t.ResourceFingerprint,
 		&t.ExpiresAt,
 		&t.MaxUses,
 		&t.Uses,
@@ -569,12 +786,13 @@ func (s *Store) TokenByHash(hash string) (Token, error) {
 
 func (s *Store) TokenByID(id int64) (Token, error) {
 	var t Token
-	err := s.DB.QueryRow(`SELECT id, token_hash, type, dir_id, path, expires_at, max_uses, uses, uploaded_bytes, revoked, created_at FROM tokens WHERE id = ?`, id).Scan(
+	err := s.DB.QueryRow(`SELECT id, token_hash, type, dir_id, path, resource_fingerprint, expires_at, max_uses, uses, uploaded_bytes, revoked, created_at FROM tokens WHERE id = ?`, id).Scan(
 		&t.ID,
 		&t.Hash,
 		&t.Type,
 		&t.DirID,
 		&t.Path,
+		&t.ResourceFingerprint,
 		&t.ExpiresAt,
 		&t.MaxUses,
 		&t.Uses,
@@ -804,17 +1022,100 @@ func (s *Store) AuditLogs(limit int) ([]AuditLog, error) {
 }
 
 func (s *Store) AuditLogsPage(limit, offset int) ([]AuditLog, int, error) {
+	return s.AuditLogsPageFiltered(limit, offset, AuditLogFilter{Status: "all"})
+}
+
+type AuditLogFilter struct {
+	Keyword string
+	Status  string
+}
+
+var ErrInvalidAuditFilter = errors.New("invalid audit filter")
+
+var auditFailureActions = map[string]struct{}{
+	"config_resource_published_sync_failed": {},
+	"csrf_denied":                           {},
+	"download_lease_file_changed":           {},
+	"download_lease_resource_changed":       {},
+	"file_picker_denied":                    {},
+	"forbidden":                             {},
+	"illegal_access":                        {},
+	"login_failed":                          {},
+	"login_rate_limited":                    {},
+	"token_denied":                          {},
+	"token_download_failed":                 {},
+	"token_upload_denied":                   {},
+	"token_upload_failed":                   {},
+	"unauthorized":                          {},
+	"upload_lease_failed":                   {},
+	"upload_lease_resource_changed":         {},
+	"upload_temp_cleanup_failed":            {},
+}
+
+func IsAuditFailureAction(action string) bool {
+	_, failed := auditFailureActions[strings.ToLower(strings.TrimSpace(action))]
+	return failed
+}
+
+func escapeAuditLikeKeyword(keyword string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(keyword)
+}
+
+func auditLogFilterSQL(filter AuditLogFilter) (string, []any) {
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 3+len(auditFailureActions))
+	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
+		pattern := "%" + escapeAuditLikeKeyword(keyword) + "%"
+		clauses = append(clauses, `(action LIKE ? ESCAPE '\' OR ip LIKE ? ESCAPE '\' OR detail LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern, pattern)
+	}
+	status := strings.ToLower(strings.TrimSpace(filter.Status))
+	if status == "failed" || status == "ok" {
+		placeholders := make([]string, 0, len(auditFailureActions))
+		for action := range auditFailureActions {
+			placeholders = append(placeholders, "?")
+			args = append(args, action)
+		}
+		condition := "lower(action) IN (" + strings.Join(placeholders, ",") + ")"
+		if status == "ok" {
+			condition = "NOT " + condition
+		}
+		clauses = append(clauses, condition)
+	}
+	if len(clauses) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func (s *Store) AuditLogsPageFiltered(limit, offset int, filter AuditLogFilter) ([]AuditLog, int, error) {
+	status := strings.ToLower(strings.TrimSpace(filter.Status))
+	if status == "" {
+		status = "all"
+	}
+	if status != "all" && status != "ok" && status != "failed" {
+		return nil, 0, ErrInvalidAuditFilter
+	}
+	filter.Status = status
 	if limit < 1 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	var total int
-	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&total); err != nil {
+	whereSQL, args := auditLogFilterSQL(filter)
+	tx, err := s.DB.Begin()
+	if err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.DB.Query(`SELECT id, action, ip, detail, created_at FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	defer tx.Rollback()
+	var total int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM audit_logs`+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	listArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := tx.Query(`SELECT id, action, ip, detail, created_at FROM audit_logs`+whereSQL+` ORDER BY id DESC LIMIT ? OFFSET ?`, listArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -828,7 +1129,16 @@ func (s *Store) AuditLogsPage(limit, offset int) ([]AuditLog, int, error) {
 		}
 		out = append(out, log)
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
 }
 
 type tokenScanner interface {
@@ -842,6 +1152,7 @@ func scanToken(row tokenScanner, t *Token) error {
 		&t.Type,
 		&t.DirID,
 		&t.Path,
+		&t.ResourceFingerprint,
 		&t.ExpiresAt,
 		&t.MaxUses,
 		&t.Uses,

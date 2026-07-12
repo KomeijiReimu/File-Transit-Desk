@@ -1,14 +1,17 @@
 server:
   host: "0.0.0.0"
   port: 17878
-  # 仅在可信反向代理后启用；启用后审计和登录限速会读取 X-Forwarded-For / X-Real-IP。
+  # HTTP keep-alive 请求间连续空闲超时；仅重启生效，不是请求或传输总时长。
+  keepalive_idle_timeout_seconds: 120
+  # 直接运行保持 false/[]。Compose 经内置 Nginx 时改为 true，并使用下方 172.28.0.0/24。
   trust_proxy_headers: false
+  trusted_proxy_cidrs: []
 database:
   path: "./data/filetrans.db"
 auth:
   # 必须替换为自己的 Base32 TOTP secret。保持占位符会导致服务拒绝启动。
   totp_secret: "REPLACE_WITH_YOUR_BASE32_SECRET"
-  # 仅本地开发可改为 true；且仅当 totp_secret 为空时允许验证码 000000。
+  # 仅本地开发可改为 true；还必须以 -dev 启动，且 totp_secret 为空时才接受 000000。
   dev_allow_fixed_code: false
   # 会话绝对最长有效期；到期后必须重新登录。
   session_ttl_seconds: 86400
@@ -21,8 +24,33 @@ auth:
   cookie_secure: false
   admin:
     username: "REPLACE_WITH_ADMIN_USERNAME"
-    # 管理员密码的 sha256 hex。生成：python3 scripts/hash-admin-password.py
-    password_sha256: "REPLACE_WITH_ADMIN_PASSWORD_SHA256"
+    # Argon2id PHC。脚本默认会同时生成本字段和下方短期回滚字段。
+    password_hash: "REPLACE_WITH_ADMIN_PASSWORD_HASH"
+    # Deprecated：仅用于旧配置或短期回滚；password_hash 非空时绝不会降级使用此值。
+    password_sha256: ""
+abuse:
+  login:
+    # Argon2id 管理员密码验证并发数；0 表示不限制。
+    max_concurrent_admin_verifications: 2
+    global_per_minute: 120
+    ip_max_failures: 10
+    window_seconds: 180
+    block_seconds: 90
+  creation:
+    token_global_per_minute: 120
+    token_per_session_per_minute: 30
+    lease_global_per_minute: 600
+    lease_per_owner_per_minute: 60
+    public_lease_per_ip_per_minute: 120
+    max_active_tokens: 1000
+    max_outstanding_leases_total: 5000
+    max_outstanding_leases_per_owner: 64
+  uploads:
+    # 单实例活跃/取消中上传并发；0 可分别关闭对应限制。
+    global: 16
+    per_resource: 8
+    per_session: 4
+    per_token: 2
 web:
   static_dir: "../frontend/dist"
 downloads:
@@ -30,11 +58,15 @@ downloads:
   lease_ttl_seconds: 7200
   # 下载票据最大有效期上限，防止误配置过长。
   lease_max_ttl_seconds: 21600
-  # 对不超过该大小的文件写入 SHA-256 内容哈希并在每次票据下载前复核；0 表示所有文件都做内容哈希。
+  # 对不超过该大小的文件写入 SHA-256 内容哈希，并在票据首次成功使用时复核；0 表示所有文件都做内容哈希。
   content_hash_max_mb: 64
+  # 全局同时读取文件内容计算下载哈希的数量；满载立即返回 503，不等待。
+  max_concurrent_hashes: 2
+  # 默认仅在 lease 首次使用时复核内容哈希；不可信本地写者场景可启用每次请求复核。
+  verify_hash_on_every_request: false
 cors:
-  allow_origins:
-    - "http://localhost:5173"
+  # 生产默认同源；仅显式跨域部署时填写。-dev 会单独允许指定的开发前端端口。
+  allow_origins: []
 storage:
   # 整个请求体上限；后端 Fiber BodyLimit 也使用该值。
   upload_max_mb: 5120
@@ -46,6 +78,16 @@ storage:
   upload_temp_retention_seconds: 86400
   # 启动后定时清理 .upload-*.tmp 的间隔。
   upload_temp_cleanup_interval_seconds: 3600
+  # 单次后台清理的扫描项数与时间预算；修改后需重启。
+  upload_temp_cleanup_max_entries: 50000
+  upload_temp_cleanup_max_duration_seconds: 5
+  # 每次普通目录列表最多扫描的原始目录项；临时文件也计入预算，第 N+1 项只探测 truncated。
+  directory_list_scan_limit: 5000
+  # 普通目录显式分页的单页上限；客户端更大的正 pageSize 会被夹紧到该值。
+  directory_list_max_page_size: 200
+  # 开始写临时文件前必须额外保留的磁盘空间；两项取较大值，0 可分别关闭。
+  min_free_mb: 1024
+  min_free_percent: 5
   # 白名单非空时，只允许这些扩展名；示例： [".zip", ".txt", ".pdf"]。
   allowed_extensions: []
   # 黑名单优先级高于白名单；默认清空，管理员可在 Web 配置管理页按需添加。
@@ -60,7 +102,7 @@ storage:
   # 管理员也可在前端“配置管理”页维护目录和单文件资源；单文件资源只允许下载。
   shares: []
 file_picker:
-  # 文件选择器默认提供系统入口；roots 仅作为常用位置快捷方式。
+  # roots 是新增资源和修改资源路径的唯一服务端允许范围；不会自动暴露系统根目录。
   roots:
     - id: "uploads"
       name: "上传目录"
@@ -69,7 +111,9 @@ file_picker:
       allow_select_dirs: true
       show_hidden: false
       follow_symlinks: false
-  # 单页最多返回的条目数；接口会强制裁剪前端传入的 pageSize。
+  # 管理员 picker 每次最多扫描的原始目录项；scannedEntries 对外永不超过该值。
+  max_scan_entries: 5000
+  # picker 单页最多返回的条目数；客户端固定请求更大值时会安全夹紧。
   max_page_size: 200
   deny_names: []
   deny_patterns: []
@@ -81,3 +125,9 @@ tokens:
   upload_max_mb: 5120
 audit:
   retain: 1000
+  # 0 表示不按时间抑制，事件仍会写审计。
+  unauthorized_sample_seconds: 60
+  # 0 表示不限制对应 action 的全局审计写入量。
+  unauthorized_global_per_minute: 120
+  # 审计写入累计到该次数后批量清理；0 表示只由启动/维护显式清理。
+  prune_every_writes: 100
