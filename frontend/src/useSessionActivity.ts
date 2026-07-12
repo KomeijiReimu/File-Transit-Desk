@@ -4,10 +4,17 @@ import { ApiError, api } from '@/api'
 import { authState, clearUser } from '@/auth'
 
 const HEARTBEAT_INTERVAL_MS = 30_000
-let uploadSessionHold = false
+const uploadSessionHolds = new Set<symbol>()
 
-export function setUploadSessionHold(active: boolean) {
-  uploadSessionHold = active
+export function acquireUploadSessionHold() {
+  const token = Symbol('upload-session-hold')
+  uploadSessionHolds.add(token)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    uploadSessionHolds.delete(token)
+  }
 }
 
 export function useSessionActivity() {
@@ -38,7 +45,7 @@ export function useSessionActivity() {
       if (authState.user && result.idleExpiresAt) authState.user.idleExpiresAt = result.idleExpiresAt
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        if (uploadSessionHold) {
+        if (uploadSessionHolds.size > 0) {
           window.dispatchEvent(new CustomEvent('ft:upload-session-expired'))
         } else {
           expireLocally()

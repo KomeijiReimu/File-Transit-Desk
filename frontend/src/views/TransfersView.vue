@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ApiError, api } from '@/api'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { TransferRecord } from '@/types'
@@ -12,12 +13,27 @@ const loading = ref(true)
 const error = ref('')
 const transfers = ref<TransferRecord[]>([])
 const canceling = ref('')
+const pendingCancel = ref<TransferRecord | null>(null)
+const cancelError = ref('')
+const lastSuccessfulAt = ref<Date | null>(null)
+const dataStale = ref(false)
 let refreshTimer: number | undefined
+let loadPromise: Promise<void> | null = null
+let mounted = false
+
+const REFRESH_INTERVAL_MS = 2000
 
 useGsapEntrance(pageRef)
 
 const uploads = computed(() => transfers.value.filter((item) => item.type === 'upload' && item.status !== 'completed'))
 const downloads = computed(() => transfers.value.filter((item) => item.type === 'download' && item.status !== 'completed'))
+const refreshStatus = computed(() => {
+  if (!lastSuccessfulAt.value) return '尚未成功更新'
+  return `最后更新：${lastSuccessfulAt.value.toLocaleTimeString()}`
+})
+const cancelDialogMessage = computed(() => pendingCancel.value?.type === 'upload'
+  ? '终止后，正在上传的数据会立即中断，发起方需要重新上传未完成的文件。'
+  : '终止后，正在下载的数据会立即中断，接收方可能需要重新开始下载。')
 
 function progressOf(item: TransferRecord) {
   const total = item.totalBytes || 0
@@ -75,40 +91,83 @@ function elapsedOf(item: TransferRecord) {
   return formatDuration((Date.now() - new Date(item.startedAt).getTime()) / 1000)
 }
 
-async function load(silent = false) {
-  if (!silent) loading.value = true
-  error.value = ''
-  try {
-    const result = await api.activeTransfers()
-    transfers.value = result.transfers || []
-  } catch (err) {
-    error.value = err instanceof ApiError ? err.message : '传输状态加载失败。'
-  } finally {
-    loading.value = false
+function clearRefreshTimer() {
+  if (refreshTimer !== undefined) {
+    window.clearTimeout(refreshTimer)
+    refreshTimer = undefined
   }
 }
 
-async function cancelTransfer(item: TransferRecord) {
+function scheduleRefresh() {
+  clearRefreshTimer()
+  if (!mounted || document.visibilityState !== 'visible') return
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = undefined
+    void load(true)
+  }, REFRESH_INTERVAL_MS)
+}
+
+function load(silent = false) {
+  if (loadPromise) return loadPromise
+  if (!silent) loading.value = true
+  error.value = ''
+  clearRefreshTimer()
+  loadPromise = (async () => {
+    try {
+      const result = await api.activeTransfers()
+      transfers.value = result.transfers || []
+      lastSuccessfulAt.value = new Date()
+      dataStale.value = false
+    } catch (err) {
+      error.value = err instanceof ApiError ? err.message : '传输状态加载失败。'
+      dataStale.value = lastSuccessfulAt.value !== null
+    } finally {
+      loading.value = false
+      loadPromise = null
+      scheduleRefresh()
+    }
+  })()
+  return loadPromise
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') void load(true)
+  else clearRefreshTimer()
+}
+
+function requestCancel(item: TransferRecord) {
+  if (!item.cancelable || canceling.value) return
+  cancelError.value = ''
+  pendingCancel.value = item
+}
+
+async function confirmCancelTransfer() {
+  const item = pendingCancel.value
+  if (!item) return
   if (!item.cancelable || canceling.value) return
   canceling.value = item.id
   error.value = ''
   try {
     await api.cancelTransfer(item.id)
+    pendingCancel.value = null
     await load(true)
   } catch (err) {
-    error.value = err instanceof ApiError ? err.message : '取消传输失败。'
+    cancelError.value = err instanceof ApiError ? err.message : '取消传输失败。'
   } finally {
     canceling.value = ''
   }
 }
 
 onMounted(() => {
-  load()
-  refreshTimer = window.setInterval(() => load(true), 2000)
+  mounted = true
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  void load()
 })
 
 onUnmounted(() => {
-  if (refreshTimer) window.clearInterval(refreshTimer)
+  mounted = false
+  clearRefreshTimer()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 
@@ -116,16 +175,20 @@ onUnmounted(() => {
   <section ref="pageRef" class="page-stack transfers-page">
     <header class="page-header split">
       <div>
-        <p class="eyebrow">Transfers</p>
+        <p class="eyebrow">实时任务</p>
         <h1>正在传输</h1>
         <p>查看当前上传和下载。上传可以可靠取消；下载保持极速通道，只做运行状态观测。</p>
       </div>
       <button class="ghost-btn" type="button" :disabled="loading" @click="load()">刷新</button>
     </header>
 
-    <StateBlock :loading="loading" :error="error" />
+    <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? error : ''" retry-label="重新连接" @retry="load()" />
+    <div v-if="dataStale" class="alert info stale-alert" role="status">
+      <span>监控连接暂时中断，当前显示的是旧数据。{{ refreshStatus }}</span>
+      <button class="ghost-btn" type="button" :disabled="loading" @click="load()">立即重试</button>
+    </div>
 
-    <div v-if="!loading" class="grid two transfer-summary-grid" data-motion>
+    <div v-if="!loading && (lastSuccessfulAt || !error)" class="grid two transfer-summary-grid" data-motion>
       <div class="panel insight-card compact">
         <span class="big-number">{{ uploads.length }}</span>
         <strong>上传中</strong>
@@ -136,13 +199,13 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div v-if="!loading" class="panel table-panel transfer-panel" data-motion>
+    <div v-if="!loading && (lastSuccessfulAt || !error)" class="panel table-panel transfer-panel" data-motion>
       <div class="panel-head">
         <div>
           <h2>活跃传输</h2>
           <p class="muted-text">自动观察当前上传与下载；下载通道以速度优先，进度可能延迟更新。</p>
         </div>
-        <span class="pill muted">每 2 秒刷新</span>
+        <span class="pill muted">{{ dataStale ? `数据可能已过期 · ${refreshStatus}` : `${refreshStatus} · 每 2 秒刷新` }}</span>
       </div>
       <div v-if="transfers.length" class="transfer-list">
         <article v-for="item in transfers" :key="item.id" class="transfer-card" :data-kind="item.type === 'upload' ? 'upload' : 'download'">
@@ -155,7 +218,7 @@ onUnmounted(() => {
                 </div>
                 <h3 :title="fileTitle(item)">{{ fileTitle(item) }}</h3>
               </div>
-              <button v-if="item.cancelable" class="mini-btn danger transfer-cancel" type="button" :disabled="Boolean(canceling)" @click="cancelTransfer(item)">
+              <button v-if="item.cancelable" class="mini-btn danger transfer-cancel" type="button" :disabled="Boolean(canceling)" @click="requestCancel(item)">
                 {{ canceling === item.id ? '取消中…' : '取消传输' }}
               </button>
               <span v-else class="transfer-passive-status">仅观测</span>
@@ -212,5 +275,18 @@ onUnmounted(() => {
       </div>
       <EmptyState v-else title="没有活跃传输" description="当前没有正在上传或下载的任务。" />
     </div>
+
+    <ConfirmDialog
+      :open="Boolean(pendingCancel)"
+      title="终止这项传输？"
+      :message="cancelDialogMessage"
+      :detail="pendingCancel ? `${transferKind(pendingCancel)} · ${fileTitle(pendingCancel)} · ${resourceTitle(pendingCancel)}` : ''"
+      :error="cancelError"
+      confirm-label="终止传输"
+      :danger="true"
+      :loading="Boolean(canceling)"
+      @cancel="pendingCancel = null"
+      @confirm="confirmCancelTransfer"
+    />
   </section>
 </template>

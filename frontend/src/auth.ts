@@ -5,15 +5,6 @@ import type { UserInfo, UserRole } from '@/types'
 const ROLE_STORAGE_KEY = 'ft-role-hint'
 const NAME_STORAGE_KEY = 'ft-name-hint'
 
-function readRoleHint(): UserRole | undefined {
-  try {
-    const value = localStorage.getItem(ROLE_STORAGE_KEY)
-    return value === 'admin' || value === 'user' ? value : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function writeRoleHint(role?: UserRole, name?: string) {
   try {
     // 只缓存展示用的角色和名称，不保存任何可用于鉴权的 Cookie 或 token。
@@ -38,19 +29,20 @@ export const authState = reactive({
   ready: false,
   authenticated: false,
   role: undefined as UserRole | undefined,
-  name: undefined as string | undefined,
+  // 本地缓存只在 /me 尚未返回时提供名称提示，不参与任何权限判断。
+  name: readNameHint(),
   user: null as UserInfo | null,
 })
 
-export const isAdmin = computed(() => authState.role === 'admin')
+export const isAdmin = computed(() => authState.authenticated && authState.role === 'admin')
 
-function applyUser(user: UserInfo, fallbackRole?: UserRole, fallbackName?: string) {
+function applyUser(user: UserInfo, fallbackName?: string) {
   authState.user = user
   authState.authenticated = user.authenticated !== false
-  // 后端 role 优先，其次使用本次登录入口传入的兜底值，最后才用本地展示缓存。
-  const role = (user.role as UserRole | undefined) || fallbackRole || readRoleHint() || 'user'
+  // 权限角色只接受当前后端响应；缺失或非法角色按普通用户处理。
+  const role: UserRole = user.role === 'admin' || user.role === 'user' ? user.role : 'user'
   authState.role = role
-  authState.name = user.name || fallbackName || readNameHint() || (role === 'admin' ? '管理员' : '访客')
+  authState.name = user.name || fallbackName || (role === 'admin' ? '管理员' : '访客')
   if (authState.authenticated) writeRoleHint(role, authState.name)
 }
 
@@ -87,7 +79,7 @@ export async function login(totp: string) {
   if (user.authenticated === false) {
     throw new Error('后端未确认登录状态。')
   }
-  applyUser(user, 'user')
+  applyUser(user)
 }
 
 export async function adminLogin(username: string, password: string) {
@@ -95,7 +87,7 @@ export async function adminLogin(username: string, password: string) {
   if (user.authenticated === false) {
     throw new Error('后端未确认登录状态。')
   }
-  applyUser(user, 'admin', username)
+  applyUser(user, username)
 }
 
 export async function logout() {

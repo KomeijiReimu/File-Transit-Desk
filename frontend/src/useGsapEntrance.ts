@@ -14,11 +14,14 @@ export function useGsapEntrance(root: Ref<HTMLElement | null>, options: Entrance
   async function play() {
     await nextTick()
     ctx?.revert()
+    ctx = undefined
     if (!root.value) return
+    const targets = Array.from(root.value.querySelectorAll<HTMLElement>(selector))
+    if (!targets.length) return
     ctx = gsap.context(() => {
       const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
       if (reduceMotion) return
-      gsap.from(selector, {
+      gsap.from(targets, {
         autoAlpha: 0,
         y: 14,
         scale: 0.985,

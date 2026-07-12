@@ -5,25 +5,10 @@ import { ApiError, api } from '@/api'
 import AppIcon from '@/components/AppIcon.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import StateBlock from '@/components/StateBlock.vue'
+import { createUploadItem, reconcileConservativeUploadedBytes, useUploadQueue } from '@/composables/useUploadQueue'
 import type { TokenInfo } from '@/types'
+import { acquireUploadSessionHold } from '@/useSessionActivity'
 import { buildTransferUrl, formatBytes, formatDate, formatDuration, formatSpeed } from '@/utils'
-
-interface UploadItem {
-  id: string
-  file: File
-  status: 'queued' | 'uploading' | 'success' | 'error'
-  progress: number
-  loaded: number
-  total: number
-  error?: string
-  controller?: AbortController
-  speedBps?: number
-  averageSpeedBps?: number
-  etaSeconds?: number
-  startedAt?: number
-  lastLoaded?: number
-  lastProgressAt?: number
-}
 
 const route = useRoute()
 const tokenParam = computed(() => String(route.params.token || ''))
@@ -32,6 +17,7 @@ const info = ref<TokenInfo | null>(null)
 const loading = ref(true)
 const error = ref('')
 const downloading = ref(false)
+const batchNotice = ref('')
 
 const tokenType = computed(() => info.value?.type || info.value?.kind || 'download')
 const isUpload = computed(() => tokenType.value === 'upload')
@@ -82,12 +68,25 @@ const usesLabel = computed(() => {
   if (!max || max <= 0) return `已使用 ${used} 次 · 不限次数`
   return `已使用 ${used} / ${max} 次`
 })
+const remainingUploadBytes = computed(() => {
+  const max = info.value?.uploadMaxBytes || 0
+  if (!max) return 0
+  return Math.max(0, max - (info.value?.uploadedBytes || 0) - uploadedBytesSinceInfo.value)
+})
+const extensionPolicyLabel = computed(() => {
+  const allowed = info.value?.allowedExtensions || []
+  const blocked = info.value?.blockedExtensions || []
+  if (allowed.length) return `允许：${allowed.join('、')}`
+  if (blocked.length) return `不允许：${blocked.join('、')}`
+  return '文件类型不限'
+})
 
 async function loadInfo() {
   loading.value = true
   error.value = ''
   try {
     info.value = await api.publicTokenInfo(tokenParam.value)
+    uploadedBytesSinceInfo.value = 0
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '链接信息获取失败。'
     info.value = null
@@ -113,28 +112,62 @@ async function startPublicDownload() {
 }
 
 // 上传队列只存在于当前页面内，刷新或关闭页面不会保留待上传文件，避免持久化本地文件引用。
-const queue = ref<UploadItem[]>([])
 const dragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 let counter = 0
-let stopUploadBatch = false
+const uploadedBytesSinceInfo = ref(0)
 const nextId = () => `up-${Date.now()}-${++counter}`
-const uploading = computed(() => queue.value.some((item) => item.status === 'uploading'))
-const currentUpload = computed(() => queue.value.find((item) => item.status === 'uploading'))
-const hasPendingUploads = computed(() => queue.value.some((item) => item.status === 'queued' || item.status === 'error'))
-const totalBytes = computed(() => queue.value.reduce((sum, item) => sum + item.file.size, 0))
-const finishedBytes = computed(() => queue.value.reduce((sum, item) => sum + (item.status === 'success' ? item.file.size : item.status === 'uploading' ? item.loaded : 0), 0))
-const finishedCount = computed(() => queue.value.filter((item) => item.status === 'success').length)
-const overallProgress = computed(() => totalBytes.value > 0 ? Math.min(100, Math.round((finishedBytes.value / totalBytes.value) * 100)) : 0)
-const currentSpeed = computed(() => queue.value.reduce((sum, item) => sum + (item.status === 'uploading' ? item.speedBps || 0 : 0), 0))
+
+const {
+  queue,
+  uploading,
+  busy: uploadBusy,
+  hasPendingUploads,
+  totalBytes,
+  finishedBytes,
+  finishedCount,
+  overallProgress,
+  currentSpeed,
+  add: addUploadItem,
+  remove: removeItem,
+  uploadAll: runUploadAll,
+  retry: retryItem,
+  cancel: cancelUpload,
+  cancelCurrent: cancelCurrentUpload,
+  dispose: disposeUploadQueue,
+} = useUploadQueue({
+  acquireHold: acquireUploadSessionHold,
+  errorMessage: uploadErrorMessage,
+  uploadFile: async (item, options) => {
+    await api.publicUpload(tokenParam.value, item.file, options)
+  },
+  onItemSuccess: async (item) => {
+    const previousServerBytes = info.value?.uploadedBytes || 0
+    uploadedBytesSinceInfo.value += item.file.size
+    const refreshed = await api.publicTokenInfo(tokenParam.value)
+    uploadedBytesSinceInfo.value = reconcileConservativeUploadedBytes(
+      previousServerBytes,
+      uploadedBytesSinceInfo.value,
+      refreshed.uploadedBytes || 0,
+    )
+    info.value = refreshed
+  },
+  onBatchFinished: ({ stopped, succeeded, failed, queue }) => {
+    if (!stopped && succeeded > 0 && failed === 0 && !queue.some((item) => item.status === 'queued')) {
+      batchNotice.value = `上传完成，共 ${succeeded} 个文件。你可以继续追加文件，或直接关闭此页面。`
+    } else if (succeeded > 0 && failed > 0) {
+      batchNotice.value = `已上传 ${succeeded} 个文件，另有 ${failed} 个文件需要重试。`
+    }
+  },
+})
 
 function pickFiles() {
-  if (uploading.value) return
+  if (uploadBusy.value) return
   fileInput.value?.click()
 }
 
 function addFiles(files: FileList | File[]) {
-  if (!validFlag.value || uploading.value) return
+  if (!validFlag.value || uploadBusy.value) return
   const list = Array.from(files || [])
   const maxFileBytes = info.value?.uploadMaxFileBytes || 0
   const maxRequestBytes = info.value?.uploadRequestMaxBytes || 0
@@ -160,7 +193,7 @@ function addFiles(files: FileList | File[]) {
     }
   }
   const maxBytes = info.value?.uploadMaxBytes || 0
-  const usedBytes = info.value?.uploadedBytes || 0
+  const usedBytes = (info.value?.uploadedBytes || 0) + uploadedBytesSinceInfo.value
   if (maxBytes > 0) {
     let projected = usedBytes + queue.value.reduce((sum, item) => sum + (item.status === 'queued' || item.status === 'error' ? item.file.size : 0), 0)
     for (const file of list) {
@@ -172,9 +205,10 @@ function addFiles(files: FileList | File[]) {
     }
   }
   error.value = ''
+  batchNotice.value = ''
   for (const file of list) {
     // 使用本地唯一 ID 跟踪状态，避免同名文件在队列中互相覆盖。
-    queue.value.push({ id: nextId(), file, status: 'queued', progress: 0, loaded: 0, total: file.size })
+    addUploadItem(createUploadItem(nextId(), file))
   }
 }
 
@@ -193,24 +227,6 @@ function uploadErrorMessage(err: unknown) {
   return '上传失败，请稍后重试。'
 }
 
-function updateUploadProgress(item: UploadItem, loaded: number, total: number, percent: number) {
-  const now = Date.now()
-  if (!item.startedAt) item.startedAt = now
-  const previousLoaded = item.lastLoaded ?? 0
-  const previousAt = item.lastProgressAt ?? now
-  const hasPrevious = Boolean(item.lastProgressAt)
-  const deltaSeconds = Math.max(0.001, (now - previousAt) / 1000)
-  const instant = hasPrevious ? Math.max(0, (loaded - previousLoaded) / deltaSeconds) : 0
-  item.speedBps = hasPrevious ? (item.speedBps ? item.speedBps * 0.7 + instant * 0.3 : instant) : 0
-  item.averageSpeedBps = loaded > 0 ? loaded / Math.max(0.001, (now - item.startedAt) / 1000) : 0
-  item.loaded = total > 0 ? Math.min(loaded, total) : loaded
-  item.total = total || item.file.size
-  item.progress = percent
-  if (item.averageSpeedBps > 0 && item.total > item.loaded) item.etaSeconds = (item.total - item.loaded) / item.averageSpeedBps
-  item.lastLoaded = loaded
-  item.lastProgressAt = now
-}
-
 function onFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   if (input.files?.length) addFiles(input.files)
@@ -225,54 +241,8 @@ function onDrop(event: DragEvent) {
 
 function onDragOver(event: DragEvent) {
   event.preventDefault()
-  if (uploading.value) return
+  if (uploadBusy.value) return
   dragOver.value = true
-}
-
-function removeItem(id: string) {
-  queue.value = queue.value.filter((item) => item.id !== id)
-}
-
-async function uploadItem(item: UploadItem) {
-  if (item.status === 'uploading' || item.status === 'success') return
-  item.status = 'uploading'
-  item.progress = 0
-  item.loaded = 0
-  item.total = item.file.size
-  item.speedBps = 0
-  item.averageSpeedBps = 0
-  item.etaSeconds = undefined
-  item.startedAt = undefined
-  item.lastLoaded = 0
-  item.lastProgressAt = undefined
-  item.error = undefined
-  const controller = new AbortController()
-  item.controller = controller
-  try {
-    await api.publicUpload(tokenParam.value, item.file, {
-      signal: controller.signal,
-      onProgress: (progress) => {
-        updateUploadProgress(item, progress.loaded, progress.total || item.file.size, progress.percent)
-      },
-    })
-    item.progress = 100
-    item.loaded = item.file.size
-    item.status = 'success'
-  } catch (err) {
-    item.status = 'error'
-    item.error = uploadErrorMessage(err)
-  } finally {
-    item.controller = undefined
-  }
-}
-
-function cancelUpload(item: UploadItem) {
-  stopUploadBatch = true
-  item.controller?.abort()
-}
-
-function cancelCurrentUpload() {
-  if (currentUpload.value) cancelUpload(currentUpload.value)
 }
 
 function beforeUnload(event: BeforeUnloadEvent) {
@@ -282,45 +252,36 @@ function beforeUnload(event: BeforeUnloadEvent) {
 }
 
 async function uploadAll() {
-  if (uploading.value) return
-  stopUploadBatch = false
-  const pending = queue.value.filter((item) => item.status === 'queued' || item.status === 'error')
-  for (const item of pending) {
-    if (stopUploadBatch) break
-    await uploadItem(item)
-    if (item.status === 'success') {
-      // 上传成功后刷新公开信息，更新使用次数和累计容量展示；失败不打断后续重试。
-      try { info.value = await api.publicTokenInfo(tokenParam.value) } catch { /* ignore */ }
-    }
-  }
-}
-
-function retryItem(item: UploadItem) {
-  uploadItem(item)
+  if (uploadBusy.value) return
+  batchNotice.value = ''
+  await runUploadAll()
 }
 
 onMounted(() => {
   loadInfo()
   window.addEventListener('beforeunload', beforeUnload)
 })
-onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', beforeUnload)
+  disposeUploadQueue()
+})
 </script>
 
 <template>
-  <main class="share-page">
+  <main id="main-content" class="share-page" tabindex="-1" data-route-focus>
     <div class="share-shell">
       <header class="share-header">
-        <RouterLink to="/" class="brand">
+        <div class="brand" aria-label="文件传输台临时分享">
           <span class="brand-mark">FT</span>
           <span><strong>文件传输台</strong><small>临时分享</small></span>
-        </RouterLink>
+        </div>
       </header>
 
-      <StateBlock :loading="loading" :error="error" />
+      <StateBlock :loading="loading" :error="error" :retry-label="!info ? '重新加载' : ''" @retry="loadInfo" />
 
       <article v-if="info" class="share-card" :data-kind="tokenType">
         <div class="share-card-glow" aria-hidden="true" />
-        <p class="eyebrow">{{ isUpload ? 'Inbox link' : 'Download link' }}</p>
+        <p class="eyebrow">{{ isUpload ? '临时收件' : '临时下载' }}</p>
         <h1>{{ headline }}</h1>
         <p class="share-sub">{{ subline }}</p>
 
@@ -351,36 +312,35 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
               {{ downloading ? '准备下载…' : '立即下载' }}
             </button>
           </div>
-          <div v-else class="alert error">{{ reasonLabel }}</div>
+          <div v-else class="alert error" role="alert">{{ reasonLabel }}</div>
         </template>
 
         <!-- Upload mode -->
         <template v-else-if="isUpload">
           <template v-if="validFlag">
-            <div
+            <section
               class="dropzone"
               :class="{ over: dragOver }"
-              role="button"
-              tabindex="0"
-              :aria-disabled="uploading"
-              @click="pickFiles"
+              aria-label="文件拖放区域"
               @dragover="onDragOver"
               @dragleave="dragOver = false"
               @drop="onDrop"
-              @keydown.enter.prevent="pickFiles"
-              @keydown.space.prevent="pickFiles"
             >
               <div class="dropzone-symbol" aria-hidden="true"><span /></div>
               <strong>把文件拖到这里</strong>
               <small>或点击此处选择文件，支持多文件</small>
-              <input
-                ref="fileInput"
-                type="file"
-                multiple
-                hidden
-                @change="onFileChange"
-              />
+              <button class="upload-btn" type="button" :disabled="uploadBusy" @click="pickFiles">选择文件</button>
+              <input ref="fileInput" class="visually-hidden" type="file" multiple :disabled="uploadBusy" @change="onFileChange" />
+            </section>
+
+            <div class="upload-constraints" aria-label="上传限制">
+              <div v-if="info.uploadMaxFileBytes"><span>单文件上限</span><strong>{{ formatBytes(info.uploadMaxFileBytes) }}</strong></div>
+              <div v-if="info.uploadRequestMaxBytes"><span>单次上限</span><strong>{{ formatBytes(info.uploadRequestMaxBytes) }}</strong></div>
+              <div v-if="info.uploadMaxBytes"><span>剩余容量</span><strong>{{ formatBytes(remainingUploadBytes) }}</strong></div>
+              <div><span>文件类型</span><strong>{{ extensionPolicyLabel }}</strong></div>
             </div>
+
+            <div v-if="batchNotice" class="alert success" role="status" aria-live="polite">{{ batchNotice }}</div>
 
             <ul v-if="queue.length" class="upload-queue">
               <li v-for="item in queue" :key="item.id" :data-status="item.status">
@@ -400,9 +360,9 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
                   </small>
                 </div>
                 <div class="q-actions">
-                  <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploading" @click="retryItem(item)">重试</button>
+                  <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploadBusy" @click="retryItem(item)">重试</button>
                   <button v-if="item.status === 'uploading'" class="mini-btn danger" type="button" @click="cancelUpload(item)">取消上传</button>
-                  <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" @click="removeItem(item.id)">移除</button>
+                  <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" :disabled="uploadBusy" @click="removeItem(item.id)">移除</button>
                 </div>
               </li>
             </ul>
@@ -415,14 +375,14 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
                 </div>
                 <div class="upload-progress wide" role="progressbar" :aria-valuenow="overallProgress" aria-valuemin="0" aria-valuemax="100" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
               </div>
-              <button class="primary-btn big" type="button" :disabled="!hasPendingUploads || uploading" @click="uploadAll">
+              <button class="primary-btn big" type="button" :disabled="!hasPendingUploads || uploadBusy" @click="uploadAll">
                 {{ uploading ? '上传中…' : '开始上传' }}
               </button>
               <button v-if="uploading" class="ghost-btn danger" type="button" @click="cancelCurrentUpload">终止当前上传</button>
-              <button class="ghost-btn" type="button" :disabled="uploading" @click="pickFiles">追加文件</button>
+              <button class="ghost-btn" type="button" :disabled="uploadBusy" @click="pickFiles">追加文件</button>
             </div>
           </template>
-          <div v-else class="alert error">{{ reasonLabel }}</div>
+          <div v-else class="alert error" role="alert">{{ reasonLabel }}</div>
         </template>
 
         <template v-else>

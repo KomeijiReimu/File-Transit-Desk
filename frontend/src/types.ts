@@ -76,13 +76,15 @@ export interface FilePickerRoot {
 export interface FilePickerItem {
   name: string
   path: string
-  type: 'file' | 'directory' | 'symlink' | 'other'
+  type: 'file' | 'directory' | 'symlink' | 'other' | 'unknown' | string
   size?: number | null
   modifiedAt?: string
-  hidden: boolean
-  symlink: boolean
-  selectable: boolean
-  readable: boolean
+  hidden?: boolean
+  symlink?: boolean
+  selectable?: boolean
+  readable?: boolean
+  metadataKnown?: boolean
+  downloadable?: boolean
 }
 
 export interface FilePickerListResponse {
@@ -91,9 +93,14 @@ export interface FilePickerListResponse {
   parentPath: string
   sort: 'name' | 'type' | 'size' | 'modifiedAt'
   order: 'asc' | 'desc'
-  page: number
-  pageSize: number
-  hasMore: boolean
+  page?: number
+  pageSize?: number
+  hasMore?: boolean
+  truncated?: boolean
+  totalKnown?: boolean
+  total?: number | null
+  scannedEntries?: number
+  scanLimit?: number
   items: FilePickerItem[]
 }
 
@@ -119,11 +126,15 @@ export interface ResourcePayload {
 export interface FileEntry {
   name: string
   path?: string
-  type?: 'file' | 'dir' | 'directory'
+  type?: 'file' | 'dir' | 'directory' | 'symlink' | 'other' | 'unknown' | string
   isDir?: boolean
-  size?: number
+  size?: number | null
   modifiedAt?: string
   mtime?: string
+  metadataKnown?: boolean
+  downloadable?: boolean
+  symlink?: boolean
+  selectable?: boolean
 }
 
 export interface ListFilesResponse {
@@ -134,6 +145,14 @@ export interface ListFilesResponse {
   breadcrumbs?: Array<{ name: string; path: string }>
   canUpload?: boolean
   canDownload?: boolean
+  page?: number
+  pageSize?: number
+  hasMore?: boolean
+  truncated?: boolean
+  totalKnown?: boolean
+  total?: number | null
+  scannedEntries?: number
+  scanLimit?: number
 }
 
 // TokenInfo 同时覆盖管理端列表、创建响应和公开分享信息页的可选字段。
@@ -240,7 +259,7 @@ export interface AuditLog {
   path?: string
   ip?: string
   userAgent?: string
-  status?: string
+  status?: 'ok' | 'failed' | (string & {})
   detail?: string
 }
 

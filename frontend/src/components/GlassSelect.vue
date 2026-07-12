@@ -12,6 +12,8 @@ const props = defineProps<{
   options: GlassSelectOption[]
   placeholder?: string
   ariaLabel?: string
+  invalid?: boolean
+  describedBy?: string
 }>()
 
 const emit = defineEmits<{
@@ -22,18 +24,20 @@ const open = ref(false)
 const root = ref<HTMLElement | null>(null)
 const trigger = ref<HTMLButtonElement | null>(null)
 const activeIndex = ref(-1)
-// 每个实例生成独立 listbox id，保证同页多个下拉框的 aria-controls 不冲突。
 const listId = `glass-select-${Math.random().toString(36).slice(2)}`
+let typeahead = ''
+let typeaheadTimer: number | undefined
+let suppressNextTriggerClick = false
+let suppressTriggerTimer: number | undefined
 
 const selected = computed(() => props.options.find((option) => String(option.value) === String(props.modelValue)))
 const selectedIndex = computed(() => props.options.findIndex((option) => String(option.value) === String(props.modelValue)))
 
 watch(open, async (value) => {
   if (!value) return
-  activeIndex.value = selectedIndex.value >= 0 ? selectedIndex.value : 0
+  activeIndex.value = props.options.length ? (selectedIndex.value >= 0 ? selectedIndex.value : 0) : -1
   await nextTick()
-  // 打开后把焦点移到当前选项，键盘用户可直接上下移动或回车确认。
-  root.value?.querySelector<HTMLButtonElement>('[data-active="true"]')?.focus()
+  scrollActiveIntoView()
 })
 
 function choose(value: string | number) {
@@ -54,6 +58,32 @@ function toggle() {
   open.value = !open.value
 }
 
+function handleTriggerClick(event: MouseEvent) {
+  if (suppressNextTriggerClick) {
+    event.preventDefault()
+    event.stopPropagation()
+    suppressNextTriggerClick = false
+    if (suppressTriggerTimer) window.clearTimeout(suppressTriggerTimer)
+    suppressTriggerTimer = undefined
+    open.value = false
+    return
+  }
+  toggle()
+}
+
+function handleOptionClick(event: MouseEvent, value: string | number) {
+  event.preventDefault()
+  event.stopPropagation()
+  // 菜单在 click 期间卸载时，部分浏览器会把同一指针序列落到下方触发器；仅忽略这一次穿透 click，不阻止用户随后主动重开。
+  suppressNextTriggerClick = true
+  if (suppressTriggerTimer) window.clearTimeout(suppressTriggerTimer)
+  suppressTriggerTimer = window.setTimeout(() => {
+    suppressNextTriggerClick = false
+    suppressTriggerTimer = undefined
+  }, 0)
+  choose(value)
+}
+
 function move(step: number) {
   if (!open.value) {
     open.value = true
@@ -62,7 +92,18 @@ function move(step: number) {
   const total = props.options.length
   if (!total) return
   activeIndex.value = (activeIndex.value + step + total) % total
-  nextTick(() => root.value?.querySelector<HTMLButtonElement>('[data-active="true"]')?.focus())
+  void nextTick(scrollActiveIntoView)
+}
+
+function moveTo(index: number) {
+  if (!props.options.length) return
+  if (!open.value) open.value = true
+  activeIndex.value = Math.max(0, Math.min(index, props.options.length - 1))
+  void nextTick(scrollActiveIntoView)
+}
+
+function scrollActiveIntoView() {
+  root.value?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
 }
 
 function chooseActive() {
@@ -76,10 +117,32 @@ function closeOnOutside(event: MouseEvent) {
   if (root.value && target && !root.value.contains(target)) close()
 }
 
-function handleKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && open.value) {
+function handleTriggerKeydown(event: KeyboardEvent) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    move(1)
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    move(-1)
+  } else if (event.key === 'Home') {
+    event.preventDefault()
+    moveTo(0)
+  } else if (event.key === 'End') {
+    event.preventDefault()
+    moveTo(props.options.length - 1)
+  } else if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    if (open.value) chooseActive()
+    else open.value = true
+  } else if (event.key === 'Escape' && open.value) {
     event.preventDefault()
     close(true)
+  } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    typeahead += event.key.toLocaleLowerCase()
+    if (typeaheadTimer) window.clearTimeout(typeaheadTimer)
+    typeaheadTimer = window.setTimeout(() => { typeahead = '' }, 650)
+    const index = props.options.findIndex((option) => option.label.toLocaleLowerCase().startsWith(typeahead))
+    if (index >= 0) moveTo(index)
   }
 }
 
@@ -91,13 +154,15 @@ function handleFocusout(event: FocusEvent) {
 
 onMounted(() => {
   document.addEventListener('click', closeOnOutside)
-  document.addEventListener('keydown', handleKeydown)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeOnOutside)
-  document.removeEventListener('keydown', handleKeydown)
+  if (typeaheadTimer) window.clearTimeout(typeaheadTimer)
+  if (suppressTriggerTimer) window.clearTimeout(suppressTriggerTimer)
 })
+
+defineExpose({ focus: () => trigger.value?.focus() })
 </script>
 
 <template>
@@ -106,16 +171,16 @@ onBeforeUnmount(() => {
       ref="trigger"
       class="glass-select-trigger"
       type="button"
+      role="combobox"
       :aria-label="ariaLabel || placeholder || '选择'"
       :aria-expanded="open"
       :aria-controls="listId"
       :aria-activedescendant="open && activeIndex >= 0 ? optionId(activeIndex) : undefined"
+      :aria-invalid="invalid || undefined"
+      :aria-describedby="describedBy"
       aria-haspopup="listbox"
-      @click="toggle"
-      @keydown.down.prevent="move(1)"
-      @keydown.up.prevent="move(-1)"
-      @keydown.enter.prevent="toggle"
-      @keydown.space.prevent="toggle"
+      @click="handleTriggerClick"
+      @keydown="handleTriggerKeydown"
     >
       <span class="glass-select-text">
         <strong>{{ selected?.label || placeholder || '请选择' }}</strong>
@@ -124,31 +189,26 @@ onBeforeUnmount(() => {
       <span class="glass-select-arrow" aria-hidden="true" />
     </button>
 
-      <Transition name="select-pop">
-      <div v-if="open" :id="listId" class="glass-select-menu" role="listbox" @click.stop>
-        <button
+    <div v-if="open" :id="listId" class="glass-select-menu" role="listbox" :aria-label="ariaLabel || placeholder || '选择'" @click.stop>
+        <div
           v-for="(option, index) in options"
           :key="String(option.value)"
           :id="optionId(index)"
           class="glass-select-option"
           :class="{ selected: String(option.value) === String(modelValue) }"
-          type="button"
           role="option"
           :aria-selected="String(option.value) === String(modelValue)"
           :data-active="index === activeIndex"
-          @keydown.down.prevent="move(1)"
-          @keydown.up.prevent="move(-1)"
-          @keydown.enter.prevent="chooseActive"
-          @keydown.space.prevent="chooseActive"
-          @click="choose(option.value)"
+          @mouseenter="activeIndex = index"
+          @mousedown.stop.prevent
+          @click="handleOptionClick($event, option.value)"
         >
           <span>
             <strong>{{ option.label }}</strong>
             <small v-if="option.hint">{{ option.hint }}</small>
           </span>
-          <span v-if="String(option.value) === String(modelValue)" class="glass-select-check">✓</span>
-        </button>
-      </div>
-    </Transition>
+          <span v-if="String(option.value) === String(modelValue)" class="glass-select-check" aria-hidden="true">✓</span>
+        </div>
+    </div>
   </div>
 </template>

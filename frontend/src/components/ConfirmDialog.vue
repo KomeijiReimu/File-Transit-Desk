@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
+import { acquireModalIsolation } from '@/useModalIsolation'
 
 const props = withDefaults(defineProps<{
   open: boolean
@@ -29,8 +30,11 @@ const emit = defineEmits<{
 const dialogRef = ref<HTMLElement | null>(null)
 const cancelRef = ref<HTMLButtonElement | null>(null)
 let returnFocusEl: HTMLElement | null = null
-// titleId 让 aria-labelledby 指向稳定标题，辅助技术能读出弹窗主语。
-const titleId = computed(() => `confirm-title-${props.title.replace(/\W+/g, '-').toLowerCase()}`)
+let releaseModalIsolation: (() => void) | undefined
+const instanceId = `confirm-${Math.random().toString(36).slice(2)}`
+const titleId = `${instanceId}-title`
+const messageId = `${instanceId}-message`
+const detailId = `${instanceId}-detail`
 
 function cancel() {
   if (!props.loading) emit('cancel')
@@ -68,12 +72,16 @@ function onKeydown(event: KeyboardEvent) {
 
 watch(() => props.open, async (open) => {
   if (!open) {
+    releaseModalIsolation?.()
+    releaseModalIsolation = undefined
     await nextTick()
     returnFocusEl?.focus()
     returnFocusEl = null
     return
   }
   returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  releaseModalIsolation?.()
+  releaseModalIsolation = acquireModalIsolation()
   await nextTick()
   // 危险确认默认聚焦取消按钮，降低误按 Enter 直接删除的风险。
   cancelRef.value?.focus()
@@ -84,7 +92,10 @@ watch(() => props.open, (open) => {
   else document.removeEventListener('keydown', onKeydown)
 }, { immediate: true })
 
-onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown)
+  releaseModalIsolation?.()
+})
 </script>
 
 <template>
@@ -98,14 +109,16 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           role="dialog"
           aria-modal="true"
           :aria-labelledby="titleId"
+          :aria-describedby="detail ? `${messageId} ${detailId}` : messageId"
+          :aria-busy="loading"
           tabindex="-1"
         >
           <div class="confirm-icon" aria-hidden="true"><AppIcon name="alert-triangle" :size="26" /></div>
           <div class="confirm-copy">
-            <p class="eyebrow">Confirm</p>
+            <p class="eyebrow">操作确认</p>
             <h2 :id="titleId">{{ title }}</h2>
-            <p>{{ message }}</p>
-            <small v-if="detail">{{ detail }}</small>
+            <p :id="messageId">{{ message }}</p>
+            <small v-if="detail" :id="detailId">{{ detail }}</small>
             <div v-if="error" class="dialog-error" role="alert">{{ error }}</div>
           </div>
           <div class="confirm-actions">

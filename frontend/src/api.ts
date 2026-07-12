@@ -29,12 +29,18 @@ import type {
 export class ApiError extends Error {
   status: number
   details?: unknown
+  code?: string
+  retryAfter?: number
+  aborted: boolean
 
-  constructor(message: string, status: number, details?: unknown) {
+  constructor(message: string, status: number, details?: unknown, code?: string, retryAfter?: number) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.details = details
+    this.code = code
+    this.retryAfter = retryAfter
+    this.aborted = Boolean(details && typeof details === 'object' && 'aborted' in details && (details as { aborted?: boolean }).aborted)
   }
 }
 
@@ -48,23 +54,66 @@ type UploadOptions = {
   headers?: Record<string, string>
 }
 
+type HeaderReader = Pick<Headers, 'get'>
+
+function safeServerMessage(value: unknown) {
+  if (typeof value !== 'string' && typeof value !== 'number') return ''
+  const message = String(value).trim()
+  if (!message || /<!doctype\s+html|<html\b|<\/?[a-z][^>]*>/i.test(message)) return ''
+  return message
+}
+
+function parseRetryAfter(headers: HeaderReader) {
+  const value = headers.get('Retry-After')?.trim()
+  if (!value) return undefined
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    const seconds = Number(value)
+    return Number.isFinite(seconds) ? Math.max(0, Math.ceil(seconds)) : undefined
+  }
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return undefined
+  return Math.max(0, Math.ceil((timestamp - Date.now()) / 1000))
+}
+
+export function parseErrorPayload(status: number, headers: HeaderReader, body?: unknown, text = '') {
+  const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : undefined
+  const plainText = typeof body === 'string' ? safeServerMessage(body) : body == null ? safeServerMessage(text) : ''
+  const message = safeServerMessage(record?.message) || safeServerMessage(record?.error) || plainText || `请求失败（${status}）`
+  const code = safeServerMessage(record?.code) || undefined
+  return {
+    message,
+    code,
+    retryAfter: parseRetryAfter(headers),
+    details: body,
+  }
+}
+
+function handleAuthExpired(status: number, suppressAuthRedirect: boolean) {
+  if (suppressAuthRedirect || status !== 401 || router.currentRoute.value.meta?.public === true || router.currentRoute.value.name === 'login') return
+  // 统一广播会话过期，auth.ts 负责清理本地状态，路由负责回到登录页。
+  window.dispatchEvent(new Event('ft:auth-expired'))
+  void router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
+}
+
+function responsePayload(contentType: string, text: string) {
+  const trimmed = text.trim()
+  const looksLikeJson = contentType.includes('application/json') || contentType.includes('+json') || trimmed.startsWith('{') || trimmed.startsWith('[')
+  return looksLikeJson && text ? safeJSON(text) : text
+}
+
+function apiError(status: number, headers: HeaderReader, payload: unknown, text: string, suppressAuthRedirect: boolean) {
+  const parsed = parseErrorPayload(status, headers, payload, text)
+  handleAuthExpired(status, suppressAuthRedirect)
+  return new ApiError(parsed.message, status, parsed.details, parsed.code, parsed.retryAfter)
+}
+
 async function parseResponse<T>(response: Response, suppressAuthRedirect = false): Promise<T> {
   const contentType = response.headers.get('content-type') || ''
-  const isJson = contentType.includes('application/json')
-  const payload = isJson ? await response.json().catch(() => null) : await response.text().catch(() => '')
+  const text = await response.text().catch(() => '')
+  const payload = responsePayload(contentType, text)
 
   if (!response.ok) {
-    // 后端统一返回 {error}；兼容 {message} 是为了方便未来接入其他服务端错误格式。
-    const message =
-      (payload && typeof payload === 'object' && ('message' in payload || 'error' in payload)
-        ? String((payload as { message?: string; error?: string }).message || (payload as { error?: string }).error)
-        : '') || `请求失败（${response.status}）`
-    if (!suppressAuthRedirect && response.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
-      // 统一广播会话过期，auth.ts 负责清理本地状态，路由负责回到登录页。
-      window.dispatchEvent(new Event('ft:auth-expired'))
-      router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
-    }
-    throw new ApiError(message, response.status, payload)
+    throw apiError(response.status, response.headers, payload, text, suppressAuthRedirect)
   }
 
   return (payload ?? {}) as T
@@ -89,70 +138,23 @@ async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T>
     )
   } catch (err) {
     if (err instanceof ApiError) throw err
+    if (err instanceof DOMException && err.name === 'AbortError') throw new ApiError('请求已取消。', 0, { aborted: true })
     throw new ApiError('无法连接服务器，请检查后端服务或网络连接。', 0, err)
   }
+}
+
+async function publicRequest<T>(url: string, options: ApiRequestInit = {}): Promise<T> {
+  return request<T>(url, {
+    ...options,
+    credentials: 'omit',
+    suppressAuthRedirect: true,
+  })
 }
 
 function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {}): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     const { onProgress, signal, suppressAuthRedirect = false, withCredentials = true, headers } = options
-    let settled = false
-    const rejectOnce = (err: ApiError) => {
-      if (settled) return
-      settled = true
-      reject(err)
-    }
-    const resolveOnce = (value: T) => {
-      if (settled) return
-      settled = true
-      resolve(value)
-    }
-    if (signal?.aborted) {
-      rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
-      return
-    }
-    const abortHandler = () => xhr.abort()
-    signal?.addEventListener('abort', abortHandler, { once: true })
-    xhr.open('POST', url)
-    xhr.withCredentials = withCredentials
-    Object.entries(headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value))
-    xhr.upload.onprogress = (event) => {
-      const total = event.lengthComputable && event.total > 0 ? event.total : 0
-      const loaded = event.loaded || 0
-      const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
-      onProgress?.({ loaded, total, percent })
-    }
-    xhr.onerror = () => rejectOnce(new ApiError('上传连接中断。请检查网络、后端是否仍在运行，或文件是否超过服务端/代理上传上限。', 0))
-    xhr.ontimeout = () => rejectOnce(new ApiError('上传超时。请检查网络稳定性，或调高反向代理上传超时时间。', 0))
-    xhr.onabort = () => rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
-    xhr.onload = () => {
-      signal?.removeEventListener('abort', abortHandler)
-      const contentType = xhr.getResponseHeader('content-type') || ''
-      const text = xhr.responseText || ''
-      const payload = contentType.includes('application/json') && text ? safeJSON(text) : text
-      if (xhr.status < 200 || xhr.status >= 300) {
-        const message =
-          (payload && typeof payload === 'object' && ('message' in payload || 'error' in payload)
-            ? String((payload as { message?: string; error?: string }).message || (payload as { error?: string }).error)
-            : '') || `请求失败（${xhr.status}）`
-        if (!suppressAuthRedirect && xhr.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
-          window.dispatchEvent(new Event('ft:auth-expired'))
-          router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
-        }
-        rejectOnce(new ApiError(message, xhr.status, payload))
-        return
-      }
-      resolveOnce((payload || {}) as T)
-    }
-    xhr.send(form)
-  })
-}
-
-function uploadRaw<T>(rawUploadUrl: string, lease: string, file: File, options: UploadOptions = {}): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    const { onProgress, signal, suppressAuthRedirect = true } = options
     let settled = false
     const abortHandler = () => xhr.abort()
     const cleanup = () => signal?.removeEventListener('abort', abortHandler)
@@ -173,37 +175,90 @@ function uploadRaw<T>(rawUploadUrl: string, lease: string, file: File, options: 
       return
     }
     signal?.addEventListener('abort', abortHandler, { once: true })
-    xhr.open('POST', buildTransferUrl(rawUploadUrl))
-    xhr.withCredentials = false
-    xhr.setRequestHeader('Authorization', `Bearer ${lease}`)
-    xhr.upload.onprogress = (event) => {
-      const total = event.lengthComputable && event.total > 0 ? event.total : 0
-      const loaded = event.loaded || 0
-      const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
-      onProgress?.({ loaded, total, percent })
-    }
-    xhr.onerror = () => rejectOnce(new ApiError('上传连接中断。请检查网络、后端是否仍在运行，或文件是否超过服务端/代理上传上限。', 0))
-    xhr.ontimeout = () => rejectOnce(new ApiError('上传超时。请检查网络稳定性，或调高反向代理上传超时时间。', 0))
-    xhr.onabort = () => rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
-    xhr.onload = () => {
-      const contentType = xhr.getResponseHeader('content-type') || ''
-      const text = xhr.responseText || ''
-      const payload = contentType.includes('application/json') && text ? safeJSON(text) : text
-      if (xhr.status < 200 || xhr.status >= 300) {
-        const message =
-          (payload && typeof payload === 'object' && ('message' in payload || 'error' in payload)
-            ? String((payload as { message?: string; error?: string }).message || (payload as { error?: string }).error)
-            : '') || `请求失败（${xhr.status}）`
-        if (!suppressAuthRedirect && xhr.status === 401 && router.currentRoute.value.meta?.public !== true && router.currentRoute.value.name !== 'login') {
-          window.dispatchEvent(new Event('ft:auth-expired'))
-          router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
-        }
-        rejectOnce(new ApiError(message, xhr.status, payload))
-        return
+    try {
+      xhr.open('POST', url)
+      // 上传不设置固定总时长；大型文件可以持续传输数小时，取消仅由用户或 AbortSignal 触发。
+      xhr.timeout = 0
+      xhr.withCredentials = withCredentials
+      Object.entries(headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value))
+      xhr.upload.onprogress = (event) => {
+        const total = event.lengthComputable && event.total > 0 ? event.total : 0
+        const loaded = event.loaded || 0
+        const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+        onProgress?.({ loaded, total, percent })
       }
-      resolveOnce((payload || {}) as T)
+      xhr.onerror = () => rejectOnce(new ApiError('上传连接中断。请检查网络、后端是否仍在运行，或文件是否超过服务端/代理上传上限。', 0))
+      xhr.onabort = () => rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
+      xhr.onload = () => {
+        const contentType = xhr.getResponseHeader('content-type') || ''
+        const text = xhr.responseText || ''
+        const payload = responsePayload(contentType, text)
+        if (xhr.status < 200 || xhr.status >= 300) {
+          rejectOnce(apiError(xhr.status, { get: (name) => xhr.getResponseHeader(name) }, payload, text, suppressAuthRedirect))
+          return
+        }
+        resolveOnce((payload || {}) as T)
+      }
+      xhr.send(form)
+    } catch (err) {
+      rejectOnce(new ApiError('上传请求无法发送。', 0, err))
     }
-    xhr.send(file)
+  })
+}
+
+function uploadRaw<T>(rawUploadUrl: string, lease: string, file: File, options: UploadOptions = {}): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const { onProgress, signal } = options
+    let settled = false
+    const abortHandler = () => xhr.abort()
+    const cleanup = () => signal?.removeEventListener('abort', abortHandler)
+    const rejectOnce = (err: ApiError) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(err)
+    }
+    const resolveOnce = (value: T) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(value)
+    }
+    if (signal?.aborted) {
+      rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
+      return
+    }
+    signal?.addEventListener('abort', abortHandler, { once: true })
+    try {
+      xhr.open('POST', buildTransferUrl(rawUploadUrl))
+      // 原始上传是一文件一请求，不设置会中断长时间传输的固定总超时。
+      xhr.timeout = 0
+      xhr.withCredentials = false
+      xhr.setRequestHeader('Authorization', `Bearer ${lease}`)
+      xhr.upload.onprogress = (event) => {
+        const total = event.lengthComputable && event.total > 0 ? event.total : 0
+        const loaded = event.loaded || 0
+        const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+        onProgress?.({ loaded, total, percent })
+      }
+      xhr.onerror = () => rejectOnce(new ApiError('上传连接中断。请检查网络、后端是否仍在运行，或文件是否超过服务端/代理上传上限。', 0))
+      xhr.onabort = () => rejectOnce(new ApiError('上传已取消。', 0, { aborted: true }))
+      xhr.onload = () => {
+        const contentType = xhr.getResponseHeader('content-type') || ''
+        const text = xhr.responseText || ''
+        const payload = responsePayload(contentType, text)
+        if (xhr.status < 200 || xhr.status >= 300) {
+          // Bearer lease 已独立授权，401 只反馈给当前上传，绝不改变页面登录状态。
+          rejectOnce(apiError(xhr.status, { get: (name) => xhr.getResponseHeader(name) }, payload, text, true))
+          return
+        }
+        resolveOnce((payload || {}) as T)
+      }
+      xhr.send(file)
+    } catch (err) {
+      rejectOnce(new ApiError('上传请求无法发送。', 0, err))
+    }
   })
 }
 
@@ -231,6 +286,7 @@ export interface AuditFilter {
   pageSize?: number
   action?: string
   status?: string
+  keyword?: string
 }
 
 export const api = {
@@ -247,22 +303,8 @@ export const api = {
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   dirs: () => request<DirectoryInfo[]>('/api/dirs'),
   uploadLimits: () => request<UploadLimits>('/api/upload-policy'),
-  listFiles: (dirId: string, path = '') => request<ListFilesResponse>(`/api/files/list${query({ dirId, path })}`),
-  upload: (dirId: string, path: string, files: FileList | File[]) => {
-    const form = new FormData()
-    form.set('dirId', dirId)
-    form.set('path', path)
-    Array.from(files).forEach((file) => form.append('files', file))
-    return request<{ ok: boolean; uploaded?: number }>('/api/files/upload', { method: 'POST', body: form })
-  },
-  uploadOne: (dirId: string, path: string, file: File, options: UploadOptions = {}) => {
-    // 单文件上传用于队列逐项重试，失败时不会影响队列中其他文件的状态。
-    const form = new FormData()
-    form.set('dirId', dirId)
-    form.set('path', path)
-    form.append('files', file)
-    return uploadForm<{ ok: boolean; uploaded?: number }>(`/api/files/upload${query({ dirId, path })}`, form, options)
-  },
+  listFiles: (dirId: string, path = '', page = 1, pageSize = 100) =>
+    request<ListFilesResponse>(`/api/files/list${query({ dirId, path, page, pageSize })}`),
   createUploadLease: (payload: UploadLeaseRequest) =>
     request<UploadLeaseResponse>('/api/files/upload-lease', { method: 'POST', body: JSON.stringify(payload) }),
   uploadByLease: (lease: UploadLeaseResponse, file: File, options: UploadOptions = {}) => {
@@ -295,9 +337,9 @@ export const api = {
   deleteToken: (id: string | number) =>
     request<{ ok: boolean }>(`/api/tokens/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
   auditLogs: (filter: AuditFilter = {}) =>
-    request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status })}`),
-  auditLogPage: (filter: AuditFilter = {}) =>
-    request<AuditLogPage>(`/api/audit/logs${query({ page: filter.page, pageSize: filter.pageSize, action: filter.action, status: filter.status })}`),
+    request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status, keyword: filter.keyword })}`),
+  auditLogPage: (filter: AuditFilter = {}, signal?: AbortSignal) =>
+    request<AuditLogPage>(`/api/audit/logs${query({ page: filter.page, pageSize: filter.pageSize, action: filter.action, status: filter.status, keyword: filter.keyword })}`, { signal }),
   activeTransfers: () => request<{ transfers: TransferRecord[] }>('/api/transfers/active'),
   cancelTransfer: (id: string) => request<{ ok: boolean }>(`/api/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   safeConfig: () => request<SafeConfig>('/api/config'),
@@ -319,7 +361,7 @@ export const api = {
     request<{ ok: boolean }>(`/api/config/resources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // 公开分享接口不带登录态要求，全部依赖 token 或下载票据授权。
   publicTokenInfo: (token: string) =>
-    request<TokenInfo>(`/t/${encodeURIComponent(token)}/info`),
+    publicRequest<TokenInfo>(`/t/${encodeURIComponent(token)}/info`),
   publicUpload: (token: string, file: File, options: UploadOptions = {}) => {
     const form = new FormData()
     form.append('files', file)
@@ -353,14 +395,10 @@ export const api = {
       })
   },
   createPublicUploadLease: (token: string, payload: PublicUploadLeaseRequest) =>
-    request<PublicUploadLeaseResponse>(`/t/${encodeURIComponent(token)}/upload-lease`, {
+    publicRequest<PublicUploadLeaseResponse>(`/t/${encodeURIComponent(token)}/upload-lease`, {
       method: 'POST',
       body: JSON.stringify(payload),
-      suppressAuthRedirect: true,
     }),
   createPublicDownloadLease: (token: string) =>
-    request<DownloadLeaseResponse>(`/t/${encodeURIComponent(token)}/download-lease`, { method: 'POST' }),
+    publicRequest<DownloadLeaseResponse>(`/t/${encodeURIComponent(token)}/download-lease`, { method: 'POST' }),
 }
-
-export const downloadUrl = (dirId: string, path: string) => `/api/files/download${query({ dirId, path })}`
-export const publicDownloadUrl = (token: string) => `/t/${encodeURIComponent(token)}/download`

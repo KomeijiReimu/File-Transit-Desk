@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ApiError, api } from '@/api'
 import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -10,10 +11,14 @@ import StateBlock from '@/components/StateBlock.vue'
 import type { DirectoryInfo, FilePickerSelection, ResourcePayload, SafeConfig, UploadPolicyPayload } from '@/types'
 
 const configData = ref<SafeConfig | null>(null)
+const router = useRouter()
 const loading = ref(true)
 const saving = ref(false)
 const policySaving = ref(false)
 const error = ref('')
+const loadError = ref('')
+const lastSuccessfulAt = ref<Date | null>(null)
+const dataStale = ref(false)
 const success = ref('')
 const editingId = ref<string | null>(null)
 const pendingDelete = ref<DirectoryInfo | null>(null)
@@ -21,6 +26,15 @@ const pendingUploadPolicy = ref<UploadPolicyPayload | null>(null)
 const deleteError = ref('')
 const policyError = ref('')
 const pickerOpen = ref(false)
+const resourceFormRef = ref<HTMLFormElement | null>(null)
+const idInputRef = ref<HTMLInputElement | null>(null)
+const nameInputRef = ref<HTMLInputElement | null>(null)
+const pathInputRef = ref<HTMLInputElement | null>(null)
+const permissionGroupRef = ref<HTMLFieldSetElement | null>(null)
+const pendingEdit = ref<DirectoryInfo | null>(null)
+const pendingDiscardAction = ref<'leave' | 'reset' | 'reload' | ''>('')
+const pendingLeavePath = ref('')
+let allowNextNavigation = false
 
 const form = reactive<ResourcePayload>({
   id: '',
@@ -35,13 +49,21 @@ const uploadPolicy = reactive({
   allowedText: '',
   blockedText: '',
 })
+const fieldErrors = reactive({ id: '', name: '', path: '', permissions: '' })
 
 const resources = computed(() => configData.value?.resources || [])
 const storage = computed(() => configData.value?.storage)
 const tokens = computed(() => configData.value?.tokens)
 const downloads = computed(() => configData.value?.downloads)
-const canSubmit = computed(() => form.id.trim() && form.name.trim() && form.path.trim() && (form.type === 'file' || form.allowDownload || form.allowUpload))
 const editing = computed(() => Boolean(editingId.value))
+const formSignature = computed(() => JSON.stringify(form))
+const policySignature = computed(() => JSON.stringify(uploadPolicy))
+const formBaseline = ref(formSignature.value)
+const policyBaseline = ref(policySignature.value)
+const formDirty = computed(() => formSignature.value !== formBaseline.value)
+const policyDirty = computed(() => policySignature.value !== policyBaseline.value)
+const hasUnsavedChanges = computed(() => formDirty.value || policyDirty.value)
+const discardDialogOpen = computed(() => Boolean(pendingEdit.value) || Boolean(pendingDiscardAction.value))
 const typeOptions = [
   { label: '目录', value: 'directory', hint: '可浏览文件夹，可按需允许上传' },
   { label: '单文件', value: 'file', hint: '只暴露一个文件，不能上传' },
@@ -58,14 +80,17 @@ function resourceTypeLabel(resource: DirectoryInfo | ResourcePayload) {
 function resetForm() {
   editingId.value = null
   Object.assign(form, { id: '', name: '', type: 'directory', path: '', allowDownload: true, allowUpload: false })
+  Object.assign(fieldErrors, { id: '', name: '', path: '', permissions: '' })
+  formBaseline.value = formSignature.value
 }
 
 function syncUploadPolicy() {
   uploadPolicy.allowedText = storage.value?.allowedExtensions.join('\n') || ''
   uploadPolicy.blockedText = storage.value?.blockedExtensions.join('\n') || ''
+  policyBaseline.value = policySignature.value
 }
 
-function editResource(resource: DirectoryInfo) {
+function applyEditResource(resource: DirectoryInfo) {
   editingId.value = resource.id
   Object.assign(form, {
     id: resource.id,
@@ -77,19 +102,72 @@ function editResource(resource: DirectoryInfo) {
   })
   success.value = ''
   error.value = ''
+  Object.assign(fieldErrors, { id: '', name: '', path: '', permissions: '' })
+  formBaseline.value = formSignature.value
+  void nextTick(() => {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    resourceFormRef.value?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' })
+    nameInputRef.value?.focus({ preventScroll: true })
+  })
+}
+
+function requestEditResource(resource: DirectoryInfo) {
+  if (formDirty.value) {
+    pendingEdit.value = resource
+    pendingDiscardAction.value = ''
+    return
+  }
+  applyEditResource(resource)
+}
+
+function requestResetForm() {
+  if (!formDirty.value) {
+    resetForm()
+    return
+  }
+  pendingEdit.value = null
+  pendingDiscardAction.value = 'reset'
+}
+
+function requestReload() {
+  if (!hasUnsavedChanges.value) {
+    void load()
+    return
+  }
+  pendingEdit.value = null
+  pendingDiscardAction.value = 'reload'
 }
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   error.value = ''
   try {
     configData.value = await api.safeConfig()
     syncUploadPolicy()
+    lastSuccessfulAt.value = new Date()
+    dataStale.value = false
   } catch (err) {
-    error.value = err instanceof ApiError ? err.message : '配置加载失败。'
+    loadError.value = err instanceof ApiError ? err.message : '配置加载失败。'
+    dataStale.value = lastSuccessfulAt.value !== null
   } finally {
     loading.value = false
   }
+}
+
+async function validateResourceForm() {
+  fieldErrors.id = !form.id.trim()
+    ? '请输入资源 ID。'
+    : /^[a-zA-Z0-9_-]+$/.test(form.id.trim()) ? '' : '资源 ID 只能包含字母、数字、短横线和下划线。'
+  fieldErrors.name = form.name.trim() ? '' : '请输入显示名称。'
+  fieldErrors.path = form.path.trim() ? '' : '请输入或选择服务端路径。'
+  fieldErrors.permissions = form.type === 'file' || form.allowDownload || form.allowUpload ? '' : '目录资源至少需要允许下载或上传其中一项。'
+  await nextTick()
+  if (fieldErrors.id) idInputRef.value?.focus()
+  else if (fieldErrors.name) nameInputRef.value?.focus()
+  else if (fieldErrors.path) pathInputRef.value?.focus()
+  else if (fieldErrors.permissions) permissionGroupRef.value?.focus()
+  return !Object.values(fieldErrors).some(Boolean)
 }
 
 function parseExtensions(text: string) {
@@ -168,10 +246,7 @@ function handlePick(selection: FilePickerSelection) {
 async function submitResource() {
   error.value = ''
   success.value = ''
-  if (!canSubmit.value) {
-    error.value = '请填写资源 ID、名称、服务端路径，并至少允许下载或上传其中一项。'
-    return
-  }
+  if (!(await validateResourceForm())) return
   const payload: ResourcePayload = { ...form }
   if (payload.type === 'file') {
     // 单文件资源只作为下载入口，避免把上传目标误写到文件路径上。
@@ -190,6 +265,35 @@ async function submitResource() {
   } finally {
     saving.value = false
   }
+}
+
+function cancelDiscard() {
+  pendingEdit.value = null
+  pendingDiscardAction.value = ''
+  pendingLeavePath.value = ''
+}
+
+function confirmDiscard() {
+  const editTarget = pendingEdit.value
+  const action = pendingDiscardAction.value
+  const leavePath = pendingLeavePath.value
+  cancelDiscard()
+  if (editTarget) applyEditResource(editTarget)
+  else if (action === 'reset') resetForm()
+  else if (action === 'reload') {
+    resetForm()
+    void load()
+  }
+  else if (action === 'leave' && leavePath) {
+    allowNextNavigation = true
+    void router.push(leavePath)
+  }
+}
+
+function handleBeforeUnload(event: BeforeUnloadEvent) {
+  if (!hasUnsavedChanges.value) return
+  event.preventDefault()
+  event.returnValue = '配置尚未保存。'
 }
 
 async function confirmDelete() {
@@ -215,58 +319,86 @@ watch(() => form.type, (type) => {
     form.allowUpload = false
   }
 })
+watch(() => form.id, () => { fieldErrors.id = '' })
+watch(() => form.name, () => { fieldErrors.name = '' })
+watch(() => form.path, () => { fieldErrors.path = '' })
+watch(() => [form.allowDownload, form.allowUpload], () => { fieldErrors.permissions = '' })
 
-onMounted(load)
+onBeforeRouteLeave((to) => {
+  if (allowNextNavigation || !hasUnsavedChanges.value) return true
+  pendingEdit.value = null
+  pendingDiscardAction.value = 'leave'
+  pendingLeavePath.value = to.fullPath
+  return false
+})
+
+onMounted(() => {
+  void load()
+  window.addEventListener('beforeunload', handleBeforeUnload)
+})
+onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnload))
 </script>
 
 <template>
   <section class="page-stack config-page">
     <header class="page-header split">
       <div>
-        <p class="eyebrow">Configuration</p>
+        <p class="eyebrow">系统配置</p>
         <h1>配置管理</h1>
         <p>管理员可以在这里管理共享目录和单文件资源；认证、数据库和监听端口等敏感配置仍保留在服务端配置文件中。</p>
       </div>
-      <button class="ghost-btn" type="button" @click="load">刷新配置</button>
+      <button class="ghost-btn" type="button" @click="requestReload">刷新配置</button>
     </header>
 
-    <StateBlock :loading="loading" :error="error" />
-    <div v-if="success" class="alert success">{{ success }}</div>
-    <div v-if="configData && !configData.configWritable" class="alert error">当前服务未记录配置文件路径，暂不能在线写回配置。</div>
+    <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? loadError : ''" retry-label="重新加载" @retry="load" />
+    <div v-if="dataStale" class="alert info stale-alert" role="status">
+      <span>刷新失败，当前显示的是 {{ lastSuccessfulAt?.toLocaleTimeString() }} 获取的旧配置。</span>
+      <button class="ghost-btn" type="button" :disabled="loading" @click="requestReload">立即重试</button>
+    </div>
+    <div v-if="error" class="alert error" role="alert">{{ error }}</div>
+    <div v-if="success" class="alert success" role="status" aria-live="polite">{{ success }}</div>
+    <div v-if="configData && !configData.configWritable" class="alert error" role="alert">当前服务未记录配置文件路径，暂不能在线写回配置。</div>
 
-    <div class="grid two">
-      <form class="panel form-grid resource-form" @submit.prevent="submitResource">
+    <div v-if="configData" class="grid two">
+      <form ref="resourceFormRef" class="panel form-grid resource-form" @submit.prevent="submitResource">
         <div class="form-title-row">
           <div>
             <h2>{{ editing ? '编辑共享资源' : '新增共享资源' }}</h2>
             <p class="muted-text">目录资源可以浏览和上传；单文件资源只暴露一个文件用于下载。</p>
           </div>
-          <button v-if="editing" class="mini-btn" type="button" @click="resetForm">取消编辑</button>
+          <button v-if="editing" class="mini-btn" type="button" @click="requestResetForm">取消编辑</button>
         </div>
         <label>类型
           <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择资源类型" />
         </label>
         <div class="inline-fields">
           <label>资源 ID
-            <input v-model.trim="form.id" :disabled="editing" placeholder="例如 photos 或 manual" />
-            <small>只能包含字母、数字、短横线和下划线。</small>
+            <input ref="idInputRef" v-model.trim="form.id" :disabled="editing" placeholder="例如 photos 或 manual" :aria-invalid="Boolean(fieldErrors.id)" aria-describedby="resource-id-help resource-id-error" />
+            <small id="resource-id-help">只能包含字母、数字、短横线和下划线。</small>
+            <small v-if="fieldErrors.id" id="resource-id-error" class="field-error">{{ fieldErrors.id }}</small>
           </label>
           <label>显示名称
-            <input v-model.trim="form.name" placeholder="例如 照片 或 使用说明" />
+            <input ref="nameInputRef" v-model.trim="form.name" placeholder="例如 照片 或 使用说明" :aria-invalid="Boolean(fieldErrors.name)" aria-describedby="resource-name-error" />
+            <small v-if="fieldErrors.name" id="resource-name-error" class="field-error">{{ fieldErrors.name }}</small>
           </label>
         </div>
         <label>服务端路径
           <div class="path-picker-line">
-            <input v-model.trim="form.path" :placeholder="form.type === 'file' ? '/data/manual.pdf' : '/data/photos'" />
+            <input ref="pathInputRef" v-model.trim="form.path" :placeholder="form.type === 'file' ? '/data/manual.pdf' : '/data/photos'" :aria-invalid="Boolean(fieldErrors.path)" aria-describedby="resource-path-help resource-path-error" />
             <button class="ghost-btn" type="button" @click="pickerOpen = true">浏览</button>
           </div>
-          <small>{{ form.type === 'file' ? '必须是已存在且可读取的具体文件。' : '必须是已存在目录；允许上传时还会校验写入权限。' }}</small>
+          <small id="resource-path-help">{{ form.type === 'file' ? '必须是已存在且可读取的具体文件。' : '必须是已存在目录；允许上传时还会校验写入权限。' }}</small>
+          <small v-if="fieldErrors.path" id="resource-path-error" class="field-error">{{ fieldErrors.path }}</small>
         </label>
-        <div class="permission-row">
+        <fieldset ref="permissionGroupRef" class="permission-fieldset" tabindex="-1" :aria-invalid="Boolean(fieldErrors.permissions)" aria-describedby="resource-permission-error">
+          <legend>访问权限</legend>
+          <div class="permission-row">
           <label class="switch-line"><input v-model="form.allowDownload" type="checkbox" :disabled="form.type === 'file'" /> 允许下载</label>
           <label class="switch-line"><input v-model="form.allowUpload" type="checkbox" :disabled="form.type === 'file'" /> 允许上传</label>
-        </div>
-        <button class="primary-btn" type="submit" :disabled="saving || !canSubmit || !configData?.configWritable">
+          </div>
+          <small v-if="fieldErrors.permissions" id="resource-permission-error" class="field-error">{{ fieldErrors.permissions }}</small>
+        </fieldset>
+        <button class="primary-btn" type="submit" :disabled="saving || !configData?.configWritable">
           {{ saving ? '保存中…' : editing ? '保存修改' : '添加资源' }}
         </button>
       </form>
@@ -278,7 +410,7 @@ onMounted(load)
       </div>
     </div>
 
-    <section class="cards-grid" aria-label="共享资源列表">
+    <section v-if="configData" class="cards-grid" aria-label="共享资源列表">
       <article v-for="resource in resources" :key="resource.id" class="config-card resource-card">
         <div class="config-icon" :data-type="resourceType(resource)" aria-hidden="true">
           <AppIcon :name="resourceType(resource) === 'file' ? 'file-cog' : 'folder-cog'" :size="28" />
@@ -297,13 +429,13 @@ onMounted(load)
             <span class="pill" :class="resource.allowUpload || resource.canUpload ? 'ok' : 'muted'">上传</span>
           </div>
           <div class="row-actions">
-            <button class="mini-btn" type="button" @click="editResource(resource)">编辑</button>
+            <button class="mini-btn" type="button" @click="requestEditResource(resource)">编辑</button>
             <button class="mini-btn danger" type="button" :disabled="!configData?.configWritable" @click="pendingDelete = resource; deleteError = ''">删除</button>
           </div>
         </div>
       </article>
     </section>
-    <EmptyState v-if="!loading && !resources.length" title="没有共享资源" description="添加一个目录或单文件资源后，普通用户即可在文件浏览中看到它。" />
+    <EmptyState v-if="configData && !loading && !loadError && !resources.length" title="没有共享资源" description="添加一个目录或单文件资源后，普通用户即可在文件浏览中看到它。" />
 
     <section v-if="configData" class="panel policy-panel">
       <h2>运行策略概览</h2>
@@ -327,7 +459,7 @@ onMounted(load)
         </div>
         <button class="mini-btn" type="button" @click="uploadPolicy.allowedText = ''; uploadPolicy.blockedText = ''">清空策略</button>
       </div>
-      <div v-if="policyError" class="alert error">{{ policyError }}</div>
+      <div v-if="policyError" class="alert error" role="alert">{{ policyError }}</div>
       <div class="inline-fields">
         <label>允许扩展名白名单
           <textarea v-model="uploadPolicy.allowedText" rows="5" placeholder="例如：&#10;.pdf&#10;.zip&#10;.jpg" />
@@ -342,6 +474,17 @@ onMounted(load)
     </section>
 
     <ServerFilePicker v-model:open="pickerOpen" :mode="form.type === 'file' ? 'file' : 'directory'" @confirm="handlePick" />
+
+    <ConfirmDialog
+      :open="discardDialogOpen"
+      title="放弃未保存的修改？"
+      message="当前配置尚未保存。继续后，这些修改会丢失且无法恢复。"
+      :detail="pendingEdit ? `随后将编辑：${pendingEdit.name}` : pendingDiscardAction === 'leave' ? '随后将离开配置管理页面。' : pendingDiscardAction === 'reload' ? '随后将重新读取服务端配置。' : '随后将清空当前资源表单。'"
+      confirm-label="放弃修改"
+      :danger="true"
+      @confirm="confirmDiscard"
+      @cancel="cancelDiscard"
+    />
 
     <ConfirmDialog
       :open="Boolean(pendingDelete)"
