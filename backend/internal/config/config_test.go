@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"filetrans-backend/internal/security"
@@ -257,7 +258,7 @@ func TestConfigValidatesDownloadContentHashLimit(t *testing.T) {
 	c.Auth.DevAllowFixedCode = true
 	c.Auth.TOTPSecret = ""
 	c.Auth.Admin.Username = "admin"
-	c.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	setValidTestAdminPassword(c)
 	c.Downloads.ContentHashMaxMB = -1
 	if err := c.validate(); err == nil {
 		t.Fatalf("expected negative content hash limit to fail validation")
@@ -560,7 +561,24 @@ func validTestConfig() *Config {
 	c.Auth.DevAllowFixedCode = true
 	c.Auth.TOTPSecret = ""
 	c.Auth.Admin.Username = "admin"
-	c.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	setValidTestAdminPassword(c)
 	c.Storage.Dirs = []Dir{{ID: "default", Name: "Default", Path: "/tmp", AllowDownload: true, AllowUpload: true}}
 	return c
+}
+
+var (
+	validTestAdminPasswordOnce sync.Once
+	validTestAdminPasswordPHC  string
+)
+
+func setValidTestAdminPassword(c *Config) {
+	validTestAdminPasswordOnce.Do(func() {
+		var err error
+		validTestAdminPasswordPHC, err = security.Hash([]byte("secret"))
+		if err != nil {
+			panic("hash test admin password: " + err.Error())
+		}
+	})
+	c.Auth.Admin.PasswordHash = validTestAdminPasswordPHC
+	c.Auth.Admin.PasswordSHA256 = ""
 }

@@ -148,8 +148,12 @@ func TestResolveAllowsInside(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rel != "a" || full != filepath.Join(dir, "a") {
-		t.Fatalf("got full=%q rel=%q", full, rel)
+	same, err := SamePath(full, filepath.Join(dir, "a"))
+	if err != nil {
+		t.Fatalf("compare resolved path: %v", err)
+	}
+	if rel != "a" || !same {
+		t.Fatalf("got full=%q rel=%q same=%v", full, rel, same)
 	}
 }
 

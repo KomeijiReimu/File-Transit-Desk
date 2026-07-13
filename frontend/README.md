@@ -110,7 +110,7 @@ docker build -t file-trans-frontend .
 docker run --rm -p 8081:80 file-trans-frontend
 ```
 
-镜像基于 `oven/bun:1.3.14-alpine` 使用 `bun install --frozen-lockfile` 完成可复现依赖安装与生产构建，再用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:17878`。nginx 已将上传请求体上限设为 `10g`，关闭上传代理缓冲，并把请求体、响应发送及代理读写的连续无 I/O 进展空闲超时设为 3600 秒；这些都不是从请求开始计算的总传输时长。内置 access log 只记录脱敏 URI，`/t/<token>` 会显示为 `/t/[redacted]`，查询参数、Referer 和 Authorization 不会写入日志；外部 LB、CDN、WAF 或其他代理仍须单独配置相同的 capability 脱敏策略。如果后端上传上限调得更高，需要同步调整 `nginx.conf`。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。镜像使用 `STOPSIGNAL SIGQUIT` 让 nginx 优雅退出，Compose 的 24 小时 grace 是外部强杀上限，不是代理或应用的总传输时长；nginx 配置不设置有限的 `worker_shutdown_timeout`。
+镜像先在 Bun 1.3.14 Debian/Trixie 阶段使用 `bun install --frozen-lockfile` 按锁文件安装依赖，再由真实 Node 22 Trixie 阶段运行完整的 `vue-tsc` 类型检查与 Vite 生产构建，以确保完整的 Vue SFC 类型检查；最终使用 `nginx:1.27-alpine` 托管静态资源，并将 `/api/` 与 `/t/` 反向代理到 `http://backend:17878`。nginx 已将上传请求体上限设为 `10g`，关闭上传代理缓冲，并把请求体、响应发送及代理读写的连续无 I/O 进展空闲超时设为 3600 秒；这些都不是从请求开始计算的总传输时长。内置 access log 只记录脱敏 URI，`/t/<token>` 会显示为 `/t/[redacted]`，查询参数、Referer 和 Authorization 不会写入日志；外部 LB、CDN、WAF 或其他代理仍须单独配置相同的 capability 脱敏策略。如果后端上传上限调得更高，需要同步调整 `nginx.conf`。在 Docker Compose 中建议将后端服务命名为 `backend`；如服务名不同，请修改 `nginx.conf` 中的 `proxy_pass`。镜像使用 `STOPSIGNAL SIGQUIT` 让 nginx 优雅退出，Compose 的 24 小时 grace 是外部强杀上限，不是代理或应用的总传输时长；nginx 配置不设置有限的 `worker_shutdown_timeout`。
 
 ## 接口约定
 

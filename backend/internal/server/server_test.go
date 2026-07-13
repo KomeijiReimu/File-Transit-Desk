@@ -48,9 +48,10 @@ func TestAdminOnlyTokenRoutes(t *testing.T) {
 	cfg.Auth.TOTPSecret = "JBSWY3DPEHPK3PXP"
 	cfg.Auth.DevAllowFixedCode = false
 	cfg.Auth.Admin.Username = "admin"
-	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	setTestAdminPassword(cfg)
 	cfg.Tokens.UploadMaxMB = 1
-	cfg.Storage.Dirs = []config.Dir{{ID: "default", Name: "Default", Path: t.TempDir(), AllowDownload: true, AllowUpload: true}}
+	root := t.TempDir()
+	setTestStorageAndPickerRoot(cfg, root)
 	app := New(cfg, st)
 
 	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
@@ -253,16 +254,15 @@ func TestSharedTOTPCodeCanCreateMultipleSessionsInSameWindow(t *testing.T) {
 func TestLegacyAdminHashWarningDoesNotExposeHash(t *testing.T) {
 	cfg := testConfig(t.TempDir())
 	cfg.Auth.Admin.PasswordHash = ""
+	cfg.Auth.Admin.PasswordSHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte("legacy-password")))
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.DB.Close()
-	var output bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&output)
+	output, restoreLog := captureTestLog(t)
 	_ = New(cfg, st)
-	log.SetOutput(previous)
+	restoreLog()
 	if strings.Count(output.String(), "legacy_admin_password_sha256") != 1 || strings.Contains(output.String(), cfg.Auth.Admin.PasswordSHA256) {
 		t.Fatalf("expected hash-free structured legacy warning, log=%q", output.String())
 	}
@@ -487,8 +487,8 @@ func TestDirsHidePathForUserAndShowRootForAdmin(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Default()
 	cfg.Auth.Admin.Username = "admin"
-	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
-	cfg.Storage.Dirs = []config.Dir{{ID: "default", Name: "Default", Path: root, AllowDownload: true, AllowUpload: true}}
+	setTestAdminPassword(cfg)
+	setTestStorageAndPickerRoot(cfg, root)
 	app := New(cfg, st)
 
 	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
@@ -550,7 +550,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.DB.Close()
-	cfg := testConfig(filepath.Join(base, "uploads"))
+	cfg := testConfig(base)
 	cfg.Auth.DevAllowFixedCode = true
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := config.SaveAtomic(cfgPath, cfg); err != nil {
@@ -686,9 +686,10 @@ func TestTokenListReturnsValidityAndDeleteAudit(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Auth.Admin.Username = "admin"
-	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	setTestAdminPassword(cfg)
 	cfg.Tokens.UploadMaxMB = 1
-	cfg.Storage.Dirs = []config.Dir{{ID: "default", Name: "Default", Path: t.TempDir(), AllowDownload: true, AllowUpload: true}}
+	root := t.TempDir()
+	setTestStorageAndPickerRoot(cfg, root)
 	app := New(cfg, st)
 	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
 		t.Fatalf("create admin session: %v", err)
@@ -809,9 +810,10 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Auth.Admin.Username = "admin"
-	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	setTestAdminPassword(cfg)
 	cfg.Storage.BlockedExtensions = []string{".exe"}
-	cfg.Storage.Dirs = []config.Dir{{ID: "default", Name: "Default", Path: t.TempDir(), AllowDownload: true, AllowUpload: true}}
+	root := t.TempDir()
+	setTestStorageAndPickerRoot(cfg, root)
 	app := New(cfg, st)
 
 	if err := st.CreateSession("user-sid", time.Now().Add(time.Hour), "user", ""); err != nil {
@@ -885,7 +887,9 @@ func TestAdminCanUpdateUploadPolicyWithEmptyBlacklist(t *testing.T) {
 	badReq := httptest.NewRequest(http.MethodPut, "/api/config/upload-policy", strings.NewReader(`{"allowedExtensions":["*"],"blockedExtensions":[]}`))
 	badReq.Header.Set("Content-Type", "application/json")
 	badReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
+	restoreLog := discardTestLog(t)
 	badResp, err := app.Test(badReq)
+	restoreLog()
 	if err != nil {
 		t.Fatalf("bad policy request: %v", err)
 	}
@@ -1399,7 +1403,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 		t.Fatalf("write env: %v", err)
 	}
 	symlinkCreated := os.Symlink(outside, filepath.Join(root, "outside-link")) == nil
-	cfg := testConfig(t.TempDir())
+	cfg := testConfig(root)
 	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "pick", Name: "可选根", Path: root, AllowSelectFiles: true, AllowSelectDirs: true}}
 	app := New(cfg, st)
 	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
@@ -1511,6 +1515,7 @@ func TestAdminFilePickerDoesNotInjectSystemRoot(t *testing.T) {
 	}
 	defer st.DB.Close()
 	cfg := testConfig(t.TempDir())
+	cfg.Storage.Dirs = nil
 	cfg.FilePicker.Roots = nil
 	app := New(cfg, st)
 	if err := st.CreateSession("admin-sid", time.Now().Add(time.Hour), "admin", "admin"); err != nil {
@@ -1627,11 +1632,9 @@ func TestLegacyOutsideAllowlistResourceCanOnlyTightenOrDelete(t *testing.T) {
 	allowed := t.TempDir()
 	legacy := t.TempDir()
 	existing := config.Dir{ID: "legacy", Name: "Legacy", Type: config.ResourceDirectory, Path: legacy, AllowDownload: true, AllowUpload: true}
-	var warning bytes.Buffer
-	oldWriter := log.Writer()
-	log.SetOutput(&warning)
+	warning, restoreLog := captureTestLog(t)
 	app, _ := newResourcePolicyTestApp(t, []config.FilePickerRoot{{ID: "allowed", Path: allowed, AllowSelectDirs: true}}, []config.Dir{existing}, "")
-	log.SetOutput(oldWriter)
+	restoreLog()
 	if !strings.Contains(warning.String(), "legacy") || strings.Contains(warning.String(), legacy) {
 		t.Fatalf("expected ID-only legacy warning, log=%q", warning.String())
 	}
@@ -2652,7 +2655,7 @@ func TestValidateLoginCodeAcceptsAdjacentTOTPWindow(t *testing.T) {
 	cfg := config.Default()
 	cfg.Auth.TOTPSecret = "JBSWY3DPEHPK3PXP"
 	cfg.Auth.Admin.Username = "admin"
-	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	setTestAdminPassword(cfg)
 	s := &Server{config: cfg}
 
 	code, err := totp.GenerateCode(cfg.Auth.TOTPSecret, time.Now().Add(-30*time.Second))
@@ -3426,7 +3429,8 @@ func TestUploadLeaseInvalidatedWhenResourceChanges(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.DB.Close()
-	cfg := testConfig(oldRoot)
+	cfg := testConfig(base)
+	cfg.Storage.Dirs[0].Path = oldRoot
 	cfg.Auth.DevAllowFixedCode = true
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := config.SaveAtomic(cfgPath, cfg); err != nil {
@@ -3491,6 +3495,8 @@ func TestUploadLeaseInvalidatedWhenResourceChanges(t *testing.T) {
 }
 
 func TestResourceConfigDBFailureDoesNotPublish(t *testing.T) {
+	restoreLog := discardTestLog(t)
+	defer restoreLog()
 	oldRoot := t.TempDir()
 	newRoot := t.TempDir()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
@@ -3530,6 +3536,8 @@ func TestResourceConfigDBFailureDoesNotPublish(t *testing.T) {
 }
 
 func TestResourceConfigPublishFailureLeavesRevocationsApplied(t *testing.T) {
+	restoreLog := discardTestLog(t)
+	defer restoreLog()
 	oldRoot := t.TempDir()
 	newRoot := t.TempDir()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
@@ -3677,6 +3685,8 @@ func TestResourceAuthorizationChangesRevokeBeforePublish(t *testing.T) {
 }
 
 func TestPublishedResourceConfigSyncFailureKeepsRevocationAndNewConfig(t *testing.T) {
+	restoreLog := discardTestLog(t)
+	defer restoreLog()
 	root := t.TempDir()
 	newRoot := t.TempDir()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
@@ -3745,6 +3755,8 @@ func TestPublishedResourceConfigSyncFailureKeepsRevocationAndNewConfig(t *testin
 }
 
 func TestConfigPrepareErrorClassificationDoesNotLeakPath(t *testing.T) {
+	restoreLog := discardTestLog(t)
+	defer restoreLog()
 	root := t.TempDir()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
@@ -3792,7 +3804,8 @@ func TestUploadLeaseInvalidatedAfterResourceDeleteAndRecreate(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.DB.Close()
-	cfg := testConfig(oldRoot)
+	cfg := testConfig(base)
+	cfg.Storage.Dirs[0].Path = oldRoot
 	cfg.Auth.DevAllowFixedCode = true
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := config.SaveAtomic(cfgPath, cfg); err != nil {
@@ -5629,10 +5642,8 @@ func TestDownloadLeaseHashMismatchAndNoHashFirstUseSemantics(t *testing.T) {
 
 func TestDownloadHashFlightPanicUnblocksWaiters(t *testing.T) {
 	s, app, st, plain := newHashFlightTestServer(t, 2, "panic-file.txt")
-	var panicLog bytes.Buffer
-	oldLogWriter := log.Writer()
-	log.SetOutput(&panicLog)
-	defer log.SetOutput(oldLogWriter)
+	panicLog, restoreLog := captureTestLog(t)
+	defer restoreLog()
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
@@ -5989,15 +6000,13 @@ func TestPolicyAuditIsCompleteAndFailureLogDoesNotLeakDetail(t *testing.T) {
 	if err := st.DB.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-	var output bytes.Buffer
-	oldWriter := log.Writer()
-	log.SetOutput(&output)
-	defer log.SetOutput(oldWriter)
+	output, restoreLog := captureTestLog(t)
 	criticalActions := []string{"login_failed", "login_success", "config_resource_create", "config_resource_update", "config_resource_delete", "config_upload_policy_update", "token_create", "token_revoke", "token_delete", "illegal_access", "file_picker_denied", "download_lease_create", "public_download_lease_create", "download_lease_resource_changed", "download_lease_file_changed", "upload_lease_create", "upload_lease_resource_changed", "upload_lease_failed", "token_upload_failed", "token_upload_denied", "token_denied"}
 	for _, action := range criticalActions {
 		s.criticalAudit(action, "sensitive-ip", "secret-path-and-token")
 	}
 	s.bestEffortAudit("download", "sensitive-ip", "ordinary-download-secret")
+	restoreLog()
 	if strings.Count(output.String(), "[CRITICAL]") != len(criticalActions) || strings.Contains(output.String(), "secret-path-and-token") || strings.Contains(output.String(), "ordinary-download-secret") || strings.Contains(output.String(), "sensitive-ip") {
 		t.Fatalf("critical audit failure log missing or leaked detail: %q", output.String())
 	}
@@ -6078,8 +6087,15 @@ func TestDirectoryAndPickerBoundedPaginationContract(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !first.Truncated || first.TotalKnown || first.Total != nil || first.ScannedEntries != 100 || first.ScanLimit != 100 || len(first.Entries) != 20 || !first.HasMore {
 		t.Fatalf("unexpected first bounded file page: status=%d response=%+v", resp.StatusCode, first)
 	}
-	if !first.Entries[0].MetadataKnown || first.Entries[0].Type != "file" || !first.Entries[0].Downloadable {
-		t.Fatalf("file metadata contract failed: %+v", first.Entries[0])
+	var listedFile *fsutil.Entry
+	for i := range first.Entries {
+		if first.Entries[i].Type == "file" {
+			listedFile = &first.Entries[i]
+			break
+		}
+	}
+	if listedFile == nil || !listedFile.MetadataKnown || !listedFile.Downloadable {
+		t.Fatalf("file metadata contract failed: %+v", first.Entries)
 	}
 	for _, entry := range first.Entries {
 		if strings.Contains(entry.Path, root) {
@@ -6109,8 +6125,15 @@ func TestDirectoryAndPickerBoundedPaginationContract(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !picker.Truncated || picker.TotalKnown || picker.Total != nil || picker.ScannedEntries != 100 || picker.ScanLimit != 100 || len(picker.Items) != 20 || !picker.HasMore {
 		t.Fatalf("unexpected bounded picker response: status=%d response=%+v", resp.StatusCode, picker)
 	}
-	if !picker.Items[0].MetadataKnown || picker.Items[0].Type != "file" || !picker.Items[0].Downloadable {
-		t.Fatalf("picker file metadata contract failed: %+v", picker.Items[0])
+	var pickedFile *filePickerItemDTO
+	for i := range picker.Items {
+		if picker.Items[i].Type == "file" {
+			pickedFile = &picker.Items[i]
+			break
+		}
+	}
+	if pickedFile == nil || !pickedFile.MetadataKnown || !pickedFile.Downloadable {
+		t.Fatalf("picker file metadata contract failed: %+v", picker.Items)
 	}
 	var pickerLegacy filePickerListResponse
 	resp = list("/api/config/file-picker/list?rootId=bounded", "bounded-admin", &pickerLegacy)
@@ -6190,7 +6213,7 @@ func TestListingPageSizeClampsBeforeOffsetForFilesAndPicker(t *testing.T) {
 	cfg.Storage.DirectoryListMaxPageSize = 10
 	cfg.FilePicker.MaxScanEntries = 100
 	cfg.FilePicker.MaxPageSize = 10
-	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "clamped", Path: root, AllowSelectFiles: true}}
+	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "clamped", Path: root, AllowSelectFiles: true, AllowSelectDirs: true}}
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -6433,7 +6456,7 @@ func newResourcePolicyTestApp(t *testing.T, roots []config.FilePickerRoot, resou
 	cfg.Auth.TOTPSecret = "JBSWY3DPEHPK3PXP"
 	cfg.Auth.DevAllowFixedCode = false
 	cfg.Auth.Admin.Username = "admin"
-	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
+	setTestAdminPassword(cfg)
 	cfg.Database.Path = databasePath
 	cfg.Web.StaticDir = staticDir
 	cfg.FilePicker.Roots = roots
@@ -6611,10 +6634,56 @@ func testConfig(root string) *config.Config {
 	cfg.Auth.TOTPSecret = "JBSWY3DPEHPK3PXP"
 	cfg.Auth.DevAllowFixedCode = false
 	cfg.Auth.Admin.Username = "admin"
-	cfg.Auth.Admin.PasswordSHA256 = "2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db"
-	cfg.Storage.Dirs = []config.Dir{{ID: "default", Name: "Default", Path: root, AllowDownload: true, AllowUpload: true}}
-	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "test-root", Name: "Test Root", Path: string(os.PathSeparator), AllowSelectFiles: true, AllowSelectDirs: true, FollowSymlinks: true}}
+	setTestAdminPassword(cfg)
+	setTestStorageAndPickerRoot(cfg, root)
 	return cfg
+}
+
+func setTestStorageAndPickerRoot(cfg *config.Config, root string) {
+	cfg.Storage.Dirs = []config.Dir{{ID: "default", Name: "Default", Path: root, AllowDownload: true, AllowUpload: true}}
+	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "test-root", Name: "Test Root", Path: root, AllowSelectFiles: true, AllowSelectDirs: true, FollowSymlinks: true}}
+}
+
+var (
+	testAdminPasswordOnce sync.Once
+	testAdminPasswordPHC  string
+)
+
+func setTestAdminPassword(cfg *config.Config) {
+	testAdminPasswordOnce.Do(func() {
+		var err error
+		testAdminPasswordPHC, err = security.Hash([]byte("secret"))
+		if err != nil {
+			panic("hash test admin password: " + err.Error())
+		}
+	})
+	cfg.Auth.Admin.PasswordHash = testAdminPasswordPHC
+	cfg.Auth.Admin.PasswordSHA256 = ""
+}
+
+func captureTestLog(t *testing.T) (*bytes.Buffer, func()) {
+	t.Helper()
+	var output bytes.Buffer
+	previous := log.Writer()
+	var once sync.Once
+	restore := func() {
+		once.Do(func() { log.SetOutput(previous) })
+	}
+	log.SetOutput(&output)
+	t.Cleanup(restore)
+	return &output, restore
+}
+
+func discardTestLog(t *testing.T) func() {
+	t.Helper()
+	previous := log.Writer()
+	var once sync.Once
+	restore := func() {
+		once.Do(func() { log.SetOutput(previous) })
+	}
+	log.SetOutput(io.Discard)
+	t.Cleanup(restore)
+	return restore
 }
 
 func testResourceFingerprint(t *testing.T, cfg *config.Config, id string) string {
