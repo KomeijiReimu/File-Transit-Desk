@@ -30,6 +30,8 @@ type Store struct {
 	auditRetain     atomic.Int64
 	auditPruneEvery atomic.Uint64
 	auditWriteCount atomic.Uint64
+	chatMutationMu  sync.Mutex
+	chatMutations   map[int64]*chatMutationState
 }
 
 type Token struct {
@@ -282,6 +284,9 @@ CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires
 		if _, err := s.DB.Exec(statement); err != nil {
 			return err
 		}
+	}
+	if err := s.migrateChat(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -637,14 +642,23 @@ func (s *Store) Audit(action, ip, detail string) error {
 	if err != nil {
 		return err
 	}
-	every := s.auditPruneEvery.Load()
-	if every > 0 && s.auditWriteCount.Add(1)%every == 0 {
-		// INSERT 已独立提交；若批量 prune 失败，本次事件仍已持久化，但向调用方返回错误以便关键路径记录高优先级诊断。
-		if err := s.PruneAudit(); err != nil {
-			return fmt.Errorf("%w: %v", ErrAuditMaintenance, err)
-		}
+	// INSERT 已独立提交；若批量 prune 失败，本次事件仍已持久化，但向调用方返回错误以便关键路径记录高优先级诊断。
+	if err := s.auditMaintenanceAfterCommit(); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuditMaintenance, err)
 	}
 	return nil
+}
+
+func (s *Store) auditMaintenanceAfterCommit() error {
+	every := s.auditPruneEvery.Load()
+	if every == 0 || s.auditWriteCount.Add(1)%every != 0 {
+		return nil
+	}
+	return s.PruneAudit()
+}
+
+func (s *Store) bestEffortAuditMaintenanceAfterCommit() {
+	_ = s.auditMaintenanceAfterCommit()
 }
 
 func (s *Store) SetAuditPolicy(retain, pruneEveryWrites int) {
@@ -1033,6 +1047,8 @@ type AuditLogFilter struct {
 var ErrInvalidAuditFilter = errors.New("invalid audit filter")
 
 var auditFailureActions = map[string]struct{}{
+	"chat_delete_failed":                    {},
+	"chat_withdraw_failed":                  {},
 	"config_resource_published_sync_failed": {},
 	"csrf_denied":                           {},
 	"download_lease_file_changed":           {},

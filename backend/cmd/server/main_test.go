@@ -18,6 +18,31 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+func TestListenerAddressUsesNormalizedJoinHostPort(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want string
+	}{
+		{host: "0.0.0.0", want: "0.0.0.0:17878"},
+		{host: "127.0.0.1", want: "127.0.0.1:17878"},
+		{host: "::", want: "[::]:17878"},
+		{host: "[::]", want: "[::]:17878"},
+		{host: "2001:db8::1", want: "[2001:db8::1]:17878"},
+		{host: "[2001:db8::1]", want: "[2001:db8::1]:17878"},
+	} {
+		endpoint, err := serverpkg.ResolveListenEndpoint(tc.host, 17878)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", tc.host, err)
+		}
+		if got := listenerAddress(endpoint); got != tc.want {
+			t.Fatalf("listenerAddress(%q)=%q want=%q", tc.host, got, tc.want)
+		}
+		if got := listenerAddress(endpoint); got == ":::17878" {
+			t.Fatalf("listenerAddress generated malformed IPv6 address")
+		}
+	}
+}
+
 func TestRunServerListenerErrorDrainsActiveHandlerBeforeNonZeroExit(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {

@@ -42,14 +42,16 @@ function queueWith(uploadFile: (item: UploadItem, options: UploadRunOptions) => 
 }
 
 describe('useUploadQueue', () => {
-  it('uploads every pending item serially', async () => {
+  it('uploads every pending item serially when no batch identity is configured', async () => {
     let active = 0
     let maxActive = 0
     const calls: string[] = []
-    const state = queueWith(async (entry) => {
+    const identities: Array<string | undefined> = []
+    const state = queueWith(async (entry, options) => {
       active += 1
       maxActive = Math.max(maxActive, active)
       calls.push(entry.id)
+      identities.push(options.batchIdentity)
       await Promise.resolve()
       active -= 1
     })
@@ -59,8 +61,96 @@ describe('useUploadQueue', () => {
     await state.uploadAll()
 
     expect(calls).toEqual(['a', 'b'])
+    expect(identities).toEqual([undefined, undefined])
     expect(maxActive).toBe(1)
     expect(state.queue.value.map((entry) => entry.status)).toEqual(['success', 'success'])
+  })
+
+  it('pins one identity for the batch and stops pending items when it changes', async () => {
+    let binding: string | undefined = 'binding-a'
+    const onBatchIdentityMismatch = vi.fn()
+    const uploadFile = vi.fn(async (entry: UploadItem, options: UploadRunOptions) => {
+      expect(options.batchIdentity).toBe('binding-a')
+      if (entry.id === 'a') {
+        binding = undefined
+        throw new Error('subject_changed')
+      }
+    })
+    const state = queueWith(uploadFile, {
+      getBatchIdentity: () => binding,
+      onBatchIdentityMismatch,
+    })
+    state.add(item('a'))
+    state.add(item('b'))
+
+    await state.uploadAll()
+
+    expect(uploadFile).toHaveBeenCalledTimes(1)
+    expect(state.queue.value[0]).toMatchObject({ status: 'error', error: 'subject_changed' })
+    expect(state.queue.value[1].status).toBe('queued')
+    expect(state.queue.value[1].error).toBeUndefined()
+    expect(state.stopRequested.value).toBe(true)
+    expect(onBatchIdentityMismatch).toHaveBeenCalledTimes(1)
+    expect(onBatchIdentityMismatch).toHaveBeenCalledWith({
+      capturedIdentity: 'binding-a',
+      currentIdentity: undefined,
+    })
+  })
+
+  it('rechecks identity after async between-item work before starting the next item', async () => {
+    let binding: string | undefined = 'binding-a'
+    const betweenItems = deferred()
+    const continueBatch = deferred()
+    const onBatchIdentityMismatch = vi.fn()
+    const uploadFile = vi.fn(async () => {})
+    const state = queueWith(uploadFile, {
+      getBatchIdentity: () => binding,
+      onBatchIdentityMismatch,
+      shouldStopBatch: async (entry) => {
+        if (entry.id === 'a') {
+          betweenItems.resolve()
+          await continueBatch.promise
+        }
+        return false
+      },
+    })
+    state.add(item('a'))
+    state.add(item('b'))
+
+    const running = state.uploadAll()
+    await betweenItems.promise
+    binding = 'binding-b'
+    continueBatch.resolve()
+    await running
+
+    expect(uploadFile).toHaveBeenCalledTimes(1)
+    expect(state.queue.value.map((entry) => entry.status)).toEqual(['success', 'queued'])
+    expect(onBatchIdentityMismatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not start a batch or retry when the configured identity is missing', async () => {
+    let binding: string | undefined
+    const uploadFile = vi.fn(async () => {})
+    const onBatchIdentityMismatch = vi.fn()
+    const state = queueWith(uploadFile, {
+      getBatchIdentity: () => binding,
+      onBatchIdentityMismatch,
+    })
+    const entry = item('a')
+    state.add(entry)
+
+    await expect(state.uploadAll()).resolves.toBe(false)
+    expect(uploadFile).not.toHaveBeenCalled()
+    expect(entry.status).toBe('queued')
+    expect(onBatchIdentityMismatch).toHaveBeenCalledTimes(1)
+
+    onBatchIdentityMismatch.mockClear()
+    entry.status = 'error'
+    entry.error = '先前失败'
+    await expect(state.retry(entry)).resolves.toBe(false)
+    expect(uploadFile).not.toHaveBeenCalled()
+    expect(entry).toMatchObject({ status: 'error', error: '先前失败' })
+    expect(onBatchIdentityMismatch).toHaveBeenCalledTimes(1)
   })
 
   it('continues to the second item after the first upload fails', async () => {
@@ -280,6 +370,46 @@ describe('useUploadQueue', () => {
     expect(state.queue.value[0].status).toBe('success')
     expect(onItemSuccess).not.toHaveBeenCalled()
     expect(shouldStopBatch).not.toHaveBeenCalled()
+    expect(onBatchFinished).not.toHaveBeenCalled()
+    expect(state.releases[0]).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows an authorized upload to finish after identity change and dispose without starting the next item', async () => {
+    let binding: string | undefined = 'binding-a'
+    const uploadStarted = deferred()
+    const finishUpload = deferred()
+    const onBatchIdentityMismatch = vi.fn()
+    const onBatchFinished = vi.fn()
+    let signal: AbortSignal | undefined
+    const uploadFile = vi.fn(async (entry: UploadItem, options: UploadRunOptions) => {
+      if (entry.id === 'a') {
+        signal = options.signal
+        uploadStarted.resolve()
+        await finishUpload.promise
+      }
+    })
+    const state = queueWith(uploadFile, {
+      getBatchIdentity: () => binding,
+      onBatchIdentityMismatch,
+      onBatchFinished,
+    })
+    const first = item('a')
+    const second = item('b')
+    state.add(first)
+    state.add(second)
+
+    const running = state.uploadAll()
+    await uploadStarted.promise
+    binding = 'binding-b'
+    state.dispose()
+    expect(signal?.aborted).toBe(false)
+    finishUpload.resolve()
+    await running
+
+    expect(first.status).toBe('success')
+    expect(second.status).toBe('queued')
+    expect(uploadFile).toHaveBeenCalledTimes(1)
+    expect(onBatchIdentityMismatch).not.toHaveBeenCalled()
     expect(onBatchFinished).not.toHaveBeenCalled()
     expect(state.releases[0]).toHaveBeenCalledTimes(1)
   })

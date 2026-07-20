@@ -297,6 +297,32 @@ func TestConfigValidatesUploadLeaseTTL(t *testing.T) {
 	}
 }
 
+func TestSessionTimeoutDefaultsAndExplicitIdleValue(t *testing.T) {
+	cfg := Default()
+	if cfg.Auth.SessionTTLSeconds != 86400 || cfg.Auth.IdleTimeoutSeconds != 7200 || cfg.Auth.IdleGraceSeconds != 30 {
+		t.Fatalf("unexpected session timeout defaults: %+v", cfg.Auth)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `auth:
+  dev_allow_fixed_code: true
+  idle_timeout_seconds: 1800
+  admin:
+    username: admin
+    password_sha256: 2bb80d537b1da3e38bd30361aa855686bde0ba34388b29d94bb536a73f23c8db
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write explicit idle timeout config: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load explicit idle timeout config: %v", err)
+	}
+	if loaded.Auth.IdleTimeoutSeconds != 1800 {
+		t.Fatalf("explicit idle timeout was replaced by new default: %d", loaded.Auth.IdleTimeoutSeconds)
+	}
+}
+
 func TestLoadPreservesLargeUploadLimit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	yaml := `auth:

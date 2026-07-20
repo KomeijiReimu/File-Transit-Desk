@@ -97,6 +97,25 @@ func TestWindowLimiterUsesPerEntryExpiryAndDisableClearsState(t *testing.T) {
 	}
 }
 
+func TestWindowLimiterHasHardEntryBound(t *testing.T) {
+	limiter := newWindowLimiterWithMaxEntries(2)
+	if allowed, _ := limiter.Allow("one", 10, time.Minute); !allowed {
+		t.Fatalf("first key rejected")
+	}
+	if allowed, _ := limiter.Allow("two", 10, time.Minute); !allowed {
+		t.Fatalf("second key rejected")
+	}
+	if allowed, retry := limiter.Allow("three", 10, time.Minute); allowed || retry <= 0 {
+		t.Fatalf("entry bound did not reject new key: allowed=%v retry=%v", allowed, retry)
+	}
+	if limiter.size() != 2 {
+		t.Fatalf("entry bound exceeded: %d", limiter.size())
+	}
+	if allowed, _ := limiter.Allow("one", 10, time.Minute); !allowed {
+		t.Fatalf("existing key should remain usable at capacity")
+	}
+}
+
 func TestBlockedLoginIPDoesNotConsumeGlobalBucket(t *testing.T) {
 	cfg := testConfig(t.TempDir())
 	cfg.Abuse.Login.GlobalPerMinute = 1

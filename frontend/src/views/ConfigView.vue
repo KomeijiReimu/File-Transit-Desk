@@ -6,6 +6,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
+import ServiceAddressesCard from '@/components/ServiceAddressesCard.vue'
 import ServerFilePicker from '@/components/ServerFilePicker.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { DirectoryInfo, FilePickerSelection, ResourcePayload, SafeConfig, UploadPolicyPayload } from '@/types'
@@ -349,6 +350,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
       </div>
       <button class="ghost-btn" type="button" @click="requestReload">刷新配置</button>
     </header>
+
+    <ServiceAddressesCard />
 
     <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? loadError : ''" retry-label="重新加载" @retry="load" />
     <div v-if="dataStale" class="alert info stale-alert" role="status">

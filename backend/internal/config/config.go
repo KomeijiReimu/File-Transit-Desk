@@ -27,6 +27,7 @@ type Config struct {
 	Tokens     TokensConfig     `yaml:"tokens"`
 	Audit      AuditConfig      `yaml:"audit"`
 	Abuse      AbuseConfig      `yaml:"abuse"`
+	Chat       ChatConfig       `yaml:"chat"`
 }
 
 type ServerConfig struct {
@@ -153,6 +154,18 @@ type AuditConfig struct {
 	UnauthorizedSampleSeconds   int `yaml:"unauthorized_sample_seconds"`
 	UnauthorizedGlobalPerMinute int `yaml:"unauthorized_global_per_minute"`
 	PruneEveryWrites            int `yaml:"prune_every_writes"`
+}
+
+type ChatConfig struct {
+	WithdrawWindowSeconds    int `yaml:"withdraw_window_seconds"`
+	MaxMessageChars          int `yaml:"max_message_chars"`
+	MaxMessageBytes          int `yaml:"max_message_bytes"`
+	RetentionDays            int `yaml:"retention_days"`
+	MaxMessages              int `yaml:"max_messages"`
+	SessionMessagesPerMinute int `yaml:"session_messages_per_minute"`
+	IPMessagesPerMinute      int `yaml:"ip_messages_per_minute"`
+	GlobalMessagesPerMinute  int `yaml:"global_messages_per_minute"`
+	CleanupBatch             int `yaml:"cleanup_batch"`
 }
 
 type Dir struct {
@@ -346,7 +359,7 @@ func Default() *Config {
 	c.Server.KeepaliveIdleTimeoutSeconds = 120
 	c.Database.Path = "./data/filetrans.db"
 	c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
-	c.Auth.IdleTimeoutSeconds = int64((30 * time.Minute) / time.Second)
+	c.Auth.IdleTimeoutSeconds = int64((2 * time.Hour) / time.Second)
 	c.Auth.IdleGraceSeconds = 30
 	c.Auth.UploadLeaseTTLSeconds = int64((30 * time.Minute) / time.Second)
 	c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
@@ -385,6 +398,17 @@ func Default() *Config {
 	c.Abuse.Creation.MaxOutstandingLeasesTotal = 5000
 	c.Abuse.Creation.MaxOutstandingLeasesOwner = 64
 	c.Abuse.Uploads = UploadAbuseConfig{Global: 16, PerResource: 8, PerSession: 4, PerToken: 2}
+	c.Chat = ChatConfig{
+		WithdrawWindowSeconds:    300,
+		MaxMessageChars:          2000,
+		MaxMessageBytes:          8192,
+		RetentionDays:            90,
+		MaxMessages:              50000,
+		SessionMessagesPerMinute: 20,
+		IPMessagesPerMinute:      60,
+		GlobalMessagesPerMinute:  300,
+		CleanupBatch:             500,
+	}
 	c.Storage.MinFreeMB = 1024
 	c.Storage.MinFreePercent = 5
 	return c
@@ -412,7 +436,7 @@ func (c *Config) normalize() {
 		c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
 	}
 	if c.Auth.IdleTimeoutSeconds <= 0 {
-		c.Auth.IdleTimeoutSeconds = int64((30 * time.Minute) / time.Second)
+		c.Auth.IdleTimeoutSeconds = int64((2 * time.Hour) / time.Second)
 	}
 	if c.Auth.IdleGraceSeconds < 0 {
 		c.Auth.IdleGraceSeconds = 0
@@ -475,9 +499,39 @@ func (c *Config) normalize() {
 	if c.Audit.Retain <= 0 {
 		c.Audit.Retain = 1000
 	}
+	// Chat defaults are seeded before YAML decoding. Do not re-default zero or
+	// negative values here: explicit invalid user input must reach validation
+	// instead of being silently replaced.
 }
 
 func (c *Config) validate() error {
+	if c.Chat.WithdrawWindowSeconds < 1 || c.Chat.WithdrawWindowSeconds > 86400 {
+		return fmt.Errorf("chat.withdraw_window_seconds must be between 1 and 86400")
+	}
+	if c.Chat.MaxMessageChars < 1 || c.Chat.MaxMessageChars > 10000 {
+		return fmt.Errorf("chat.max_message_chars must be between 1 and 10000")
+	}
+	if c.Chat.MaxMessageBytes < 1 || c.Chat.MaxMessageBytes > 65536 {
+		return fmt.Errorf("chat.max_message_bytes must be between 1 and 65536")
+	}
+	if c.Chat.RetentionDays < 1 || c.Chat.RetentionDays > 3650 {
+		return fmt.Errorf("chat.retention_days must be between 1 and 3650")
+	}
+	if c.Chat.MaxMessages < 1 || c.Chat.MaxMessages > 1000000 {
+		return fmt.Errorf("chat.max_messages must be between 1 and 1000000")
+	}
+	for name, limit := range map[string]int{
+		"chat.session_messages_per_minute": c.Chat.SessionMessagesPerMinute,
+		"chat.ip_messages_per_minute":      c.Chat.IPMessagesPerMinute,
+		"chat.global_messages_per_minute":  c.Chat.GlobalMessagesPerMinute,
+	} {
+		if limit < 1 || limit > 100000 {
+			return fmt.Errorf("%s must be between 1 and 100000", name)
+		}
+	}
+	if c.Chat.CleanupBatch < 1 || c.Chat.CleanupBatch > 10000 {
+		return fmt.Errorf("chat.cleanup_batch must be between 1 and 10000")
+	}
 	if c.Audit.UnauthorizedSampleSeconds < 0 || c.Audit.UnauthorizedSampleSeconds > 86400 {
 		return fmt.Errorf("audit.unauthorized_sample_seconds must be between 0 and 86400")
 	}

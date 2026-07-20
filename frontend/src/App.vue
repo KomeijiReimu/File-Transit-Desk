@@ -1,25 +1,51 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { authState, isAdmin, logout } from '@/auth'
+import { authenticationEpoch, invalidateSessionSubject } from '@/authEpoch'
+import AppIcon from '@/components/AppIcon.vue'
 import { useSessionActivity } from '@/useSessionActivity'
 
 const route = useRoute()
-const router = useRouter()
 
 const chromeless = computed(() => route.name === 'login' || route.name === 'share')
+const protectedSessionBinding = computed(() => authState.user?.sessionBinding?.trim() || '')
+const protectedSubjectReady = computed(() => (
+  authState.status === 'authenticated'
+  && authState.authenticated
+  && protectedSessionBinding.value !== ''
+))
 const displayName = computed(() => authState.name || (isAdmin.value ? '管理员' : '访客'))
 const roleLabel = computed(() => (isAdmin.value ? '管理员会话' : '受信用户会话'))
 const mobileNavOpen = ref(false)
 
 watch(() => route.fullPath, () => { mobileNavOpen.value = false })
 
+let missingBindingRevalidationRequested = false
+watch(
+  () => [authState.status, protectedSessionBinding.value] as const,
+  ([status, binding]) => {
+    if (binding) {
+      missingBindingRevalidationRequested = false
+      return
+    }
+    if (status === 'anonymous' || status === 'unavailable') {
+      missingBindingRevalidationRequested = false
+      return
+    }
+    if (status !== 'authenticated' || missingBindingRevalidationRequested) return
+    missingBindingRevalidationRequested = true
+    invalidateSessionSubject(authenticationEpoch(), undefined, 'session_subject_changed')
+  },
+  { flush: 'post', immediate: true },
+)
+
 // 在根组件统一挂载会话活跃监听，所有受保护页面共享同一套空闲保活策略。
 useSessionActivity()
 
 async function handleLogout() {
+  if (!protectedSubjectReady.value) return
   await logout()
-  router.replace({ name: 'login' })
 }
 </script>
 
@@ -53,6 +79,10 @@ async function handleLogout() {
           <span class="nav-ico nav-upload" aria-hidden="true" />
           <span>文件上传</span>
         </RouterLink>
+        <RouterLink to="/chat">
+          <AppIcon class="nav-ico" name="message-circle" :size="22" />
+          <span>在线交流</span>
+        </RouterLink>
         <template v-if="isAdmin">
           <RouterLink to="/tokens">
             <span class="nav-ico nav-tokens" aria-hidden="true" />
@@ -81,11 +111,14 @@ async function handleLogout() {
         </div>
         <span class="status-dot" :title="'在线'" />
       </div>
-      <button class="ghost-btn full" type="button" @click="handleLogout">退出登录</button>
+      <button class="ghost-btn full" type="button" :disabled="!protectedSubjectReady" @click="handleLogout">退出登录</button>
     </aside>
 
     <main id="main-content" class="content" tabindex="-1" data-route-focus>
-      <RouterView />
+      <RouterView
+        v-if="protectedSubjectReady"
+        :key="protectedSessionBinding"
+      />
     </main>
   </div>
 </template>

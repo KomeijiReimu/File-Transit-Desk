@@ -16,7 +16,7 @@ auth:
   # 会话绝对最长有效期；到期后必须重新登录。
   session_ttl_seconds: 86400
   # 用户无活动超过该时间后视为空闲过期；前端只在可见且有操作时发送心跳续期。
-  idle_timeout_seconds: 1800
+  idle_timeout_seconds: 7200
   # 心跳恢复宽限期；普通 API 不使用宽限，只有 heartbeat 可在短暂超时后续期。
   idle_grace_seconds: 30
   # 登录态上传开始前签发的单次上传票据有效期；票据是 bearer 授权，泄露即等同本次上传权限。
@@ -51,6 +51,20 @@ abuse:
     per_resource: 8
     per_session: 4
     per_token: 2
+chat:
+  # 普通用户只能在消息创建后该时间内撤回自己的消息。
+  withdraw_window_seconds: 300
+  # 正文同时受 Unicode 字符数和 UTF-8 字节数约束。
+  max_message_chars: 2000
+  max_message_bytes: 8192
+  # 消息达到时间或数量任一保留上限后，由后台分批清理最旧记录。
+  retention_days: 90
+  max_messages: 50000
+  cleanup_batch: 500
+  # 发送消息同时受 session、可信客户端 IP 和全局固定窗口限制。
+  session_messages_per_minute: 20
+  ip_messages_per_minute: 60
+  global_messages_per_minute: 300
 web:
   static_dir: "../frontend/dist"
 downloads:

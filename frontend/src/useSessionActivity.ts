@@ -1,7 +1,9 @@
 import { onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ApiError, api } from '@/api'
-import { authState, clearUser } from '@/auth'
+import { authState } from '@/auth'
+import { authenticationEpoch, expireSessionOnce } from '@/authEpoch'
+import { recentSessionActivity, recordSessionActivity } from '@/sessionActivity'
 
 const HEARTBEAT_INTERVAL_MS = 30_000
 const uploadSessionHolds = new Set<symbol>()
@@ -26,8 +28,8 @@ export function useSessionActivity() {
   // 只有登录态、非公开页、页面可见时才保活；用户离开页面后不持续刷新空闲会话。
   const shouldTrack = () => authState.authenticated && route.meta.public !== true && document.visibilityState === 'visible'
 
-  function expireLocally() {
-    clearUser()
+  function expireLocally(requestEpoch: number) {
+    if (!expireSessionOnce(requestEpoch)) return
     if (route.meta.public === true || route.name === 'login') return
     router.replace({ name: 'login', query: { redirect: route.fullPath } })
   }
@@ -39,16 +41,19 @@ export function useSessionActivity() {
     if (!force && now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return
     heartbeatRunning = true
     lastHeartbeatAt = now
+    const requestEpoch = authenticationEpoch()
     try {
       const result = await api.heartbeat()
       // 后端返回新的空闲过期时间，前端只用于展示和本地判断；最终仍以后端鉴权为准。
-      if (authState.user && result.idleExpiresAt) authState.user.idleExpiresAt = result.idleExpiresAt
+      if (authenticationEpoch() === requestEpoch && authState.user && result.idleExpiresAt) {
+        authState.user.idleExpiresAt = result.idleExpiresAt
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         if (uploadSessionHolds.size > 0) {
           window.dispatchEvent(new CustomEvent('ft:upload-session-expired'))
         } else {
-          expireLocally()
+          expireLocally(requestEpoch)
         }
       }
     } finally {
@@ -57,15 +62,19 @@ export function useSessionActivity() {
   }
 
   function markActivity() {
+    if (document.visibilityState !== 'visible') return
+    recordSessionActivity()
     if (!shouldTrack()) return
     sendHeartbeat()
   }
 
   function handleVisibilityChange() {
-    if (document.visibilityState === 'visible') sendHeartbeat(true)
+    if (document.visibilityState !== 'visible') return
+    recordSessionActivity()
+    if (shouldTrack()) sendHeartbeat(true)
   }
 
-  const events = ['pointerdown', 'keydown', 'scroll', 'touchstart'] as const
+  const events = ['pointerdown', 'keydown', 'scroll', 'touchstart', 'input'] as const
 
   onMounted(() => {
     // 监听真实用户活动，而不是定时无条件保活，和后端 idle_timeout 语义保持一致。
@@ -84,7 +93,7 @@ export function useSessionActivity() {
     () => [authState.authenticated, route.fullPath],
     () => {
       // 登录成功或路由切换时立即补一次心跳，减少刚进入页面就空闲过期的误判。
-      if (shouldTrack()) sendHeartbeat(true)
+      if (shouldTrack() && recentSessionActivity()) sendHeartbeat(true)
     },
     { immediate: true },
   )

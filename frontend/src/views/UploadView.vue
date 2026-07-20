@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ApiError, api } from '@/api'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
+import { currentSessionBinding } from '@/authEpoch'
 import { createUploadItem, useUploadQueue } from '@/composables/useUploadQueue'
 import type { DirectoryInfo, UploadLimits } from '@/types'
 import { acquireUploadSessionHold } from '@/useSessionActivity'
@@ -22,6 +23,8 @@ const dragOver = ref(false)
 const error = ref('')
 const notice = ref('')
 const sessionNotice = ref('')
+const uploadSessionExpired = ref(false)
+const uploadSubjectChanged = ref(false)
 const limits = ref<UploadLimits | null>(null)
 const pendingTargetDirId = ref('')
 const pendingPathUnlock = ref(false)
@@ -49,7 +52,14 @@ const {
 } = useUploadQueue({
   acquireHold: acquireUploadSessionHold,
   errorMessage: uploadErrorMessage,
+  getBatchIdentity: currentSessionBinding,
+  onBatchIdentityMismatch: ({ capturedIdentity }) => {
+    markUploadSubjectChanged(!capturedIdentity)
+  },
   uploadFile: async (item, options) => {
+    if (!options.batchIdentity || currentSessionBinding() !== options.batchIdentity) {
+      throw new ApiError('登录身份已变化，旧上传任务未执行。', 409, undefined, 'session_subject_changed')
+    }
     // 每次执行（包括重试）都重新申请 lease，旧授权不会残留到下一次尝试。
     const lease = await api.createUploadLease({
       dirId: selectedDirId.value,
@@ -60,13 +70,15 @@ const {
     await api.uploadByLease(lease, item.file, options)
   },
   shouldStopBatch: (_item, queue) => {
-    if (!sessionNotice.value || !queue.some((entry) => entry.status === 'queued' || entry.status === 'error')) return false
+    if (!queue.some((entry) => entry.status === 'queued' || entry.status === 'error')) return false
+    if (uploadSubjectChanged.value) return true
+    if (!uploadSessionExpired.value) return false
     error.value = '登录状态已过期，当前已授权文件处理完成；队列中未授权文件需要重新登录后继续。'
     return true
   },
   onBatchFinished: ({ queue }) => {
     if (!queue.some((item) => item.status === 'error') && queue.some((item) => item.status === 'success')) notice.value = '上传完成。'
-    if (sessionNotice.value) {
+    if (uploadSessionExpired.value && !uploadSubjectChanged.value) {
       window.dispatchEvent(new Event('ft:auth-expired'))
       notice.value = '上传完成。登录状态已过期，请重新登录后查看文件。'
     }
@@ -82,7 +94,6 @@ const dirOptions = computed(() => dirs.value.map((dir) => ({
 const canUpload = computed(() => Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 // 返回浏览页时带回当前目录和上传路径，用户可直接检查刚上传的位置。
 const filesRoute = computed(() => ({ name: 'files', query: { dirId: selectedDirId.value, path: targetPath.value } }))
-let uploadHeartbeatTimer: number | undefined
 const targetChangeOpen = computed(() => Boolean(pendingTargetDirId.value) || pendingPathUnlock.value)
 const pendingTargetName = computed(() => dirs.value.find((dir) => dir.id === pendingTargetDirId.value)?.label || dirs.value.find((dir) => dir.id === pendingTargetDirId.value)?.name || '')
 const unfinishedQueueCount = computed(() => uploadQueue.value.filter((item) => item.status !== 'success').length)
@@ -202,6 +213,10 @@ async function confirmTargetChange() {
 
 function uploadErrorMessage(err: unknown) {
   if (err instanceof ApiError) {
+    if (err.code === 'session_subject_changed') {
+      markUploadSubjectChanged(false)
+      return '登录身份已变化，该文件未获得上传授权。'
+    }
     if ((err.details as { aborted?: boolean } | undefined)?.aborted) return '上传已取消。'
     if (err.status === 413) return err.message || '文件超过上传大小限制。'
     if (err.status === 0) return err.message
@@ -210,11 +225,36 @@ function uploadErrorMessage(err: unknown) {
   return '上传失败，可稍后重试。'
 }
 
+function markUploadSubjectChanged(missingIdentity: boolean) {
+  uploadSubjectChanged.value = true
+  uploadSessionExpired.value = false
+  if (missingIdentity) {
+    sessionNotice.value = '当前登录身份不可用，上传未开始。请重新登录后重试。'
+    error.value = '当前登录身份不可用，未申请任何文件上传授权。'
+    return
+  }
+  sessionNotice.value = '登录身份已变化，上传队列已停止；未获授权的文件不会继续。请在新身份下重新选择或重试。'
+  error.value = '登录身份已变化，队列中其余文件未继续上传。'
+}
+
+function resetUploadBatchNotices() {
+  notice.value = ''
+  error.value = ''
+  sessionNotice.value = ''
+  uploadSessionExpired.value = false
+  uploadSubjectChanged.value = false
+}
+
 async function uploadAll() {
   if (uploadBusy.value) return
-  notice.value = ''
-  sessionNotice.value = ''
+  resetUploadBatchNotices()
   await runUploadAll()
+}
+
+async function retryUpload(item: (typeof uploadQueue.value)[number]) {
+  if (uploadBusy.value) return
+  resetUploadBatchNotices()
+  await uploadItem(item)
 }
 
 function onFileChange(event: Event) {
@@ -236,16 +276,6 @@ function onDrop(event: DragEvent) {
   if (event.dataTransfer?.files?.length) addUploadFiles(event.dataTransfer.files)
 }
 
-async function heartbeatDuringUpload() {
-  try {
-    await api.heartbeat()
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 401) {
-      sessionNotice.value = '登录状态已过期，已授权的当前上传会继续；上传完成后请重新登录查看文件。'
-    }
-  }
-}
-
 function beforeUnload(event: BeforeUnloadEvent) {
   if (!uploading.value && !uploadBatchActive.value) return
   event.preventDefault()
@@ -253,7 +283,9 @@ function beforeUnload(event: BeforeUnloadEvent) {
 }
 
 function handleUploadSessionExpired() {
-  if (uploading.value || uploadBatchActive.value) sessionNotice.value = '登录状态已过期，已授权的当前上传会继续；上传完成后请重新登录查看文件。'
+  if ((!uploading.value && !uploadBatchActive.value) || uploadSubjectChanged.value) return
+  uploadSessionExpired.value = true
+  sessionNotice.value = '登录状态已过期，已授权的当前上传会继续；上传完成后请重新登录查看文件。'
 }
 
 onMounted(loadDirs)
@@ -264,19 +296,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('beforeunload', beforeUnload)
   window.removeEventListener('ft:upload-session-expired', handleUploadSessionExpired)
-  if (uploadHeartbeatTimer) window.clearInterval(uploadHeartbeatTimer)
   disposeUploadQueue()
-})
-
-watch(uploading, (active) => {
-  if (uploadHeartbeatTimer) {
-    window.clearInterval(uploadHeartbeatTimer)
-    uploadHeartbeatTimer = undefined
-  }
-  if (active) {
-    heartbeatDuringUpload()
-    uploadHeartbeatTimer = window.setInterval(heartbeatDuringUpload, 30_000)
-  }
 })
 </script>
 
@@ -350,7 +370,7 @@ watch(uploading, (active) => {
               </small>
             </div>
             <div class="q-actions">
-              <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploadBusy" @click="uploadItem(item)">重试</button>
+              <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploadBusy" @click="retryUpload(item)">重试</button>
               <button v-if="item.status === 'uploading'" class="mini-btn danger" type="button" @click="cancelUpload(item)">取消上传</button>
               <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" :disabled="uploadBusy" @click="removeUpload(item.id)">移除</button>
             </div>

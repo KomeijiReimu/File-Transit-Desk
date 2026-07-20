@@ -1041,6 +1041,10 @@ func TestAuditDTOStatusMatchesExactFailureClassificationAcrossRoutes(t *testing.
 		"download_lease_file_changed":     "failed",
 		"download_lease_resource_changed": "failed",
 		"token_download_failed":           "failed",
+		"chat_withdraw_failed":            "failed",
+		"chat_delete_failed":              "failed",
+		"chat_withdraw":                   "ok",
+		"chat_delete":                     "ok",
 		"config_changed":                  "ok",
 		"unknown_action":                  "ok",
 	}
@@ -1076,6 +1080,9 @@ func TestAuditDTOStatusMatchesExactFailureClassificationAcrossRoutes(t *testing.
 		if entry.Status != wantStatus[entry.Action] {
 			t.Fatalf("action %s status=%s want=%s", entry.Action, entry.Status, wantStatus[entry.Action])
 		}
+		if entry.Success != (entry.Status == "ok") {
+			t.Fatalf("action %s success=%v status=%s", entry.Action, entry.Success, entry.Status)
+		}
 		if entry.Action == "token_download_failed" && entry.ActionLabel != "令牌下载失败" {
 			t.Fatalf("historical action label changed: %+v", entry)
 		}
@@ -1084,8 +1091,8 @@ func TestAuditDTOStatusMatchesExactFailureClassificationAcrossRoutes(t *testing.
 		status string
 		want   int
 	}{
-		{"failed", 3},
-		{"ok", 2},
+		{"failed", 5},
+		{"ok", 4},
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/api/admin/audit?page=1&pageSize=20&status="+tc.status, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
@@ -1114,7 +1121,7 @@ func TestAuditDTOStatusMatchesExactFailureClassificationAcrossRoutes(t *testing.
 		Logs []map[string]any `json:"logs"`
 	}
 	decodeJSON(t, resp, &raw)
-	allowed := map[string]bool{"id": true, "action": true, "actionLabel": true, "status": true, "ip": true, "detail": true, "createdAt": true}
+	allowed := map[string]bool{"id": true, "action": true, "actionLabel": true, "status": true, "success": true, "ip": true, "detail": true, "createdAt": true}
 	for key := range raw.Logs[0] {
 		if !allowed[key] {
 			t.Fatalf("audit DTO leaked unexpected field %q", key)
@@ -1914,8 +1921,13 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("idle me request: %v", err)
 	}
+	var idlePayload map[string]any
+	decodeJSON(t, idleResp, &idlePayload)
 	if idleResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected idle session to be unauthorized, got %d", idleResp.StatusCode)
+	}
+	if idlePayload["code"] == "session_idle_recoverable" {
+		t.Fatalf("session beyond idle grace must not be marked recoverable: %v", idlePayload)
 	}
 
 	if err := st.CreateSessionWithIdle("active-sid", now.Add(time.Hour), now.Add(time.Minute), "user", ""); err != nil {
@@ -1951,9 +1963,13 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict idle request: %v", err)
 	}
-	strictResp.Body.Close()
+	var strictPayload map[string]any
+	decodeJSON(t, strictResp, &strictPayload)
 	if strictResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected ordinary API to reject idle session, got %d", strictResp.StatusCode)
+	}
+	if strictPayload["code"] != "session_idle_recoverable" {
+		t.Fatalf("expected machine-readable recoverable idle code, got %v", strictPayload)
 	}
 	if _, err := st.Session("grace-sid"); err != nil {
 		t.Fatalf("expected grace session to remain for heartbeat recovery: %v", err)
@@ -1967,6 +1983,117 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	graceHeartbeatResp.Body.Close()
 	if graceHeartbeatResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected heartbeat within grace to refresh session, got %d", graceHeartbeatResp.StatusCode)
+	}
+
+	cfg.Auth.IdleTimeoutSeconds = 600
+	absoluteExpiresAt := time.Now().Add(5 * time.Minute)
+	if err := st.CreateSessionWithIdle("absolute-cap-sid", absoluteExpiresAt, time.Now().Add(-5*time.Second), "user", ""); err != nil {
+		t.Fatalf("create absolute-cap session: %v", err)
+	}
+	capBefore, err := st.Session("absolute-cap-sid")
+	if err != nil {
+		t.Fatalf("load absolute-cap session: %v", err)
+	}
+	capReq := httptest.NewRequest(http.MethodPost, "/api/auth/heartbeat", nil)
+	capReq.AddCookie(&http.Cookie{Name: "sid", Value: "absolute-cap-sid"})
+	capResp, err := app.Test(capReq)
+	if err != nil {
+		t.Fatalf("absolute-cap heartbeat: %v", err)
+	}
+	capResp.Body.Close()
+	if capResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected absolute-cap heartbeat ok, got %d", capResp.StatusCode)
+	}
+	capAfter, err := st.Session("absolute-cap-sid")
+	if err != nil {
+		t.Fatalf("reload absolute-cap session: %v", err)
+	}
+	if !capAfter.ExpiresAt.Equal(capBefore.ExpiresAt) || !capAfter.IdleExpiresAt.Equal(capAfter.ExpiresAt) {
+		t.Fatalf("heartbeat moved absolute expiry or exceeded its cap: before=%+v after=%+v", capBefore, capAfter)
+	}
+}
+
+func TestRecoverableIdleCodeForUserAndAdminOnlyWithinGrace(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+
+	cfg := testConfig(t.TempDir())
+	cfg.Auth.IdleGraceSeconds = 30
+	app := New(cfg, st)
+	now := time.Now()
+	for _, tc := range []struct {
+		id, role, name, path string
+	}{
+		{id: "recoverable-user", role: "user", path: "/api/dirs"},
+		{id: "recoverable-admin", role: "admin", name: "admin", path: "/api/config"},
+	} {
+		if err := st.CreateSessionWithIdle(tc.id, now.Add(time.Hour), now.Add(-10*time.Second), tc.role, tc.name); err != nil {
+			t.Fatalf("create %s session: %v", tc.role, err)
+		}
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: tc.id})
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("%s recoverable request: %v", tc.role, err)
+		}
+		var payload map[string]any
+		decodeJSON(t, resp, &payload)
+		if resp.StatusCode != http.StatusUnauthorized || payload["code"] != "session_idle_recoverable" {
+			t.Fatalf("unexpected %s recoverable response: status=%d payload=%v", tc.role, resp.StatusCode, payload)
+		}
+		if _, err := st.Session(tc.id); err != nil {
+			t.Fatalf("recoverable %s session was removed: %v", tc.role, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		id         string
+		expiresAt  time.Time
+		idleExpiry time.Time
+	}{
+		{name: "past grace", id: "past-grace", expiresAt: now.Add(time.Hour), idleExpiry: now.Add(-time.Minute)},
+		{name: "absolute expired", id: "absolute-expired", expiresAt: now.Add(-time.Second), idleExpiry: now.Add(-10 * time.Second)},
+	} {
+		if err := st.CreateSessionWithIdle(tc.id, tc.expiresAt, tc.idleExpiry, "user", ""); err != nil {
+			t.Fatalf("create %s session: %v", tc.name, err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: tc.id})
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("%s request: %v", tc.name, err)
+		}
+		var payload map[string]any
+		decodeJSON(t, resp, &payload)
+		if resp.StatusCode != http.StatusUnauthorized || payload["code"] == "session_idle_recoverable" {
+			t.Fatalf("%s was incorrectly recoverable: status=%d payload=%v", tc.name, resp.StatusCode, payload)
+		}
+	}
+
+	invalidReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	invalidReq.AddCookie(&http.Cookie{Name: "sid", Value: "not-a-session"})
+	invalidResp, err := app.Test(invalidReq)
+	if err != nil {
+		t.Fatalf("invalid session request: %v", err)
+	}
+	var invalidPayload map[string]any
+	decodeJSON(t, invalidResp, &invalidPayload)
+	if invalidResp.StatusCode != http.StatusUnauthorized || invalidPayload["code"] == "session_idle_recoverable" {
+		t.Fatalf("invalid session was incorrectly recoverable: status=%d payload=%v", invalidResp.StatusCode, invalidPayload)
+	}
+
+	logs, err := st.AuditLogs(50)
+	if err != nil {
+		t.Fatalf("load auth audit logs: %v", err)
+	}
+	for _, entry := range logs {
+		if entry.Action == "dirs" || entry.Action == "config_view" {
+			t.Fatalf("ordinary handler ran during idle grace: %+v", entry)
+		}
 	}
 }
 

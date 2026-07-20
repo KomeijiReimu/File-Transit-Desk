@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"io/fs"
 	"net"
@@ -375,6 +376,229 @@ func TestStartupMaintenanceRunsImmediatelyInBackground(t *testing.T) {
 	if err := runtime.Shutdown(); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
+}
+
+func TestStoreMaintenanceHonorsConfiguredIdleGrace(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+
+	cfg := testConfig(t.TempDir())
+	cfg.Auth.IdleGraceSeconds = 45
+	runtime := newRuntime(st)
+	defer runtime.cancel()
+	runtime.server = &Server{config: cfg}
+
+	now := time.Now().UTC()
+	if err := st.CreateSessionWithIdle("within-grace", now.Add(time.Hour), now.Add(-30*time.Second), "user", ""); err != nil {
+		t.Fatalf("create within-grace session: %v", err)
+	}
+	if err := st.CreateSessionWithIdle("past-grace", now.Add(time.Hour), now.Add(-50*time.Second), "user", ""); err != nil {
+		t.Fatalf("create past-grace session: %v", err)
+	}
+	if err := st.CreateSessionWithIdle("absolute-expired", now.Add(-time.Second), now.Add(time.Hour), "admin", "admin"); err != nil {
+		t.Fatalf("create absolute-expired session: %v", err)
+	}
+
+	runtime.runStoreMaintenance()
+	if _, err := st.Session("within-grace"); err != nil {
+		t.Fatalf("maintenance removed session before configured grace ended: %v", err)
+	}
+	for _, id := range []string{"past-grace", "absolute-expired"} {
+		if _, err := st.Session(id); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("maintenance retained expired session %q: %v", id, err)
+		}
+	}
+
+	if err := st.TouchSession("within-grace", now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatalf("move session beyond grace: %v", err)
+	}
+	runtime.runStoreMaintenance()
+	if _, err := st.Session("within-grace"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("maintenance retained session after grace ended: %v", err)
+	}
+}
+
+func TestStartupChatRetentionCatchesUpBeforeReadyAcrossBatches(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "startup-chat.db"), 1000)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	now := time.Now().UTC()
+	seedLifecycleChatMessages(t, st, 7, now.AddDate(0, 0, -2))
+	cfg := testConfig(t.TempDir())
+	cfg.Chat.RetentionDays = 1
+	cfg.Chat.MaxMessages = 2
+	cfg.Chat.CleanupBatch = 2
+	runtime, err := NewRuntimeWithOptions(cfg, st, "", Options{DevFrontendPort: 5173, maintenanceNow: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer runtime.Shutdown()
+	if !runtime.IsReady() {
+		t.Fatalf("runtime was not ready after successful startup catch-up")
+	}
+	if count := lifecycleChatMessageCount(t, st); count != 0 {
+		// Every seeded message is older than the age policy, so all seven must be
+		// drained despite a batch size of two before readiness is published.
+		t.Fatalf("startup exposed over-retention messages: %d", count)
+	}
+	state, err := st.CurrentChatSyncState()
+	if err != nil || state.Generation != 5 {
+		t.Fatalf("startup cleanup generation=%+v err=%v", state, err)
+	}
+}
+
+func TestStartupChatRetentionFailureKeepsRuntimeNotReady(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "startup-chat-failure.db"), 1000)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	now := time.Now().UTC()
+	seedLifecycleChatMessages(t, st, 1, now.AddDate(0, 0, -2))
+	if _, err := st.DB.Exec(`DROP TABLE chat_sync_metadata`); err != nil {
+		t.Fatalf("drop sync metadata: %v", err)
+	}
+	cfg := testConfig(t.TempDir())
+	cfg.Chat.RetentionDays = 1
+	runtime := newRuntime(st)
+	_, err = NewWithOptions(cfg, st, "", Options{DevFrontendPort: 5173, runtime: runtime, maintenanceNow: func() time.Time { return now }})
+	if err == nil {
+		t.Fatalf("startup succeeded after chat retention metadata failure")
+	}
+	if runtime.IsReady() {
+		t.Fatalf("failed startup runtime became ready")
+	}
+	if count := lifecycleChatMessageCount(t, st); count != 1 {
+		t.Fatalf("failed cleanup transaction did not roll back: messages=%d", count)
+	}
+	_ = runtime.Shutdown()
+}
+
+func TestPeriodicChatRetentionBudgetRetriesQuicklyUntilCaughtUp(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "periodic-chat.db"), 1000)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	now := time.Now().UTC()
+	seedLifecycleChatMessages(t, st, 7, now.Add(-time.Hour))
+	cfg := testConfig(t.TempDir())
+	cfg.Chat.RetentionDays = 90
+	cfg.Chat.MaxMessages = 1
+	cfg.Chat.CleanupBatch = 2
+	runtime := newRuntime(st)
+	runtime.server = &Server{runtime: runtime, config: cfg, store: st, transfers: newTransferRegistry()}
+	runtime.storeMaintenanceInterval = time.Hour
+	runtime.chatCleanupBudget = time.Nanosecond
+	runtime.chatCleanupRetryDelay = 10 * time.Millisecond
+	runtime.startMaintenance()
+	defer runtime.Shutdown()
+	deadline := time.Now().Add(time.Second)
+	for lifecycleChatMessageCount(t, st) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("periodic retry did not catch up: messages=%d", lifecycleChatMessageCount(t, st))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	state, err := st.CurrentChatSyncState()
+	if err != nil || state.Generation != 4 {
+		t.Fatalf("periodic multi-batch generation=%+v err=%v", state, err)
+	}
+}
+
+func TestChatCleanupLoopStopsOnDrainCancellation(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "cancel-chat.db"), 1000)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	now := time.Now().UTC()
+	seedLifecycleChatMessages(t, st, 5, now.Add(-time.Hour))
+	cfg := testConfig(t.TempDir())
+	cfg.Chat.MaxMessages = 1
+	cfg.Chat.CleanupBatch = 1
+	runtime := newRuntime(st)
+	runtime.server = &Server{runtime: runtime, config: cfg, store: st}
+	runtime.BeginDrain()
+	if _, err := runtime.cleanupChatBatches(runtime.ctx, now, cfg.Chat, time.Time{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup did not stop on drain cancellation: %v", err)
+	}
+	if count := lifecycleChatMessageCount(t, st); count != 5 {
+		t.Fatalf("canceled cleanup removed messages: %d", count)
+	}
+}
+
+func TestDefaultChatRetentionThroughputConvergesAtMaximumWriteRate(t *testing.T) {
+	if defaultChatCleanupRetryDelay > time.Second {
+		t.Fatalf("chat retry delay exceeds one second: %s", defaultChatCleanupRetryDelay)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "throughput-chat.db"), 1000)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.DB.Close()
+	now := time.Now().UTC()
+	cfg := testConfig(t.TempDir())
+	cfg.Chat.RetentionDays = 3650
+	cfg.Chat.MaxMessages = 10
+	seedLifecycleChatMessages(t, st, 1510, now.Add(-time.Hour))
+	runtime := newRuntime(st)
+	defer runtime.cancel()
+	runtime.server = &Server{runtime: runtime, config: cfg, store: st}
+	runtime.chatCleanupBudget = time.Nanosecond
+	writesPerRetry := (cfg.Chat.GlobalMessagesPerMinute*int(defaultChatCleanupRetryDelay/time.Second) + 59) / 60
+	if writesPerRetry >= cfg.Chat.CleanupBatch {
+		t.Fatalf("default cleanup cannot outpace writes: batch=%d writes/retry=%d", cfg.Chat.CleanupBatch, writesPerRetry)
+	}
+	for cycle := 0; cycle < 10; cycle++ {
+		needsRetry := runtime.runPeriodicChatMaintenanceAt(now)
+		count := lifecycleChatMessageCount(t, st)
+		if !needsRetry {
+			if count != cfg.Chat.MaxMessages {
+				t.Fatalf("cleanup stopped above max messages: %d", count)
+			}
+			return
+		}
+		seedLifecycleChatMessages(t, st, writesPerRetry, now.Add(time.Duration(cycle+1)*time.Minute))
+	}
+	t.Fatalf("default cleanup did not converge: messages=%d", lifecycleChatMessageCount(t, st))
+}
+
+func seedLifecycleChatMessages(t *testing.T, st *store.Store, count int, createdAt time.Time) {
+	t.Helper()
+	tx, err := st.DB.Begin()
+	if err != nil {
+		t.Fatalf("begin chat seed: %v", err)
+	}
+	defer tx.Rollback()
+	for index := 0; index < count; index++ {
+		at := createdAt.Add(time.Duration(index) * time.Nanosecond)
+		result, err := tx.Exec(`INSERT INTO chat_messages(author_key, author_tag, author_role, source_ip, body, created_at) VALUES('owner', '访客-AAAAAA', 'user', '192.0.2.1', 'seed', ?)`, at)
+		if err != nil {
+			t.Fatalf("insert chat seed: %v", err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatalf("chat seed id: %v", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO chat_changes(message_id, kind, created_at) VALUES(?, 'create', ?)`, id, at); err != nil {
+			t.Fatalf("insert chat seed change: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit chat seed: %v", err)
+	}
+}
+
+func lifecycleChatMessageCount(t *testing.T, st *store.Store) int {
+	t.Helper()
+	var count int
+	if err := st.DB.QueryRow(`SELECT COUNT(*) FROM chat_messages`).Scan(&count); err != nil {
+		t.Fatalf("count chat messages: %v", err)
+	}
+	return count
 }
 
 func startRuntimeListener(t *testing.T, runtime *Runtime) (string, <-chan error) {

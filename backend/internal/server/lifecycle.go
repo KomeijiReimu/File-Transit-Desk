@@ -8,9 +8,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"filetrans-backend/internal/config"
 	"filetrans-backend/internal/store"
 
 	"github.com/gofiber/fiber/v2"
+)
+
+const (
+	defaultStoreMaintenanceInterval = 5 * time.Minute
+	defaultChatCleanupBudget        = 250 * time.Millisecond
+	defaultChatCleanupRetryDelay    = time.Second
 )
 
 type Runtime struct {
@@ -28,11 +35,22 @@ type Runtime struct {
 	activeMu    sync.Mutex
 	activeCond  *sync.Cond
 	active      int
+
+	storeMaintenanceInterval time.Duration
+	chatCleanupBudget        time.Duration
+	chatCleanupRetryDelay    time.Duration
 }
 
 func newRuntime(st *store.Store) *Runtime {
 	ctx, cancel := context.WithCancel(context.Background())
-	runtime := &Runtime{store: st, ctx: ctx, cancel: cancel}
+	runtime := &Runtime{
+		store:                    st,
+		ctx:                      ctx,
+		cancel:                   cancel,
+		storeMaintenanceInterval: defaultStoreMaintenanceInterval,
+		chatCleanupBudget:        defaultChatCleanupBudget,
+		chatCleanupRetryDelay:    defaultChatCleanupRetryDelay,
+	}
 	runtime.activeCond = sync.NewCond(&runtime.activeMu)
 	return runtime
 }
@@ -40,11 +58,15 @@ func newRuntime(st *store.Store) *Runtime {
 func (r *Runtime) BeginDrain() {
 	if r != nil {
 		r.draining.Store(true)
+		// Maintenance loops only use this context and check it between bounded
+		// transactions, so drain cancellation stops catch-up promptly without
+		// interrupting admitted request handlers.
+		r.cancel()
 	}
 }
 
 func (r *Runtime) IsReady() bool {
-	return r != nil && r.initialized.Load() && !r.draining.Load()
+	return r != nil && r.initialized.Load() && !r.draining.Load() && r.ctx.Err() == nil
 }
 
 func (r *Runtime) Done() <-chan struct{} {
@@ -118,9 +140,12 @@ func (r *Runtime) startMaintenance() {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.runStartupMaintenance()
 		r.server.triggerCurrentUploadTempCleanup(uploadCleanupSourceStartup)
-		storeTicker := time.NewTicker(5 * time.Minute)
+		storeInterval := r.storeMaintenanceInterval
+		if storeInterval <= 0 {
+			storeInterval = defaultStoreMaintenanceInterval
+		}
+		storeTicker := time.NewTicker(storeInterval)
 		defer storeTicker.Stop()
 		interval := time.Duration(r.server.cfg().Storage.UploadTempCleanupIntervalSeconds) * time.Second
 		var cleanupTicker *time.Ticker
@@ -130,12 +155,49 @@ func (r *Runtime) startMaintenance() {
 			cleanupC = cleanupTicker.C
 			defer cleanupTicker.Stop()
 		}
+		var retryTimer *time.Timer
+		var retryC <-chan time.Time
+		stopRetry := func() {
+			if retryTimer != nil && !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+			retryC = nil
+		}
+		defer stopRetry()
+		scheduleRetry := func() {
+			delay := r.chatCleanupRetryDelay
+			if delay <= 0 || delay > time.Second {
+				delay = defaultChatCleanupRetryDelay
+			}
+			if retryTimer == nil {
+				retryTimer = time.NewTimer(delay)
+			} else {
+				stopRetry()
+				retryTimer.Reset(delay)
+			}
+			retryC = retryTimer.C
+		}
+		if r.runPeriodicChatMaintenance() {
+			scheduleRetry()
+		}
 		for {
 			select {
 			case <-r.ctx.Done():
 				return
 			case <-storeTicker.C:
-				r.runStoreMaintenance()
+				if r.runStoreMaintenance() {
+					scheduleRetry()
+				} else {
+					stopRetry()
+				}
+			case <-retryC:
+				retryC = nil
+				if r.runPeriodicChatMaintenance() {
+					scheduleRetry()
+				}
 			case <-cleanupC:
 				r.server.triggerCurrentUploadTempCleanup(uploadCleanupSourcePeriodic)
 			}
@@ -143,19 +205,39 @@ func (r *Runtime) startMaintenance() {
 	}()
 }
 
-func (r *Runtime) runStartupMaintenance() {
-	r.runStoreMaintenance()
+func (r *Runtime) runStartupMaintenance() error {
+	if r.store == nil {
+		return nil
+	}
+	now := r.maintenanceTime()
+	r.runNonChatStoreMaintenance(now)
+	if r.server == nil {
+		return nil
+	}
+	chatCfg := r.server.cfg().Chat
+	_, err := r.cleanupChatBatches(r.ctx, now, chatCfg, time.Time{})
+	return err
 }
 
-func (r *Runtime) runStoreMaintenance() {
+func (r *Runtime) runStoreMaintenance() bool {
 	if r.store == nil {
-		return
+		return false
+	}
+	now := r.maintenanceTime()
+	r.runNonChatStoreMaintenance(now)
+	return r.runPeriodicChatMaintenanceAt(now)
+}
+
+func (r *Runtime) runNonChatStoreMaintenance(now time.Time) {
+	idleGrace := time.Duration(0)
+	if r.server != nil {
+		idleGrace = time.Duration(r.server.cfg().Auth.IdleGraceSeconds) * time.Second
 	}
 	operations := []func() error{
-		func() error { return r.store.DeleteExpiredSessions(time.Now()) },
-		func() error { return r.store.DeleteExpiredTokens(time.Now()) },
-		func() error { return r.store.DeleteExpiredDownloadLeases(time.Now()) },
-		func() error { return r.store.DeleteExpiredUploadLeases(time.Now()) },
+		func() error { return r.store.DeleteExpiredSessionsWithIdleGrace(now, idleGrace) },
+		func() error { return r.store.DeleteExpiredTokens(now) },
+		func() error { return r.store.DeleteExpiredDownloadLeases(now) },
+		func() error { return r.store.DeleteExpiredUploadLeases(now) },
 		r.store.PruneAudit,
 	}
 	for _, operation := range operations {
@@ -166,6 +248,58 @@ func (r *Runtime) runStoreMaintenance() {
 			log.Printf("[CRITICAL] event=maintenance_failed")
 		}
 	}
+}
+
+func (r *Runtime) runPeriodicChatMaintenance() bool {
+	return r.runPeriodicChatMaintenanceAt(r.maintenanceTime())
+}
+
+func (r *Runtime) runPeriodicChatMaintenanceAt(now time.Time) bool {
+	if r.store == nil || r.server == nil || r.ctx.Err() != nil {
+		return false
+	}
+	// Copy the current policy once. Every short transaction in this round uses
+	// the same snapshot; a hot config replacement takes effect next round.
+	chatCfg := r.server.cfg().Chat
+	budget := r.chatCleanupBudget
+	if budget <= 0 {
+		budget = defaultChatCleanupBudget
+	}
+	deadline := time.Now().Add(budget)
+	caughtUp, err := r.cleanupChatBatches(r.ctx, now, chatCfg, deadline)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("[CRITICAL] event=chat_retention_cleanup_failed")
+			return true
+		}
+		return false
+	}
+	return !caughtUp
+}
+
+func (r *Runtime) cleanupChatBatches(ctx context.Context, now time.Time, chatCfg config.ChatConfig, deadline time.Time) (bool, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		removed, err := r.store.CleanupChat(now, chatCfg.RetentionDays, chatCfg.MaxMessages, chatCfg.CleanupBatch)
+		if err != nil {
+			return false, err
+		}
+		if removed < chatCfg.CleanupBatch {
+			return true, nil
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return false, nil
+		}
+	}
+}
+
+func (r *Runtime) maintenanceTime() time.Time {
+	if r.server != nil && r.server.maintenanceNow != nil {
+		return r.server.maintenanceNow()
+	}
+	return time.Now()
 }
 
 func (s *Server) healthLive(c *fiber.Ctx) error {

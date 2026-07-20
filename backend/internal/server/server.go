@@ -66,11 +66,14 @@ type Server struct {
 	adminVerifySlots           chan struct{}
 	verifyAdminPHC             func(string, []byte) (bool, error)
 	proxyResolver              *proxyResolver
+	listenEndpoint             ListenEndpoint
 	devMode                    bool
 	devFrontendPort            int
 	limiterMu                  sync.Mutex
 	rateLimiter                *windowLimiter
 	auditLimiter               *windowLimiter
+	chatLimiter                *windowLimiter
+	chatNow                    func() time.Time
 	lookupSession              func(string) (store.Session, error)
 	availableDiskSpace         func(string) (uint64, uint64, error)
 	openDirectory              func(string) (fsutil.DirectoryReader, error)
@@ -92,6 +95,7 @@ type Options struct {
 	DevFrontendPort  int
 	uploadTempWalker uploadTempWalkFunc
 	maintenanceNow   func() time.Time
+	chatNow          func() time.Time
 	runtime          *Runtime
 }
 
@@ -237,6 +241,7 @@ type auditDTO struct {
 	Action      string    `json:"action"`
 	ActionLabel string    `json:"actionLabel"`
 	Status      string    `json:"status"`
+	Success     bool      `json:"success"`
 	IP          string    `json:"ip"`
 	Detail      string    `json:"detail"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -244,10 +249,11 @@ type auditDTO struct {
 
 func auditDTOFromStore(log store.AuditLog) auditDTO {
 	status := "ok"
-	if store.IsAuditFailureAction(log.Action) {
+	success := !store.IsAuditFailureAction(log.Action)
+	if !success {
 		status = "failed"
 	}
-	return auditDTO{ID: log.ID, Action: log.Action, ActionLabel: actionLabel(log.Action), Status: status, IP: log.IP, Detail: log.Detail, CreatedAt: log.CreatedAt}
+	return auditDTO{ID: log.ID, Action: log.Action, ActionLabel: actionLabel(log.Action), Status: status, Success: success, IP: log.IP, Detail: log.Detail, CreatedAt: log.CreatedAt}
 }
 
 type auditPageDTO struct {
@@ -269,9 +275,17 @@ type uploadLimitsDTO struct {
 }
 
 type shareOriginDTO struct {
-	Origin string `json:"origin"`
-	Label  string `json:"label"`
-	Source string `json:"source"`
+	Origin            string          `json:"origin"`
+	Label             string          `json:"label"`
+	Source            string          `json:"source"`
+	Sources           []string        `json:"sources,omitempty"`
+	Scope             string          `json:"scope"`
+	Interface         string          `json:"interface,omitempty"`
+	Interfaces        []string        `json:"interfaces,omitempty"`
+	ListenMatch       *bool           `json:"listenMatch,omitempty"`
+	ListenMatchStatus string          `json:"listenMatchStatus"`
+	Listen            *shareListenDTO `json:"listen,omitempty"`
+	Reachable         string          `json:"reachable"`
 }
 
 type loginLimiter struct {
@@ -289,12 +303,17 @@ type codedAPIError struct {
 	status  int
 	code    string
 	message string
+	fields  fiber.Map
 }
 
 func (e *codedAPIError) Error() string { return e.message }
 
 func newCodedAPIError(status int, code, message string) error {
 	return &codedAPIError{status: status, code: code, message: message}
+}
+
+func newCodedAPIErrorWithFields(status int, code, message string, fields fiber.Map) error {
+	return &codedAPIError{status: status, code: code, message: message, fields: fields}
 }
 
 const (
@@ -330,6 +349,10 @@ func NewWithOptions(cfg *config.Config, st *store.Store, configPath string, opti
 	if err != nil {
 		return nil, err
 	}
+	listenEndpoint, err := ResolveListenEndpoint(cfg.Server.Host, cfg.Server.Port)
+	if err != nil {
+		return nil, err
+	}
 	bodyLimit, err := checkedFiberBodyLimit(cfg.Storage.UploadMaxMB, int64(^uint(0)>>1))
 	if err != nil {
 		return nil, err
@@ -339,7 +362,7 @@ func NewWithOptions(cfg *config.Config, st *store.Store, configPath string, opti
 	if compatibilityRuntime {
 		runtime = newRuntime(st)
 	}
-	s := &Server{runtime: runtime, config: cfg, configPath: configPath, store: st, loginLimiter: newLoginLimiter(), rateLimiter: newWindowLimiter(), auditLimiter: newWindowLimiter(), transfers: newTransferRegistry(), adminVerifySlots: newAdminVerifySlots(cfg.Abuse.Login.MaxConcurrentAdminVerifications), proxyResolver: resolver, devMode: options.DevMode, devFrontendPort: options.DevFrontendPort, downloadHashSlots: make(chan struct{}, cfg.Downloads.MaxConcurrentHashes), downloadHashFlights: make(map[string]*downloadHashFlight)}
+	s := &Server{runtime: runtime, config: cfg, configPath: configPath, store: st, loginLimiter: newLoginLimiter(), rateLimiter: newWindowLimiter(), auditLimiter: newWindowLimiter(), chatLimiter: newWindowLimiterWithMaxEntries(4096), chatNow: options.chatNow, transfers: newTransferRegistry(), adminVerifySlots: newAdminVerifySlots(cfg.Abuse.Login.MaxConcurrentAdminVerifications), proxyResolver: resolver, listenEndpoint: listenEndpoint, devMode: options.DevMode, devFrontendPort: options.DevFrontendPort, downloadHashSlots: make(chan struct{}, cfg.Downloads.MaxConcurrentHashes), downloadHashFlights: make(map[string]*downloadHashFlight)}
 	runtime.server = s
 	s.uploadTempWalker = options.uploadTempWalker
 	s.maintenanceNow = options.maintenanceNow
@@ -353,6 +376,7 @@ func NewWithOptions(cfg *config.Config, st *store.Store, configPath string, opti
 		StreamRequestBody: true,
 		ErrorHandler:      jsonErrorHandler,
 		IdleTimeout:       time.Duration(cfg.Server.KeepaliveIdleTimeoutSeconds) * time.Second,
+		Network:           listenEndpoint.Network,
 	})
 	app.Use(capabilityResponseHeaders)
 	app.Use(runtime.requestAdmission)
@@ -367,7 +391,7 @@ func NewWithOptions(cfg *config.Config, st *store.Store, configPath string, opti
 			}
 			return s.devMode && developmentFrontendOrigin(origin, s.devFrontendPort)
 		},
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Session-Binding",
 		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
 		AllowCredentials: true,
 	}))
@@ -375,6 +399,11 @@ func NewWithOptions(cfg *config.Config, st *store.Store, configPath string, opti
 	s.routes(app)
 	s.static(app)
 	runtime.App = app
+	if err := runtime.runStartupMaintenance(); err != nil {
+		log.Printf("[CRITICAL] event=chat_retention_startup_failed")
+		runtime.cancel()
+		return nil, fmt.Errorf("startup chat retention cleanup: %w", err)
+	}
 	if compatibilityRuntime {
 		s.maintenanceContext = func() context.Context { return runtime.ctx }
 		s.maintenanceWG = &runtime.wg
@@ -417,6 +446,12 @@ func capabilityResponseHeaders(c *fiber.Ctx) error {
 	if path == "/api/tokens" {
 		sensitive = true
 	}
+	if path == "/api/chat" || strings.HasPrefix(path, "/api/chat/") || path == "/api/admin/chat" || strings.HasPrefix(path, "/api/admin/chat/") {
+		sensitive = true
+	}
+	if path == "/api/auth" || strings.HasPrefix(path, "/api/auth/") {
+		sensitive = true
+	}
 	switch path {
 	case "/api/files/download-lease", "/api/files/download-by-lease", "/api/files/upload-lease", "/api/files/upload-raw-by-lease", "/api/files/upload-by-lease":
 		sensitive = true
@@ -449,6 +484,9 @@ func jsonErrorHandler(c *fiber.Ctx, err error) error {
 	if e, ok := err.(*codedAPIError); ok {
 		code = e.status
 		message = e.message
+		for key, value := range e.fields {
+			payload[key] = value
+		}
 		payload["code"] = e.code
 	} else if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
@@ -479,6 +517,14 @@ func (s *Server) routes(app *fiber.App) {
 	app.Post("/api/files/upload-raw-by-lease", s.uploadRawByLease)
 	app.Post("/api/files/upload-by-lease", s.uploadByLease)
 	app.Post("/api/files/upload", s.auth(s.uploadFiles))
+	app.Get("/api/chat/capabilities", s.auth(s.chatCapabilities))
+	app.Get("/api/chat/messages", s.auth(s.chatMessages))
+	app.Get("/api/chat/changes", s.auth(s.chatChanges))
+	app.Post("/api/chat/messages", s.auth(s.createChatMessage))
+	app.Post("/api/chat/messages/:id/withdraw", s.auth(s.withdrawChatMessage))
+	app.Get("/api/admin/chat/messages", s.adminOnly(s.adminChatMessages))
+	app.Get("/api/admin/chat/changes", s.adminOnly(s.adminChatChanges))
+	app.Delete("/api/admin/chat/messages/:id", s.adminOnly(s.deleteChatMessage))
 	app.Get("/api/transfers/active", s.adminOnly(s.activeTransfers))
 	app.Post("/api/transfers/:id/cancel", s.adminOnly(s.cancelTransfer))
 	app.Get("/api/tokens", s.adminOnly(s.listTokens))
@@ -631,22 +677,36 @@ func (s *Server) auth(next fiber.Handler) fiber.Handler {
 		}
 		now := time.Now()
 		grace := time.Duration(s.cfg().Auth.IdleGraceSeconds) * time.Second
+		absoluteValid := err == nil && now.Before(sess.ExpiresAt)
 		idleValid := err == nil && now.Before(sess.IdleExpiresAt)
-		withinIdleGrace := err == nil && !idleValid && grace > 0 && now.Before(sess.IdleExpiresAt.Add(grace))
-		if withinIdleGrace && c.Path() == "/api/auth/heartbeat" {
+		idleRecoverable := absoluteValid && !idleValid && grace > 0 && now.Before(sess.IdleExpiresAt.Add(grace))
+		binding := ""
+		if err == nil {
+			binding = sessionBindingForID(sess.ID)
+		}
+		expectedBinding := strings.TrimSpace(c.Get(sessionBindingHeader))
+		if absoluteValid && expectedBinding != "" && !sessionBindingEqual(expectedBinding, binding) {
+			s.sampledRequestAudit(c, "session_subject_changed", "auth", "会话主体绑定不匹配")
+			return newCodedAPIError(fiber.StatusConflict, "session_subject_changed", "会话主体已变化，请重新确认登录状态。")
+		}
+		if idleRecoverable && c.Path() == "/api/auth/heartbeat" {
 			// 只允许心跳在短宽限期内恢复会话，普通业务请求不能借宽限继续访问文件。
 			idleValid = true
 		}
-		if err != nil || !now.Before(sess.ExpiresAt) || !idleValid {
-			if id != "" && !withinIdleGrace {
+		if !absoluteValid || !idleValid {
+			if id != "" && !idleRecoverable {
 				s.clearSessionCookie(c)
 			}
 			s.sampledRequestAudit(c, "unauthorized", "", "会话无效或已过期")
+			if idleRecoverable {
+				return newCodedAPIErrorWithFields(fiber.StatusUnauthorized, "session_idle_recoverable", "会话因空闲已过期，可在宽限期内恢复。", fiber.Map{"sessionBinding": binding})
+			}
 			return fiber.ErrUnauthorized
 		}
 		c.Locals("sessionID", sess.ID)
 		c.Locals("sessionExpiresAt", sess.ExpiresAt)
 		c.Locals("sessionIdleExpiresAt", sess.IdleExpiresAt)
+		c.Locals("sessionBinding", binding)
 		c.Locals("role", sess.Role)
 		c.Locals("name", sess.Name)
 		return next(c)
@@ -696,9 +756,13 @@ func (s *Server) login(c *fiber.Ctx) error {
 	if err := s.store.CreateSessionWithIdle(id, expiresAt, idleExpiresAt, "user", ""); err != nil {
 		return err
 	}
+	sess, err := s.store.Session(id)
+	if err != nil {
+		return err
+	}
 	s.setSessionCookie(c, id, expiresAt)
 	s.criticalAudit("login_success", ip, "")
-	return c.JSON(fiber.Map{"authenticated": true, "role": "user", "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt})
+	return c.JSON(fiber.Map{"authenticated": true, "role": "user", "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt, "sessionBinding": sessionBindingForID(sess.ID)})
 }
 
 func (s *Server) adminLogin(c *fiber.Ctx) error {
@@ -739,9 +803,13 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 	if err := s.store.CreateSessionWithIdle(id, expiresAt, idleExpiresAt, "admin", in.Username); err != nil {
 		return err
 	}
+	sess, err := s.store.Session(id)
+	if err != nil {
+		return err
+	}
 	s.setSessionCookie(c, id, expiresAt)
 	s.criticalAudit("login_success", ip, "管理员登录")
-	return c.JSON(fiber.Map{"authenticated": true, "role": "admin", "name": in.Username, "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt})
+	return c.JSON(fiber.Map{"authenticated": true, "role": "admin", "name": in.Username, "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt, "sessionBinding": sessionBindingForID(sess.ID)})
 }
 
 const maxAdminLoginBodyBytes = 4096
@@ -867,6 +935,9 @@ func (s *Server) clearSessionCookie(c *fiber.Ctx) {
 
 func (s *Server) me(c *fiber.Ctx) error {
 	out := fiber.Map{"authenticated": true, "role": c.Locals("role")}
+	if binding, ok := c.Locals("sessionBinding").(string); ok && binding != "" {
+		out["sessionBinding"] = binding
+	}
 	if expiresAt, ok := c.Locals("sessionExpiresAt").(time.Time); ok {
 		out["expiresAt"] = expiresAt
 	}
@@ -893,7 +964,7 @@ func (s *Server) heartbeat(c *fiber.Ctx) error {
 		}
 		return err
 	}
-	return c.JSON(fiber.Map{"ok": true, "idleExpiresAt": idleExpiresAt})
+	return c.JSON(fiber.Map{"ok": true, "idleExpiresAt": idleExpiresAt, "sessionBinding": c.Locals("sessionBinding")})
 }
 
 func (s *Server) logout(c *fiber.Ctx) error {
@@ -938,103 +1009,24 @@ func (s *Server) uploadPolicy(c *fiber.Ctx) error {
 }
 
 func (s *Server) shareOrigins(c *fiber.Ctx) error {
-	scheme, port := shareOriginSchemePort(c.Query("currentOrigin"), c)
-	items := make([]shareOriginDTO, 0)
-	seen := map[string]bool{}
-	for _, ip := range localShareIPs() {
-		origin := originFromIP(scheme, ip, port)
-		if origin == "" || seen[origin] {
-			continue
-		}
-		seen[origin] = true
-		label := "本机地址 " + ip.String()
-		if ip.IsPrivate() {
-			label = "局域网 " + ip.String()
-		}
-		items = append(items, shareOriginDTO{Origin: origin, Label: label, Source: "interface"})
+	cfg := s.cfg()
+	current, ok := normalizeShareOrigin(c.Query("currentOrigin"))
+	if !ok {
+		// 请求来源只通过统一的 trusted-proxy 边界解析，不能直接采用客户端伪造的转发头。
+		current, ok = normalizeShareOrigin(s.requestOrigin(c))
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Origin < items[j].Origin })
-	return c.JSON(items)
-}
-
-func shareOriginSchemePort(currentOrigin string, c *fiber.Ctx) (string, string) {
-	scheme, port := "http", ""
-	if parsed, err := url.Parse(strings.TrimSpace(currentOrigin)); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		scheme = parsed.Scheme
-		port = parsed.Port()
-		return scheme, port
+	if !ok {
+		current = defaultShareOriginContext(cfg.Server.Port)
 	}
-	if c.Protocol() != "" {
-		scheme = c.Protocol()
-	}
-	if host := c.Hostname(); host != "" {
-		if _, p, err := net.SplitHostPort(host); err == nil {
-			port = p
-		} else if strings.Contains(host, ":") && !strings.Contains(host, "]") {
-			port = ""
-		} else if idx := strings.LastIndex(host, ":"); idx > -1 {
-			port = host[idx+1:]
-		}
-	}
-	return scheme, port
-}
-
-func localShareIPs() []net.IP {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
-	out := make([]net.IP, 0)
-	seen := map[string]bool{}
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
+	listenEndpoint := s.listenEndpoint
+	if listenEndpoint.Network == "" {
+		var err error
+		listenEndpoint, err = ResolveListenEndpoint(cfg.Server.Host, cfg.Server.Port)
 		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
-				continue
-			}
-			if v4 := ip.To4(); v4 != nil {
-				ip = v4
-			}
-			key := ip.String()
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, ip)
+			return err
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
-	return out
-}
-
-func originFromIP(scheme string, ip net.IP, port string) string {
-	if ip == nil {
-		return ""
-	}
-	host := ip.String()
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	if port != "" {
-		host = net.JoinHostPort(strings.Trim(host, "[]"), port)
-		if strings.Contains(ip.String(), ":") {
-			host = "[" + ip.String() + "]:" + port
-		}
-	}
-	return scheme + "://" + host
+	return c.JSON(buildShareOriginCandidates(listenEndpoint, current, localShareInterfaceAddresses()))
 }
 
 func dirToDTO(dir config.Dir, includeRoot bool) dirDTO {
@@ -3577,6 +3569,10 @@ func actionLabel(action string) string {
 		"config_upload_policy_update":           "修改上传策略",
 		"file_picker_select":                    "选择服务端路径",
 		"file_picker_denied":                    "文件选择拒绝",
+		"chat_withdraw":                         "撤回聊天消息",
+		"chat_delete":                           "删除聊天消息",
+		"chat_withdraw_failed":                  "撤回聊天消息失败",
+		"chat_delete_failed":                    "删除聊天消息失败",
 	}
 	if label, ok := labels[action]; ok {
 		return label

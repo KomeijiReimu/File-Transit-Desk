@@ -1,9 +1,21 @@
 import router from '@/router'
+import {
+  authenticationEpoch,
+  currentSessionBinding,
+  expireSessionOnce,
+  invalidateSessionSubject,
+} from '@/authEpoch'
+import { recoverIdleSession, runSessionHeartbeat, sessionRecoveryAttempt } from '@/authRecovery'
+import { recentSessionActivity } from '@/sessionActivity'
 import { buildTransferUrl } from '@/utils'
 import type {
   AdminLoginPayload,
   AuditLog,
   AuditLogPage,
+  ChatCapabilities,
+  ChatChangesResponse,
+  ChatHistoryResponse,
+  ChatMutationResponse,
   CreateTokenPayload,
   CreateTokenResponse,
   DirectoryInfo,
@@ -45,7 +57,12 @@ export class ApiError extends Error {
 }
 
 // suppressAuthRedirect 用于心跳、会话恢复和公开页，避免后台探测接口把用户强制跳走。
-type ApiRequestInit = RequestInit & { suppressAuthRedirect?: boolean }
+type ApiRequestInit = RequestInit & {
+  suppressAuthRedirect?: boolean
+  sessionRecovery?: boolean
+  expectedSessionBinding?: string
+  deferSessionSubjectChange?: boolean
+}
 type UploadOptions = {
   onProgress?: (progress: { loaded: number; total: number; percent: number }) => void
   signal?: AbortSignal
@@ -55,6 +72,7 @@ type UploadOptions = {
 }
 
 type HeaderReader = Pick<Headers, 'get'>
+const SESSION_BINDING_HEADER = 'X-Session-Binding'
 
 function safeServerMessage(value: unknown) {
   if (typeof value !== 'string' && typeof value !== 'number') return ''
@@ -88,10 +106,10 @@ export function parseErrorPayload(status: number, headers: HeaderReader, body?: 
   }
 }
 
-function handleAuthExpired(status: number, suppressAuthRedirect: boolean) {
-  if (suppressAuthRedirect || status !== 401 || router.currentRoute.value.meta?.public === true || router.currentRoute.value.name === 'login') return
-  // 统一广播会话过期，auth.ts 负责清理本地状态，路由负责回到登录页。
-  window.dispatchEvent(new Event('ft:auth-expired'))
+function handleAuthExpired(status: number, suppressAuthRedirect: boolean, requestEpoch: number) {
+  if (suppressAuthRedirect || status !== 401 || !expireSessionOnce(requestEpoch)) return
+  // 本地认证状态已同步清理；公开页和登录页只跳过导航，不能吞掉清理。
+  if (router.currentRoute.value.meta?.public === true || router.currentRoute.value.name === 'login') return
   void router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
 }
 
@@ -101,46 +119,211 @@ function responsePayload(contentType: string, text: string) {
   return looksLikeJson && text ? safeJSON(text) : text
 }
 
-function apiError(status: number, headers: HeaderReader, payload: unknown, text: string, suppressAuthRedirect: boolean) {
+function apiError(status: number, headers: HeaderReader, payload: unknown, text: string) {
   const parsed = parseErrorPayload(status, headers, payload, text)
-  handleAuthExpired(status, suppressAuthRedirect)
   return new ApiError(parsed.message, status, parsed.details, parsed.code, parsed.retryAfter)
 }
 
-async function parseResponse<T>(response: Response, suppressAuthRedirect = false): Promise<T> {
+function responseSessionBinding(error: ApiError) {
+  if (!error.details || typeof error.details !== 'object' || Array.isArray(error.details)) return undefined
+  const value = (error.details as Record<string, unknown>).sessionBinding
+  if (typeof value !== 'string') return undefined
+  const binding = value.trim()
+  return binding && binding.length <= 128 ? binding : undefined
+}
+
+function sessionSubjectChangedError(details?: unknown) {
+  return new ApiError('会话主体已变化，旧请求未执行。', 409, details, 'session_subject_changed')
+}
+
+function sessionBindingRequiredError() {
+  return new ApiError('当前会话尚未完成身份绑定，请等待重新确认。', 409, { bindingRequired: true }, 'session_binding_required')
+}
+
+function signalSessionSubjectChange(requestEpoch: number, requestBinding: string | undefined) {
+  invalidateSessionSubject(requestEpoch, requestBinding, 'session_subject_changed')
+}
+
+async function parseResponse<T>(response: Response): Promise<T> {
   const contentType = response.headers.get('content-type') || ''
   const text = await response.text().catch(() => '')
   const payload = responsePayload(contentType, text)
 
   if (!response.ok) {
-    throw apiError(response.status, response.headers, payload, text, suppressAuthRedirect)
+    throw apiError(response.status, response.headers, payload, text)
   }
 
   return (payload ?? {}) as T
 }
 
 async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T> {
-  const { suppressAuthRedirect = false, ...fetchOptions } = options
-  const headers = new Headers(options.headers)
-  const isFormData = options.body instanceof FormData
-  if (!isFormData && options.body && !headers.has('Content-Type')) {
+  const {
+    suppressAuthRedirect = false,
+    sessionRecovery = true,
+    expectedSessionBinding,
+    deferSessionSubjectChange = false,
+    ...fetchOptions
+  } = options
+  const headers = new Headers(fetchOptions.headers)
+  const isFormData = fetchOptions.body instanceof FormData
+  if (!isFormData && fetchOptions.body && !headers.has('Content-Type')) {
     // multipart 让浏览器自动补 boundary；其他有 body 的请求默认按 JSON 发送。
     headers.set('Content-Type', 'application/json')
   }
-  try {
-    return await parseResponse<T>(
-      await fetch(url, {
+
+  const capabilityPath = /^(?:\/t\/|\/api\/files\/(?:download|upload(?:-raw)?)-by-lease(?:[/?]|$))/.test(url)
+  const bearerAuth = /^Bearer\s+/i.test(headers.get('Authorization') || '')
+  const capabilityAuth = capabilityPath || bearerAuth || fetchOptions.credentials === 'omit'
+  const identityBootstrapPath = /^\/api\/auth\/(?:login|admin-login|me)(?:[/?]|$)/.test(url)
+  const localSessionBinding = currentSessionBinding()?.trim() || undefined
+  const requestBinding = expectedSessionBinding?.trim() || localSessionBinding
+  const requestBindingTracksLocalSubject = localSessionBinding !== undefined && requestBinding === localSessionBinding
+  const cookieProtectedRequest = !capabilityAuth && !identityBootstrapPath
+  if (cookieProtectedRequest && requestBinding === undefined) {
+    // Do not fetch, recover idle state, expire auth, or replay under an unknown
+    // Cookie subject. Existing auth/route revalidation owns restoring a binding.
+    throw sessionBindingRequiredError()
+  }
+  const subjectBoundRequest = cookieProtectedRequest
+  if (subjectBoundRequest) headers.set(SESSION_BINDING_HEADER, requestBinding as string)
+  else headers.delete(SESSION_BINDING_HEADER)
+  const suppressAuthExpiry = suppressAuthRedirect || capabilityAuth
+  const canRecoverSession = sessionRecovery && !capabilityAuth
+  const requestEpoch = authenticationEpoch()
+  const activityPermit = recentSessionActivity()
+  const observedRecoveryAttempt = sessionRecoveryAttempt()
+
+  const execute = async () => {
+    try {
+      return await parseResponse<T>(await fetch(url, {
         credentials: 'include',
         ...fetchOptions,
         headers,
-      }),
-      suppressAuthRedirect,
-    )
-  } catch (err) {
-    if (err instanceof ApiError) throw err
-    if (err instanceof DOMException && err.name === 'AbortError') throw new ApiError('请求已取消。', 0, { aborted: true })
-    throw new ApiError('无法连接服务器，请检查后端服务或网络连接。', 0, err)
+      }))
+    } catch (err) {
+      if (err instanceof ApiError) throw err
+      if (err instanceof DOMException && err.name === 'AbortError') throw new ApiError('请求已取消。', 0, { aborted: true })
+      throw new ApiError('无法连接服务器，请检查后端服务或网络连接。', 0, err)
+    }
   }
+
+  try {
+    const value = await execute()
+    if (subjectBoundRequest && (authenticationEpoch() !== requestEpoch || requestBindingTracksLocalSubject && currentSessionBinding() !== requestBinding)) {
+      throw sessionSubjectChangedError({ stale: true })
+    }
+    return value
+  } catch (err) {
+    if (!(err instanceof ApiError)) throw err
+    if (!capabilityAuth && !deferSessionSubjectChange && err.status === 409 && err.code === 'session_subject_changed') {
+      signalSessionSubjectChange(requestEpoch, requestBinding)
+      throw err
+    }
+    if (canRecoverSession && err.status === 401 && err.code === 'session_idle_recoverable') {
+      const recoverableBinding = responseSessionBinding(err)
+      if (requestBinding !== undefined && recoverableBinding !== requestBinding) {
+        signalSessionSubjectChange(requestEpoch, requestBinding)
+        throw sessionSubjectChangedError(err.details)
+      }
+      // /me is a non-business identity probe and may bootstrap the binding on
+      // cold start. Ordinary protected calls never adopt a binding from a 401.
+      const recoveryBinding = requestBinding ?? (identityBootstrapPath ? recoverableBinding : undefined)
+      const recovery = await recoverIdleSession(
+        {
+          authEpoch: requestEpoch,
+          observedAttempt: observedRecoveryAttempt,
+          sessionBinding: recoveryBinding,
+          activityGeneration: activityPermit?.generation,
+          activityRecordedAt: activityPermit?.recordedAt,
+        },
+        () => heartbeatRequest(recoveryBinding),
+      )
+      if ('subjectChanged' in recovery) {
+        signalSessionSubjectChange(requestEpoch, requestBinding)
+        throw sessionSubjectChangedError(err.details)
+      }
+      if ('stale' in recovery || authenticationEpoch() !== requestEpoch) {
+        if (requestBinding !== undefined) throw sessionSubjectChangedError({ stale: true })
+        throw err
+      }
+      if ('denied' in recovery) {
+        handleAuthExpired(401, suppressAuthExpiry, requestEpoch)
+        throw err
+      }
+      if (!recovery.recovered) {
+        // 网络、超时和 5xx 都不是明确的登录失效；只有 heartbeat 的 401 才过期。
+        if (recovery.authFailure) handleAuthExpired(401, suppressAuthExpiry, requestEpoch)
+        throw recovery.error
+      }
+      try {
+        // 同一个业务请求只重放一次；认证 epoch 改变后严禁在新主体下重放。
+        if (authenticationEpoch() !== requestEpoch || requestBindingTracksLocalSubject && currentSessionBinding() !== requestBinding) {
+          throw sessionSubjectChangedError({ stale: true })
+        }
+        const value = await execute()
+        if (authenticationEpoch() !== requestEpoch || requestBindingTracksLocalSubject && currentSessionBinding() !== requestBinding) {
+          throw sessionSubjectChangedError({ stale: true })
+        }
+        return value
+      } catch (retryError) {
+        if (retryError instanceof ApiError && retryError.status === 409 && retryError.code === 'session_subject_changed') {
+          signalSessionSubjectChange(requestEpoch, requestBinding)
+          throw retryError
+        }
+        if (retryError instanceof ApiError && retryError.status === 401) {
+          handleAuthExpired(401, suppressAuthExpiry, requestEpoch)
+        }
+        throw retryError
+      }
+    }
+    handleAuthExpired(err.status, suppressAuthExpiry, requestEpoch)
+    throw err
+  }
+}
+
+const HEARTBEAT_TIMEOUT_MS = 9_000
+
+async function heartbeatRequest(expectedSessionBinding?: string) {
+  const controller = new AbortController()
+  const timeout = globalThis.setTimeout(() => controller.abort(), HEARTBEAT_TIMEOUT_MS)
+  try {
+    return await request<{ ok: boolean; idleExpiresAt?: string; sessionBinding?: string }>('/api/auth/heartbeat', {
+      method: 'POST',
+      signal: controller.signal,
+      suppressAuthRedirect: true,
+      sessionRecovery: false,
+      expectedSessionBinding,
+      deferSessionSubjectChange: true,
+    })
+  } finally {
+    globalThis.clearTimeout(timeout)
+  }
+}
+
+async function heartbeat() {
+  const requestEpoch = authenticationEpoch()
+  const requestBinding = currentSessionBinding()
+  const activityPermit = recentSessionActivity()
+  const result = await runSessionHeartbeat(
+    {
+      authEpoch: requestEpoch,
+      observedAttempt: sessionRecoveryAttempt(),
+      sessionBinding: requestBinding,
+      activityGeneration: activityPermit?.generation,
+      activityRecordedAt: activityPermit?.recordedAt,
+    },
+    () => heartbeatRequest(requestBinding),
+  )
+  if (result.recovered) return result.value
+  if ('subjectChanged' in result) {
+    signalSessionSubjectChange(requestEpoch, requestBinding)
+    throw sessionSubjectChangedError()
+  }
+  if ('error' in result) throw result.error
+  if ('denied' in result) {
+    throw new ApiError('需要近期用户活动才能发送会话心跳。', 0, { denied: true }, 'session_activity_required')
+  }
+  throw sessionSubjectChangedError({ stale: true })
 }
 
 async function publicRequest<T>(url: string, options: ApiRequestInit = {}): Promise<T> {
@@ -148,13 +331,18 @@ async function publicRequest<T>(url: string, options: ApiRequestInit = {}): Prom
     ...options,
     credentials: 'omit',
     suppressAuthRedirect: true,
+    sessionRecovery: false,
   })
 }
 
 function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {}): Promise<T> {
+  const requestEpoch = authenticationEpoch()
+  const requestBinding = currentSessionBinding()
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     const { onProgress, signal, suppressAuthRedirect = false, withCredentials = true, headers } = options
+    const bearerAuth = Object.entries(headers || {}).some(([key, value]) => key.toLowerCase() === 'authorization' && /^Bearer\s+/i.test(value))
+    const subjectBoundRequest = withCredentials && !bearerAuth && requestBinding !== undefined
     let settled = false
     const abortHandler = () => xhr.abort()
     const cleanup = () => signal?.removeEventListener('abort', abortHandler)
@@ -181,6 +369,7 @@ function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {})
       xhr.timeout = 0
       xhr.withCredentials = withCredentials
       Object.entries(headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value))
+      if (subjectBoundRequest) xhr.setRequestHeader(SESSION_BINDING_HEADER, requestBinding)
       xhr.upload.onprogress = (event) => {
         const total = event.lengthComputable && event.total > 0 ? event.total : 0
         const loaded = event.loaded || 0
@@ -194,7 +383,16 @@ function uploadForm<T>(url: string, form: FormData, options: UploadOptions = {})
         const text = xhr.responseText || ''
         const payload = responsePayload(contentType, text)
         if (xhr.status < 200 || xhr.status >= 300) {
-          rejectOnce(apiError(xhr.status, { get: (name) => xhr.getResponseHeader(name) }, payload, text, suppressAuthRedirect))
+          const error = apiError(xhr.status, { get: (name) => xhr.getResponseHeader(name) }, payload, text)
+          if (error.status === 409 && error.code === 'session_subject_changed') {
+            signalSessionSubjectChange(requestEpoch, requestBinding)
+          }
+          handleAuthExpired(xhr.status, suppressAuthRedirect, requestEpoch)
+          rejectOnce(error)
+          return
+        }
+        if (subjectBoundRequest && (authenticationEpoch() !== requestEpoch || currentSessionBinding() !== requestBinding)) {
+          rejectOnce(sessionSubjectChangedError({ stale: true }))
           return
         }
         resolveOnce((payload || {}) as T)
@@ -250,7 +448,7 @@ function uploadRaw<T>(rawUploadUrl: string, lease: string, file: File, options: 
         const payload = responsePayload(contentType, text)
         if (xhr.status < 200 || xhr.status >= 300) {
           // Bearer lease 已独立授权，401 只反馈给当前上传，绝不改变页面登录状态。
-          rejectOnce(apiError(xhr.status, { get: (name) => xhr.getResponseHeader(name) }, payload, text, true))
+          rejectOnce(apiError(xhr.status, { get: (name) => xhr.getResponseHeader(name) }, payload, text))
           return
         }
         resolveOnce((payload || {}) as T)
@@ -291,16 +489,26 @@ export interface AuditFilter {
 
 export const api = {
   login: (totp: string) =>
-    request<UserInfo>('/api/auth/login', { method: 'POST', body: JSON.stringify({ totp, code: totp }) }),
-  adminLogin: (payload: AdminLoginPayload) =>
-    request<UserInfo>('/api/auth/admin-login', { method: 'POST', body: JSON.stringify(payload) }),
-  me: () => request<UserInfo>('/api/auth/me', { suppressAuthRedirect: true }),
-  heartbeat: () =>
-    request<{ ok: boolean; idleExpiresAt?: string }>('/api/auth/heartbeat', {
+    request<UserInfo>('/api/auth/login', {
       method: 'POST',
+      body: JSON.stringify({ totp, code: totp }),
       suppressAuthRedirect: true,
+      sessionRecovery: false,
     }),
-  logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  adminLogin: (payload: AdminLoginPayload) =>
+    request<UserInfo>('/api/auth/admin-login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      suppressAuthRedirect: true,
+      sessionRecovery: false,
+    }),
+  me: () => request<UserInfo>('/api/auth/me', { suppressAuthRedirect: true }),
+  heartbeat,
+  logout: () => request<{ ok: boolean }>('/api/auth/logout', {
+    method: 'POST',
+    suppressAuthRedirect: true,
+    sessionRecovery: false,
+  }),
   dirs: () => request<DirectoryInfo[]>('/api/dirs'),
   uploadLimits: () => request<UploadLimits>('/api/upload-policy'),
   listFiles: (dirId: string, path = '', page = 1, pageSize = 100) =>
@@ -340,6 +548,18 @@ export const api = {
     request<AuditLog[]>(`/api/audit/logs${query({ limit: filter.limit, action: filter.action, status: filter.status, keyword: filter.keyword })}`),
   auditLogPage: (filter: AuditFilter = {}, signal?: AbortSignal) =>
     request<AuditLogPage>(`/api/audit/logs${query({ page: filter.page, pageSize: filter.pageSize, action: filter.action, status: filter.status, keyword: filter.keyword })}`, { signal }),
+  chatCapabilities: (signal?: AbortSignal) =>
+    request<ChatCapabilities>('/api/chat/capabilities', { signal }),
+  chatMessages: (admin: boolean, params: { beforeId?: number; limit?: number } = {}, signal?: AbortSignal) =>
+    request<ChatHistoryResponse>(`${admin ? '/api/admin/chat/messages' : '/api/chat/messages'}${query(params)}`, { signal }),
+  chatChanges: (admin: boolean, params: { afterSeq: number; generation: number; limit?: number }, signal?: AbortSignal) =>
+    request<ChatChangesResponse>(`${admin ? '/api/admin/chat/changes' : '/api/chat/changes'}${query(params)}`, { signal }),
+  createChatMessage: (body: string, signal?: AbortSignal) =>
+    request<ChatMutationResponse>('/api/chat/messages', { method: 'POST', body: JSON.stringify({ body }), signal }),
+  withdrawChatMessage: (id: number, signal?: AbortSignal) =>
+    request<ChatMutationResponse>(`/api/chat/messages/${encodeURIComponent(String(id))}/withdraw`, { method: 'POST', signal }),
+  deleteChatMessage: (id: number, signal?: AbortSignal) =>
+    request<ChatMutationResponse>(`/api/admin/chat/messages/${encodeURIComponent(String(id))}`, { method: 'DELETE', signal }),
   activeTransfers: () => request<{ transfers: TransferRecord[] }>('/api/transfers/active'),
   cancelTransfer: (id: string) => request<{ ok: boolean }>(`/api/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   safeConfig: () => request<SafeConfig>('/api/config'),

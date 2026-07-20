@@ -2,10 +2,11 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"filetrans-backend/internal/config"
@@ -36,6 +37,11 @@ func realMain() int {
 		log.Printf("event=startup_config_failed")
 		return 1
 	}
+	listenEndpoint, err := server.ResolveListenEndpoint(cfg.Server.Host, cfg.Server.Port)
+	if err != nil {
+		log.Printf("event=startup_listener_config_failed")
+		return 1
+	}
 
 	st, err := store.Open(cfg.Database.Path, cfg.Audit.Retain)
 	if err != nil {
@@ -49,11 +55,17 @@ func realMain() int {
 		log.Printf("event=startup_runtime_failed")
 		return 1
 	}
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	addr := listenerAddress(listenEndpoint)
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	return runServer(runtime, func() error { return runtime.App.Listen(addr) }, signals)
+}
+
+func listenerAddress(endpoint server.ListenEndpoint) string {
+	// JoinHostPort brackets IPv6 exactly once and never produces malformed
+	// forms such as ":::17878" from an unbracketed IPv6 configuration.
+	return net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port))
 }
 
 func runServer(runtime runtimeControl, listen func() error, signals <-chan os.Signal) int {

@@ -108,13 +108,21 @@ type limitSpec struct {
 }
 
 type windowLimiter struct {
-	mu      sync.Mutex
-	entries map[string]windowLimitEntry
-	now     func() time.Time
+	mu         sync.Mutex
+	entries    map[string]windowLimitEntry
+	now        func() time.Time
+	maxEntries int
 }
 
 func newWindowLimiter() *windowLimiter {
-	return &windowLimiter{entries: map[string]windowLimitEntry{}, now: time.Now}
+	return newWindowLimiterWithMaxEntries(10000)
+}
+
+func newWindowLimiterWithMaxEntries(maxEntries int) *windowLimiter {
+	if maxEntries < 1 {
+		maxEntries = 1
+	}
+	return &windowLimiter{entries: map[string]windowLimitEntry{}, now: time.Now, maxEntries: maxEntries}
 }
 
 func (l *windowLimiter) Allow(key string, limit int, window time.Duration) (bool, time.Duration) {
@@ -171,6 +179,24 @@ func (l *windowLimiter) AllowMany(specs []limitSpec) (bool, time.Duration) {
 		}
 	}
 	if retryAfter > 0 {
+		return false, retryAfter
+	}
+	newEntries := 0
+	for key := range normalized {
+		if _, exists := l.entries[key]; !exists {
+			newEntries++
+		}
+	}
+	if len(l.entries)+newEntries > l.maxEntries {
+		retryAfter = 0
+		for _, entry := range l.entries {
+			if retry := entry.expiresAt.Sub(now); retry > 0 && (retryAfter == 0 || retry < retryAfter) {
+				retryAfter = retry
+			}
+		}
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
 		return false, retryAfter
 	}
 	for key, spec := range normalized {

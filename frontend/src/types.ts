@@ -3,6 +3,8 @@ export type UserRole = 'admin' | 'user' | string
 // 后端 /api/auth/me 和登录接口返回的会话摘要；idleExpiresAt 用于前端展示空闲状态。
 export interface UserInfo {
   authenticated: boolean
+  // Opaque in-memory subject binding for replay prevention; never persist it.
+  sessionBinding?: string
   name?: string
   role?: UserRole
   expiresAt?: string
@@ -198,10 +200,29 @@ export interface CreateTokenResponse extends TokenInfo {
   url: string
 }
 
+export interface ShareListenDiagnostic {
+  source: 'listen'
+  network: 'tcp4' | 'tcp6' | 'tcp'
+  family: 'ipv4' | 'ipv6' | 'unknown'
+  mode: 'wildcard' | 'specific' | 'hostname'
+  host: string
+  port: number
+  address: string
+  reachable: 'unknown'
+}
+
 export interface ShareOriginCandidate {
   origin: string
   label: string
   source: 'current' | 'configured' | 'interface' | string
+  sources?: string[]
+  scope?: 'loopback' | 'private' | 'link-local' | 'carrier-grade-nat' | 'global-unicast' | 'other' | 'hostname' | string
+  interface?: string
+  interfaces?: string[]
+  listen?: ShareListenDiagnostic
+  listenMatchStatus?: 'match' | 'mismatch' | 'unknown'
+  listenMatch?: boolean
+  reachable?: 'unknown'
 }
 
 export interface DownloadLeaseResponse {
@@ -269,4 +290,64 @@ export interface AuditLogPage {
   pageSize: number
   total: number
   totalPages: number
+}
+
+export type ChatMessageRole = 'user' | 'admin'
+export type ChatMessageStatus = 'active' | 'withdrawn' | 'deleted'
+export type ChatChangeKind = 'create' | 'withdraw' | 'delete'
+
+export interface ChatMessage {
+  id: number
+  authorTag: string
+  role: ChatMessageRole
+  body: string | null
+  status: ChatMessageStatus
+  isMine: boolean
+  createdAt: string
+  withdrawnAt: string | null
+  deletedAt: string | null
+  canWithdraw: boolean
+  withdrawUntil: string | null
+  // 仅管理员投影返回；普通投影的归一化流程会主动移除此字段。
+  sourceIP?: string
+}
+
+export interface ChatChange {
+  seq: number
+  kind: ChatChangeKind
+  createdAt: string
+  message: ChatMessage
+}
+
+export interface ChatHistoryResponse {
+  messages: ChatMessage[]
+  nextBeforeId: number | null
+  hasMore: boolean
+  latestChangeSeq: number
+  generation: number
+}
+
+export interface ChatChangesResponse {
+  changes: ChatChange[]
+  generation: number
+  nextAfterSeq: number
+  hasMore: boolean
+  latestChangeSeq: number
+}
+
+export interface ChatMutationResponse {
+  message: ChatMessage
+  // eventSeq 只描述本次变更，不能作为全局 changes 游标。
+  eventSeq: number
+}
+
+export interface ChatCapabilities {
+  maxMessageChars: number
+  maxMessageBytes: number
+  maxRequestBytes: number
+  withdrawWindowSeconds: number
+  historyDefaultLimit: number
+  historyMaxLimit: number
+  changesDefaultLimit: number
+  changesMaxLimit: number
 }

@@ -1,5 +1,22 @@
 <script setup lang="ts">
-export type AppIconName = 'inbox' | 'alert-triangle' | 'download' | 'folder' | 'file' | 'link' | 'folder-cog' | 'file-cog'
+export type AppIconName =
+  | 'inbox'
+  | 'alert-triangle'
+  | 'download'
+  | 'folder'
+  | 'file'
+  | 'link'
+  | 'folder-cog'
+  | 'file-cog'
+  | 'message-circle'
+  | 'send'
+  | 'arrow-up'
+  | 'trash'
+  | 'undo'
+  | 'shield-check'
+  | 'wifi-off'
+  | 'chevron-down'
+  | 'refresh'
 
 withDefaults(defineProps<{
   name: AppIconName
@@ -72,6 +89,37 @@ withDefaults(defineProps<{
       <path d="m14.7 20.2 1-.6" />
       <path d="m19.3 17.4 1-.6" />
       <circle cx="17.5" cy="18" r="2" />
+    </template>
+    <template v-else-if="name === 'message-circle'">
+      <path d="M3 16.3a2 2 0 0 1 .1 1.2L2 20.8A1 1 0 0 0 3.3 22l3.4-1a2 2 0 0 1 1.1.1A10 10 0 1 0 3 16.3Z" />
+    </template>
+    <template v-else-if="name === 'send'">
+      <path d="M3.7 3a.5.5 0 0 0-.7.7l2.9 7.6a2 2 0 0 1 0 1.4L3 20.3a.5.5 0 0 0 .7.7l18-8.5a.5.5 0 0 0 0-.9Z" />
+      <path d="M6 12h16" />
+    </template>
+    <template v-else-if="name === 'arrow-up'">
+      <path d="m5 12 7-7 7 7" />
+      <path d="M12 19V5" />
+    </template>
+    <template v-else-if="name === 'trash'">
+      <path d="M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </template>
+    <template v-else-if="name === 'undo'">
+      <path d="m9 14-5-5 5-5" />
+      <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+    </template>
+    <template v-else-if="name === 'shield-check'">
+      <path d="M20 13c0 5-3.5 7.5-7.7 9a1 1 0 0 1-.6 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.2-2.7a1.2 1.2 0 0 1 1.6 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1Z" />
+      <path d="m9 12 2 2 4-4" />
+    </template>
+    <template v-else-if="name === 'wifi-off'">
+      <path d="M12 20h.01M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 5.2-2.7M19 12.9a10 10 0 0 0-2-1.6M2 8.8a15 15 0 0 1 4.2-2.6M22 8.8A15 15 0 0 0 10.7 5.1M2 2l20 20" />
+    </template>
+    <template v-else-if="name === 'chevron-down'">
+      <path d="m6 9 6 6 6-6" />
+    </template>
+    <template v-else-if="name === 'refresh'">
+      <path d="M3 12a9 9 0 0 1 15.7-6.3L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.7 6.3L3 16M3 21v-5h5" />
     </template>
     <template v-else>
       <circle cx="12" cy="12" r="8" />

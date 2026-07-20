@@ -28,6 +28,7 @@ export interface UploadProgress {
 export interface UploadRunOptions {
   signal: AbortSignal
   onProgress: (progress: UploadProgress) => void
+  batchIdentity?: string
 }
 
 export interface UploadBatchResult<T extends UploadItem> {
@@ -38,10 +39,17 @@ export interface UploadBatchResult<T extends UploadItem> {
   pending: number
 }
 
+export interface UploadBatchIdentityMismatch {
+  capturedIdentity?: string
+  currentIdentity?: string
+}
+
 export interface UseUploadQueueOptions<T extends UploadItem> {
   uploadFile: (item: T, options: UploadRunOptions) => Promise<void>
   acquireHold: () => () => void
   errorMessage: (error: unknown) => string
+  getBatchIdentity?: () => string | undefined
+  onBatchIdentityMismatch?: (mismatch: UploadBatchIdentityMismatch) => void | Promise<void>
   onItemSuccess?: (item: T) => void | Promise<void>
   shouldStopBatch?: (item: T, queue: T[]) => boolean | Promise<boolean>
   onBatchFinished?: (result: UploadBatchResult<T>) => void | Promise<void>
@@ -62,6 +70,12 @@ export function useUploadQueue<T extends UploadItem = UploadItem>(options: UseUp
   const stopRequested = ref(false)
   let disposed = false
   let activeRelease: (() => void) | undefined
+
+  interface RunContext {
+    identityEnabled: boolean
+    capturedIdentity?: string
+    identityMismatchNotified: boolean
+  }
 
   const uploading = computed(() => queue.value.some((item) => item.status === 'uploading'))
   const busy = computed(() => batchActive.value || uploading.value)
@@ -91,6 +105,46 @@ export function useUploadQueue<T extends UploadItem = UploadItem>(options: UseUp
     if (disposed || busy.value) return false
     queue.value = []
     return true
+  }
+
+  function readBatchIdentity() {
+    try {
+      const identity = options.getBatchIdentity?.()
+      return typeof identity === 'string' && identity.trim() ? identity : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  function captureRunContext(): RunContext {
+    return {
+      identityEnabled: options.getBatchIdentity !== undefined,
+      capturedIdentity: readBatchIdentity(),
+      identityMismatchNotified: false,
+    }
+  }
+
+  function stopForIdentityMismatch(context: RunContext, currentIdentity = readBatchIdentity()) {
+    stopRequested.value = true
+    if (disposed || context.identityMismatchNotified) return
+    context.identityMismatchNotified = true
+    try {
+      const notification = options.onBatchIdentityMismatch?.({
+        capturedIdentity: context.capturedIdentity,
+        currentIdentity,
+      })
+      if (notification) void notification.catch(() => {})
+    } catch {
+      // 身份变化通知失败不能让旧批次继续申请授权。
+    }
+  }
+
+  function identityIsCurrent(context: RunContext) {
+    if (!context.identityEnabled) return true
+    const currentIdentity = readBatchIdentity()
+    if (context.capturedIdentity && currentIdentity === context.capturedIdentity) return true
+    stopForIdentityMismatch(context, currentIdentity)
+    return false
   }
 
   function updateProgress(item: T, progress: UploadProgress) {
@@ -126,21 +180,23 @@ export function useUploadQueue<T extends UploadItem = UploadItem>(options: UseUp
     item.controller = undefined
   }
 
-  async function runItem(item: T) {
-    if (item.status === 'uploading' || item.status === 'success') return false
+  async function runItem(item: T, context: RunContext) {
+    if (item.status === 'uploading' || item.status === 'success' || !identityIsCurrent(context)) return false
     resetForUpload(item)
     const controller = new AbortController()
     item.controller = controller
     try {
-      await options.uploadFile(item, {
+      const runOptions: UploadRunOptions = {
         signal: controller.signal,
         onProgress: (progress) => updateProgress(item, progress),
-      })
+      }
+      if (context.identityEnabled) runOptions.batchIdentity = context.capturedIdentity
+      await options.uploadFile(item, runOptions)
       item.progress = 100
       item.loaded = item.file.size
       item.total = item.file.size
       item.status = 'success'
-      if (!disposed) {
+      if (!disposed && identityIsCurrent(context)) {
         try {
           await options.onItemSuccess?.(item)
         } catch {
@@ -156,6 +212,7 @@ export function useUploadQueue<T extends UploadItem = UploadItem>(options: UseUp
         } catch {
           item.error = '上传失败。'
         }
+        identityIsCurrent(context)
       }
       return false
     } finally {
@@ -188,6 +245,8 @@ export function useUploadQueue<T extends UploadItem = UploadItem>(options: UseUp
   async function uploadAll() {
     if (disposed || busy.value) return false
     stopRequested.value = false
+    const context = captureRunContext()
+    if (!identityIsCurrent(context)) return false
     batchActive.value = true
     const release = acquireRunHold()
     try {
@@ -195,20 +254,25 @@ export function useUploadQueue<T extends UploadItem = UploadItem>(options: UseUp
       for (const item of pending) {
         if (disposed || stopRequested.value) break
         if (!queue.value.includes(item) || (item.status !== 'queued' && item.status !== 'error')) continue
-        await runItem(item)
-        if (disposed || stopRequested.value) break
+        if (!identityIsCurrent(context)) break
+        await runItem(item, context)
+        if (disposed) break
+        if (!identityIsCurrent(context)) break
+        if (stopRequested.value) break
         let shouldStop = false
         try {
           shouldStop = await options.shouldStopBatch?.(item, queue.value) || false
         } catch {
           shouldStop = false
         }
+        if (disposed) break
+        if (!identityIsCurrent(context)) break
         if (shouldStop) {
           stopRequested.value = true
           break
         }
       }
-      if (!disposed) {
+      if (!disposed && identityIsCurrent(context)) {
         try {
           await options.onBatchFinished?.(batchResult())
         } catch {
@@ -226,10 +290,12 @@ export function useUploadQueue<T extends UploadItem = UploadItem>(options: UseUp
   async function retry(item: T) {
     if (disposed || busy.value || item.status === 'success' || item.status === 'uploading') return false
     stopRequested.value = false
+    const context = captureRunContext()
+    if (!identityIsCurrent(context)) return false
     batchActive.value = true
     const release = acquireRunHold()
     try {
-      await runItem(item)
+      await runItem(item, context)
       return true
     } finally {
       batchActive.value = false
