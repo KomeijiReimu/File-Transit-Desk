@@ -1,6 +1,6 @@
 # File Trans Backend
 
-自用临时文件传输后端，基于 Go、Fiber、SQLite。功能包括 TOTP 登录、HttpOnly Cookie 会话、受控目录浏览/上传/下载、临时令牌、审计日志、静态前端托管。
+自用临时文件传输后端，基于 Go 1.22、Fiber、SQLite。功能包括 TOTP 登录、HttpOnly Cookie 会话、受控目录浏览/上传/下载、临时令牌、单一全局聊天室、审计日志、静态前端托管。
 
 ## 快速运行
 
@@ -35,10 +35,10 @@ go run ./cmd/server -config config.yaml
 - `auth.dev_allow_fixed_code` 默认是 `false`。只有显式设置为 `true` 且 `auth.totp_secret` 为空时，才允许开发验证码 `000000`。
 - 启动时会校验 `auth.totp_secret` 是否为有效且长度足够的 Base32 Secret，并拒绝占位符、空密钥和危险 CORS 通配符。
 - 登录接口带有内存级失败限速：同一来源短时间内多次失败会被临时拒绝，降低 TOTP 在线猜测风险。
-- 普通 TOTP 登录用户角色为 `user`，只能浏览目录/文件、上传下载、退出和查看自身登录状态；临时令牌管理与审计日志只允许 `admin` 角色访问。
+- 普通 TOTP 登录用户角色为 `user`，可浏览目录/文件、上传下载、使用全局聊天室、退出和查看自身登录状态；临时令牌管理、管理员聊天视图与审计日志只允许 `admin` 角色访问。
 - 管理员通过独立接口登录，优先使用 Argon2id PHC；旧 SHA-256 配置仅保留迁移兼容。用户名使用固定长度常量时间比较，错误用户名也会执行密码验证。
 - Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，`Secure` 由 `auth.cookie_secure` 控制；HTTPS 部署时应启用。服务端数据库只保存会话 ID 哈希，避免数据库只读泄露时直接复用 Cookie 原值。
-- 登录会话同时受绝对有效期和空闲有效期约束。前端只在用户活跃时调用心跳接口刷新空闲时间，页面隐藏或离开后不会持续保活。
+- 登录会话默认同时受 86400 秒（24 小时）绝对期限、7200 秒（2 小时）真实活动空闲期限和 30 秒 heartbeat grace 约束。前端只在页面可见且用户真实活动时调用心跳；页面隐藏、静置、普通轮询或长上传本身不会无限续期。已有配置中的显式值不会自动迁移，例如真实 `config.yaml` 仍写着 `idle_timeout_seconds: 1800` 时会继续按 1800 秒生效，管理员需自行改为 7200 并按现有生效规则处理。
 - 文件下载使用短期下载票据。票据绑定具体目录、路径、文件大小、修改时间，并会按 `downloads.content_hash_max_mb` 对文件内容写入 SHA-256 哈希；页面会话空闲过期后，已兑换票据的长下载和 HTTP Range 续传仍可继续，但文件被替换后旧票据会失效。
 - 管理员撤销或删除公开下载令牌时，会同步清理该令牌已兑换但尚未过期的下载票据，用于应急止血。共享资源路径、类型、权限变更或删除时，会同步撤销相关公开令牌并清理对应目录 ID 的下载票据和上传票据，避免旧授权指向新资源。
 - 对 `/api` 下会改变状态的请求，后端会校验非空 `Origin`，降低 Cookie 凭据接口的跨站请求风险。一键开发模式会额外允许同一主机名的前端开发端口来源，用于默认直连传输；生产或不同域名跨域访问仍必须写入 `cors.allow_origins`。
@@ -48,6 +48,7 @@ go run ./cmd/server -config config.yaml
 - 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-raw-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。所有 `/t/...` capability 响应以及 token/lease 创建与使用响应都会设置 `no-store`、`no-referrer` 和 `noindex` 等安全头。内置 nginx 会脱敏 `/t/<token>` 并忽略查询参数，但部署在它之前的外部 LB、CDN、WAF 和代理日志仍需独立禁止记录 capability、Referer 与 Authorization。
 - 服务维护内存传输注册表，管理员可查看活跃上传和下载。原始字节流上传的进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。若部署在反向代理后，应关闭上传请求体缓冲，例如 Nginx `proxy_request_buffering off;`，否则代理缓冲会让后端观测滞后。
 - 上传临时文件写在目标目录内，文件名形如 `.upload-*.tmp`；成功提交最终文件后会立即删除临时文件，失败、超限、客户端断开或管理员取消也会尽量删除。服务启动和定时任务会按配置清理超过保留期且不在活跃注册表中的崩溃残留临时文件。
+- 聊天只对已登录 TOTP 用户和管理员开放，公开 token 访客不可用。普通 DTO 不包含可信客户端 IP、内部所有权标识或撤回原文；管理员 DTO 可查看撤回原文和按 trusted proxy 规则解析的来源 IP。管理员删除会把当前 `chat_messages.body` 设为 `NULL` 并保留 tombstone，撤回/删除审计不写正文；这不是对 SQLite 历史页、WAL、备份或存储快照的取证级擦除承诺。
 
 ## 配置说明
 
@@ -57,13 +58,24 @@ go run ./cmd/server -config config.yaml
 - `server.trust_proxy_headers`：是否启用可信代理头；直接运行必须保持 `false`。
 - `server.trusted_proxy_cidrs`：可信代理 socket 来源 CIDR。启用后必填、最多 64 项；只剥离链右侧可信代理，非法链回退 `X-Real-IP`，再失败回退 socket remote IP。
 - `server.keepalive_idle_timeout_seconds`：HTTP keep-alive 请求之间的空闲超时，默认 120 秒。安全配置摘要只读展示，修改后需要重启；它不是上传、下载或单个请求的总时长，服务端不会设置固定 ReadTimeout/WriteTimeout。
-- `database.path`：SQLite 文件路径，启动自动建表 `sessions`、`tokens`、`download_leases`、`upload_leases`、`audit_logs` 并创建索引。
+- `database.path`：SQLite 文件路径，启动自动迁移 `sessions`、`tokens`、`download_leases`、`upload_leases`、`chat_messages`、`chat_changes`、聊天同步元数据和 `audit_logs` 等表及索引。
 - `auth.totp_secret`：TOTP Base32 secret。
 - `auth.dev_allow_fixed_code`：本地开发固定码开关，默认关闭。
-- `auth.session_ttl_seconds`：会话绝对最长有效期。
-- `auth.idle_timeout_seconds`：空闲过期时间，默认 1800 秒；前端不活跃或页面隐藏超过该时间后，后续依赖 Cookie 的 API 会返回 401。已兑换的下载票据和已创建的上传票据不依赖 Cookie。
-- `auth.idle_grace_seconds`：心跳恢复宽限期；普通业务请求不会使用宽限期，只有 `/api/auth/heartbeat` 可在短暂超时后恢复会话。
+- `auth.session_ttl_seconds`：会话绝对最长有效期，默认 86400 秒。
+- `auth.idle_timeout_seconds`：真实活动空闲过期时间，默认 7200 秒；隐藏、静置、聊天轮询和长上传本身不会推动续期。已有配置中的显式旧值仍按原值生效，不会自动迁移。
+- `auth.idle_grace_seconds`：心跳恢复宽限期，默认 30 秒；普通业务请求不会使用宽限期，只有 `/api/auth/heartbeat` 可在短暂超时后恢复会话。
 - `auth.upload_lease_ttl_seconds`：登录态上传票据有效期，默认 1800 秒，必须小于等于 `auth.session_ttl_seconds`。票据只允许使用一次，过期或用过后会被清理。
+- `chat.withdraw_window_seconds`：普通用户撤回自己普通用户消息的时间窗口，默认 300 秒。
+- `chat.max_message_chars`：解码后正文的 Unicode code point 上限，默认 2000。
+- `chat.max_message_bytes`：解码后正文的 UTF-8 字节上限，默认 8192。聊天发送 JSON 的完整原始 HTTP 请求体另有固定 8192 bytes 上限，包含 JSON 语法、空白和 escape，可能先于正文限制触发。
+- `chat.retention_days`：按创建时间保留的天数，默认 90 天，与 `max_messages` 先到者生效。
+- `chat.max_messages`：保留消息数量上限，默认 50000，与 `retention_days` 先到者生效。
+- `chat.cleanup_batch`：每个清理短事务最多删除的消息数量，默认 500；启动阶段会分批追平后才 ready，周期维护在时间预算内连续执行并快速续调度。
+- `chat.session_messages_per_minute`：每个登录 session 的发送上限，默认 20 条/分钟。
+- `chat.ip_messages_per_minute`：每个可信解析客户端 IP 的发送上限，默认 60 条/分钟。
+- `chat.global_messages_per_minute`：单后端实例的发送总上限，默认 300 条/分钟。
+
+聊天三个速率桶同时生效，任一层拒绝都会返回 429 和 `Retry-After`。IP 必须依赖 `server.trust_proxy_headers` 与 `server.trusted_proxy_cidrs` 的正确部署；不可信来源的转发头会被忽略。普通聊天响应永远不返回 IP。
 - `auth.cookie_secure`：HTTPS 下启用安全 Cookie。
 - `downloads.lease_ttl_seconds`：下载票据默认有效期，点击下载或公开分享下载时兑换。
 - `downloads.lease_max_ttl_seconds`：下载票据最大有效期上限，防止误配置过长。
@@ -167,7 +179,7 @@ python3 scripts/hash-admin-password.py
 
 - `GET /api/dirs`：返回共享资源数组，普通用户字段为 `id/name/type/allowDownload/allowUpload/canDownload/canUpload`；管理员响应额外包含 `root` 便于配置管理展示。普通用户不会收到服务端真实路径。
 - `GET /api/upload-policy`：返回登录态上传页需要的大小和扩展名限制，前端会在真正传输前提示明显的限制错误，避免大文件传到一半才失败。
-- `GET /api/share-origins?currentOrigin=http://localhost:5173`：仅管理员可访问，返回后端枚举到的本机网卡候选地址，令牌页用它生成可选分享链接；它不会改变令牌授权，也不会自动决定应该复制哪个 IP。
+- `GET /api/share-origins?currentOrigin=http://localhost:5173`：仅管理员可访问。当前 origin 表示浏览器正在使用的入口；显式公开 origin 由前端公开地址配置补充；网卡项只是与后端 listener 范围匹配的本机候选；嵌套的 listener 数据仅描述进程绑定 socket，不是可复制的公开 URL。候选不保证防火墙、NAT、端口映射、代理或 TLS 已经可达，也不会改变令牌授权或自动决定管理员应该复制哪个地址。
 - `GET /api/files/list?dirId=default&path=subdir`：返回：
 
 ```json
@@ -197,6 +209,20 @@ python3 scripts/hash-admin-password.py
 ```json
 { "ok": true, "uploaded": 2, "files": [{ "name": "a-1.txt", "path": "subdir/a-1.txt", "size": 12 }] }
 ```
+
+### 全局聊天室
+
+聊天室只有一条全局消息流，仅已登录的 TOTP `user` 与 `admin` 可访问；公开 `/t/...` 和 `/share/:token` 访客没有聊天权限。正文是纯文本，不解析 Markdown/HTML，也没有附件能力。所有聊天响应都带 `Cache-Control: no-store`。
+
+- `GET /api/chat/capabilities`：普通用户和管理员均可访问，返回当前 `maxMessageChars`、`maxMessageBytes`、固定 `maxRequestBytes: 8192`、`withdrawWindowSeconds` 以及 history/changes 页大小边界。
+- `GET /api/chat/messages?beforeId=&limit=`：普通 history，默认 50、最大 100，使用 keyset 分页；响应同时返回 `generation` 与 `latestChangeSeq`。普通 DTO 对撤回和删除消息都返回 `body: null`，且不包含来源 IP 或内部所有权标识。
+- `GET /api/chat/changes?afterSeq=N&generation=G&limit=`：普通增量流，默认 50、最大 500。generation 缺失/非法返回 400 `chat_generation_invalid`；generation 不匹配、`afterSeq` 高于高水位或变更序列不可信时返回 409 `chat_cursor_reset_required`，客户端必须丢弃本地消息并重新拉 history。
+- `POST /api/chat/messages`：发送 `{ "body": "纯文本" }`。包含 JSON 语法、空白和 escape 的完整原始请求体最多 8192 bytes；解码后的正文还要分别满足 2000 code points 和配置的 8192 UTF-8 bytes 默认上限。发送同时受 session/IP/global 三层限速。
+- `POST /api/chat/messages/:id/withdraw`：普通用户只能在默认 300 秒窗口内撤回自己的 `user` 消息；管理员不能借普通接口撤回他人消息。
+- `GET /api/admin/chat/messages`、`GET /api/admin/chat/changes`：管理员独立 DTO，分页与 generation/reset 契约和普通接口一致，但可见撤回原文及可信解析来源 IP。
+- `DELETE /api/admin/chat/messages/:id`：管理员删除任意消息；正文原子置 `NULL`，所有视图只保留 tombstone。审计记录动作、消息 ID、结果和 IP，不包含正文。
+
+history 的消息、generation 和高水位来自同一短只读快照。首版客户端使用短轮询，不使用 WebSocket/SSE；页面隐藏时暂停轮询，恢复可见后继续，因此没有后台未读推送承诺。history 的 `latestChangeSeq` 和 changes 的 `nextAfterSeq` 才能推进全局同步；发送、撤回、删除响应里的 `eventSeq` 只标识该 mutation 事件，不能直接跳过其间事件作为 cursor。retention 按 90 天或 50000 条先到者分批清理，每批默认 500；只要实际删除消息，同一事务会推进 generation，使旧客户端在下一次 changes 请求收到 reset。
 
 ### 临时令牌
 
@@ -253,7 +279,7 @@ python3 scripts/hash-admin-password.py
 
 - `GET /api/config`：返回共享资源、上传策略、令牌策略和下载票据策略摘要。
 - `PUT /api/config/upload-policy`：修改 `storage.allowed_extensions` 与 `storage.blocked_extensions`；后端会统一小写化、补前导点、去重，拒绝 `*`、重叠项和异常字符。
-- `GET /api/config/file-picker/roots`：返回文件选择器入口。未配置 `file_picker.roots` 时，Linux/macOS 返回系统根目录，Windows 返回可用盘符。
+- `GET /api/config/file-picker/roots`：返回顶层 `file_picker.roots` 明确配置的文件选择器入口；未配置时返回空列表，不会自动暴露 Linux/macOS 系统根目录或 Windows 盘符。
 - `GET /api/config/file-picker/list?rootId=uploads&path=/docs&page=1&pageSize=100&sort=name&order=asc`：列出目录；路径使用 `/` 分隔的相对路径并分页返回，默认目录优先，再按名称排序；`sort` 支持 `name/type/size/modifiedAt`。
 - `POST /api/config/file-picker/validate`：最终选择前校验文件或目录，返回可填入现有资源表单的规范化绝对路径。
 - `POST /api/config/resources`：新增目录或单文件资源，请求示例：`{ "id": "manual", "name": "说明文档", "type": "file", "path": "/data/manual.pdf", "allowDownload": true, "allowUpload": false }`。
@@ -262,7 +288,9 @@ python3 scripts/hash-admin-password.py
 
 保存资源时后端会校验 ID 字符集、路径是否存在、目录/文件类型是否匹配、读写权限以及危险系统目录；即使路径来自文件选择器，保存资源时也会再次校验。成功后原子写回 `config.yaml`，保留 `config.yaml.bak`，并热更新内存中的资源列表。目录资源写入 `storage.dirs`，单文件资源写入 `storage.shares`。在线保存会重新序列化 YAML，原配置文件注释和手工排版不会保留。
 
-`file_picker.roots` 只是快捷入口，不是唯一选择范围。容器部署时，选择器看到的是容器内路径；若要选择宿主机目录，必须先以卷挂载方式暴露给容器。
+`file_picker` 是与 `storage` 同级的顶层配置，`file_picker.roots` 是文件选择器可以浏览和选择的唯一服务端范围，不要缩进到 `storage.shares` 或其他资源项下。容器部署时，选择器看到的是容器内路径；若要选择宿主机目录，必须先以卷挂载方式暴露给容器。
+
+管理员配置页还会调用 `/api/share-origins` 展示“服务访问地址”：浏览器当前 origin 与显式公开 origin 是可复制入口，本机网卡地址仅是候选，listener socket 则只用于诊断后端绑定。网卡/listener 匹配不能证明外部防火墙、NAT、反向代理或 TLS 已打通。
 
 下载带宽限制建议在 Nginx、Caddy、Traefik 等反向代理层统一配置，应用层保持对 HTTP Range 和长连接下载的稳定支持。
 
