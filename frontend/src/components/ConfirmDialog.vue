@@ -115,7 +115,6 @@ onBeforeUnmount(() => {
         >
           <div class="confirm-icon" aria-hidden="true"><AppIcon name="alert-triangle" :size="26" /></div>
           <div class="confirm-copy">
-            <p class="eyebrow">操作确认</p>
             <h2 :id="titleId">{{ title }}</h2>
             <p :id="messageId">{{ message }}</p>
             <small v-if="detail" :id="detailId">{{ detail }}</small>

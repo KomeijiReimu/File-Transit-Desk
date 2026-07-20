@@ -2,8 +2,10 @@ import { computed, ref } from 'vue'
 import { ApiError, api } from '@/api'
 import { chatErrorMessage } from '@/chatErrors'
 import type {
+  ChatBatchDeleteResponse,
   ChatCapabilities,
   ChatChangesResponse,
+  ChatClearResponse,
   ChatHistoryResponse,
   ChatMessage,
   ChatMutationResponse,
@@ -16,6 +18,8 @@ export interface ChatApiClient {
   createChatMessage: (body: string, signal?: AbortSignal) => Promise<ChatMutationResponse>
   withdrawChatMessage: (id: number, signal?: AbortSignal) => Promise<ChatMutationResponse>
   deleteChatMessage: (id: number, signal?: AbortSignal) => Promise<ChatMutationResponse>
+  batchDeleteChatMessages: (ids: number[], signal?: AbortSignal) => Promise<ChatBatchDeleteResponse>
+  clearChatMessages: (expectedGeneration: number, expectedLatestChangeSeq: number, signal?: AbortSignal) => Promise<ChatClearResponse>
 }
 
 export interface UseChatFeedOptions {
@@ -23,6 +27,7 @@ export interface UseChatFeedOptions {
   active?: boolean
   subjectKey?: string
   revalidateAuth?: () => Promise<unknown> | unknown
+  onProjectionInvalidated?: () => void
   client?: ChatApiClient
   pollIntervalMs?: number
   maxBackoffMs?: number
@@ -64,8 +69,8 @@ export function normalizeChatMessage(message: ChatMessage, admin: boolean): Chat
     deletedAt: message.deletedAt || null,
     canWithdraw: status === 'active' && Boolean(message.canWithdraw),
     withdrawUntil: status === 'active' ? message.withdrawUntil || null : null,
+    sourceIP: typeof message.sourceIP === 'string' ? message.sourceIP : '',
   }
-  if (admin && typeof message.sourceIP === 'string') normalized.sourceIP = message.sourceIP
   return normalized
 }
 
@@ -136,6 +141,11 @@ export function useChatFeed(options: UseChatFeedOptions) {
   const nextBeforeId = ref<number | null>(null)
   const generation = ref<number | null>(null)
   const cursor = ref(0)
+  const latestChangeSeq = ref(0)
+  const selectedIds = ref<number[]>([])
+  const selectionError = ref('')
+  const selectedCount = computed(() => selectedIds.value.length)
+  const selectionAtLimit = computed(() => selectedIds.value.length >= 100)
   const syncing = ref(false)
   const syncWarning = ref('')
   const refreshNotice = ref('')
@@ -232,6 +242,46 @@ export function useChatFeed(options: UseChatFeedOptions) {
       && !authorizationBlocked
   }
 
+  function clearSelection() {
+    selectedIds.value = []
+    selectionError.value = ''
+  }
+
+  function reconcileSelection() {
+    if (!binding.admin) {
+      clearSelection()
+      return
+    }
+    const byId = new Map(messages.value.map((message) => [message.id, message]))
+    const next = selectedIds.value.filter((id) => {
+      const message = byId.get(id)
+      return !message || message.status !== 'deleted'
+    })
+    if (next.length !== selectedIds.value.length) selectedIds.value = next
+    if (selectedIds.value.length < 100) selectionError.value = ''
+  }
+
+  function toggleSelection(id: number, selected: boolean) {
+    selectionError.value = ''
+    if (!binding.admin || !binding.active || authorizationBlocked) return false
+    const message = messages.value.find((item) => item.id === id)
+    if (!message || message.status === 'deleted') return false
+    const current = new Set(selectedIds.value)
+    if (!selected) {
+      current.delete(id)
+      selectedIds.value = [...current]
+      return true
+    }
+    if (current.has(id)) return true
+    if (current.size >= 100) {
+      selectionError.value = '最多选择 100 条消息。'
+      return false
+    }
+    current.add(id)
+    selectedIds.value = [...current]
+    return true
+  }
+
   function applyVersionedMessages(incoming: VersionedChatMessage[], admin: boolean) {
     if (!incoming.length) return
     const byId = new Map(messages.value.map((message) => [message.id, message]))
@@ -245,12 +295,16 @@ export function useChatFeed(options: UseChatFeedOptions) {
       messageWatermarks.set(message.id, incomingWatermark)
       changed = true
     })
-    if (changed) messages.value = [...byId.values()].sort((left, right) => left.id - right.id)
+    if (changed) {
+      messages.value = [...byId.values()].sort((left, right) => left.id - right.id)
+      reconcileSelection()
+    }
   }
 
   function initializeMessagesFromSnapshot(incoming: ChatMessage[], snapshotGeneration: number, snapshotSeq: number, admin: boolean) {
     messages.value = []
     messageWatermarks.clear()
+    clearSelection()
     applyVersionedMessages(incoming.map((message) => ({
       message,
       watermark: watermark(snapshotGeneration, snapshotSeq, 'history'),
@@ -315,11 +369,13 @@ export function useChatFeed(options: UseChatFeedOptions) {
         initializeMessagesFromSnapshot(result.messages || [], result.generation, result.latestChangeSeq, context.admin)
         // 只有初始或 reset 后的最新快照建立全局游标。
         cursor.value = result.latestChangeSeq
+        latestChangeSeq.value = result.latestChangeSeq
       } else {
         applyVersionedMessages((result.messages || []).map((message) => ({
           message,
           watermark: watermark(result.generation, result.latestChangeSeq, 'history'),
         })), context.admin)
+        latestChangeSeq.value = Math.max(latestChangeSeq.value, result.latestChangeSeq)
       }
       nextBeforeId.value = result.nextBeforeId ?? null
       hasMore.value = Boolean(result.hasMore)
@@ -368,6 +424,8 @@ export function useChatFeed(options: UseChatFeedOptions) {
     hasMore.value = false
     generation.value = null
     cursor.value = 0
+    latestChangeSeq.value = 0
+    clearSelection()
     initialized.value = false
     initialLoading.value = false
     loadingOlder.value = false
@@ -418,6 +476,7 @@ export function useChatFeed(options: UseChatFeedOptions) {
     if (!subjectChanged && !adminForbidden) return false
     // 先同步销毁当前投影，再让 auth singleflight 完成可信身份重验。
     clearForSubjectChange(true)
+    options.onProjectionInvalidated?.()
     if (adminForbidden) triggerAuthRevalidation()
     return true
   }
@@ -500,6 +559,7 @@ export function useChatFeed(options: UseChatFeedOptions) {
         message,
         watermark: watermark(context.generation as number, result.latestChangeSeq, 'history'),
       })), context.admin)
+      latestChangeSeq.value = Math.max(latestChangeSeq.value, result.latestChangeSeq)
       nextBeforeId.value = result.nextBeforeId ?? null
       hasMore.value = Boolean(result.hasMore)
       return true
@@ -559,6 +619,7 @@ export function useChatFeed(options: UseChatFeedOptions) {
       })), context.admin)
       // mutation.eventSeq 与 change.seq 都不能单独推进游标，只接受服务端分页返回的 nextAfterSeq。
       cursor.value = result.nextAfterSeq
+      latestChangeSeq.value = Math.max(latestChangeSeq.value, result.latestChangeSeq)
       lastSyncedAt.value = new Date()
       pageHasMore = Boolean(result.hasMore)
       if (!pageHasMore) return false
@@ -643,6 +704,7 @@ export function useChatFeed(options: UseChatFeedOptions) {
           message: result.message,
           watermark: watermark(context.generation, result.eventSeq, 'mutation'),
         }], context.admin)
+        latestChangeSeq.value = Math.max(latestChangeSeq.value, result.eventSeq)
       }
       // eventSeq 故意不写入 cursor；后续 changes 会按 id 覆盖同一消息。
       return normalizeChatMessage(result.message, context.admin)
@@ -667,6 +729,78 @@ export function useChatFeed(options: UseChatFeedOptions) {
 
   function remove(id: number) {
     return withMutation((signal) => client.deleteChatMessage(id, signal), true)
+  }
+
+  function validatedBatchIDs(ids: number[]) {
+    if (ids.length < 1 || ids.length > 100
+      || ids.some((id) => !Number.isSafeInteger(id) || id < 1)
+      || new Set(ids).size !== ids.length) {
+      throw new ApiError('批量删除请求无效。', 400, undefined, 'chat_batch_delete_request_invalid')
+    }
+    return [...ids]
+  }
+
+  async function batchDelete(ids: number[]) {
+    if (disposed || !binding.active || authorizationBlocked || !binding.admin || generation.value === null) {
+      throw new ApiError('聊天会话尚未就绪。', 409, undefined, 'session_subject_changed')
+    }
+    const requestedIDs = validatedBatchIDs(ids)
+    const context = captureRequestContext()
+    const controller = new AbortController()
+    mutationControllers.add(controller)
+    try {
+      const result = await client.batchDeleteChatMessages(requestedIDs, controller.signal)
+      if (!requestContextIsCurrent(context) || context.generation === null) return result
+      if (!Array.isArray(result.mutations)
+        || result.mutations.some((mutation) => !serviceSeqValid(mutation.eventSeq))) {
+        throw new ApiError('批量删除响应无效。', 409, undefined, 'chat_state_conflict')
+      }
+      applyVersionedMessages(result.mutations.map((mutation) => ({
+        message: mutation.message,
+        watermark: watermark(context.generation as number, mutation.eventSeq, 'mutation'),
+      })), context.admin)
+      result.mutations.forEach((mutation) => {
+        latestChangeSeq.value = Math.max(latestChangeSeq.value, mutation.eventSeq)
+      })
+      reconcileSelection()
+      return result
+    } catch (error) {
+      if (handleSensitiveAuthError(error, context, true)) throw error
+      throw error
+    } finally {
+      mutationControllers.delete(controller)
+    }
+  }
+
+  async function clearAll() {
+    if (disposed || !binding.active || authorizationBlocked || !binding.admin || generation.value === null) {
+      throw new ApiError('聊天会话尚未就绪。', 409, undefined, 'session_subject_changed')
+    }
+    const context = captureRequestContext()
+    const expectedGeneration = context.generation as number
+    const expectedLatestChangeSeq = latestChangeSeq.value
+    const controller = new AbortController()
+    mutationControllers.add(controller)
+    try {
+      const result = await client.clearChatMessages(expectedGeneration, expectedLatestChangeSeq, controller.signal)
+      if (!requestContextIsCurrent(context)) return result
+      const loaded = await replaceFromLatestHistory('manual')
+      if (loaded && started) schedule()
+      return result
+    } catch (error) {
+      if (handleSensitiveAuthError(error, context, true)) throw error
+      const reloadConflict = requestContextIsCurrent(context)
+        && error instanceof ApiError
+        && error.code === 'chat_clear_conflict'
+      if (reloadConflict) {
+        const loaded = await replaceFromLatestHistory('manual')
+        if (loaded && started) schedule()
+        throw new ApiError('消息已更新，请重新确认清空。', 409, error.details, 'chat_clear_conflict')
+      }
+      throw error
+    } finally {
+      mutationControllers.delete(controller)
+    }
   }
 
   async function rebind(nextBinding: ChatFeedBinding) {
@@ -733,6 +867,8 @@ export function useChatFeed(options: UseChatFeedOptions) {
     syncPromise = null
     messages.value = []
     messageWatermarks.clear()
+    latestChangeSeq.value = 0
+    clearSelection()
   }
 
   return {
@@ -749,6 +885,11 @@ export function useChatFeed(options: UseChatFeedOptions) {
     nextBeforeId,
     generation,
     cursor,
+    latestChangeSeq,
+    selectedIds,
+    selectedCount,
+    selectionAtLimit,
+    selectionError,
     syncing,
     syncWarning,
     refreshNotice,
@@ -766,5 +907,9 @@ export function useChatFeed(options: UseChatFeedOptions) {
     send,
     withdraw,
     remove,
+    toggleSelection,
+    clearSelection,
+    batchDelete,
+    clearAll,
   }
 }

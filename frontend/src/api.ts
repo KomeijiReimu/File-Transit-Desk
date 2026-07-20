@@ -12,8 +12,10 @@ import type {
   AdminLoginPayload,
   AuditLog,
   AuditLogPage,
+  ChatBatchDeleteResponse,
   ChatCapabilities,
   ChatChangesResponse,
+  ChatClearResponse,
   ChatHistoryResponse,
   ChatMutationResponse,
   CreateTokenPayload,
@@ -478,6 +480,15 @@ const query = (params: Record<string, string | number | undefined>) => {
   return text ? `?${text}` : ''
 }
 
+function chatBatchDeleteIDs(ids: number[]) {
+  if (ids.length < 1 || ids.length > 100
+    || ids.some((id) => !Number.isSafeInteger(id) || id < 1)
+    || new Set(ids).size !== ids.length) {
+    throw new ApiError('批量删除请求无效。', 400, undefined, 'chat_batch_delete_request_invalid')
+  }
+  return ids
+}
+
 export interface AuditFilter {
   limit?: number
   page?: number
@@ -560,6 +571,22 @@ export const api = {
     request<ChatMutationResponse>(`/api/chat/messages/${encodeURIComponent(String(id))}/withdraw`, { method: 'POST', signal }),
   deleteChatMessage: (id: number, signal?: AbortSignal) =>
     request<ChatMutationResponse>(`/api/admin/chat/messages/${encodeURIComponent(String(id))}`, { method: 'DELETE', signal }),
+  batchDeleteChatMessages: (ids: number[], signal?: AbortSignal) =>
+    request<ChatBatchDeleteResponse>('/api/admin/chat/messages/batch-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids: chatBatchDeleteIDs(ids) }),
+      signal,
+    }),
+  clearChatMessages: (expectedGeneration: number, expectedLatestChangeSeq: number, signal?: AbortSignal) =>
+    request<ChatClearResponse>('/api/admin/chat/messages/clear', {
+      method: 'POST',
+      body: JSON.stringify({
+        confirm: 'CLEAR_ALL_MESSAGES',
+        expectedGeneration,
+        expectedLatestChangeSeq,
+      }),
+      signal,
+    }),
   activeTransfers: () => request<{ transfers: TransferRecord[] }>('/api/transfers/active'),
   cancelTransfer: (id: string) => request<{ ok: boolean }>(`/api/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   safeConfig: () => request<SafeConfig>('/api/config'),

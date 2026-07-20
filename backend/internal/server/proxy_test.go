@@ -1,9 +1,14 @@
 package server
 
 import (
+	"net"
+	"net/netip"
 	"testing"
 
 	"filetrans-backend/internal/config"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/valyala/fasthttp"
 )
 
 func TestProxyResolverIgnoresUntrustedForwardingHeaders(t *testing.T) {
@@ -79,6 +84,95 @@ func TestRequestOriginOnlyUsesForwardedHeadersFromTrustedProxy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProxyResolverConstructionRejectsTrustAllPrefixes(t *testing.T) {
+	for _, cidr := range []string{"0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96", "::fffe:0:0/95"} {
+		t.Run(cidr, func(t *testing.T) {
+			if _, err := newProxyResolver(config.ServerConfig{TrustProxyHeaders: true, TrustedProxyCIDRs: []string{cidr}}); err == nil {
+				t.Fatalf("resolver accepted trust-all CIDR %q", cidr)
+			}
+		})
+	}
+}
+
+func TestDevelopmentClientIPHeaderIsLoopbackDevOnlyAndStrict(t *testing.T) {
+	resolver, err := newProxyResolver(config.ServerConfig{})
+	if err != nil {
+		t.Fatalf("new direct resolver: %v", err)
+	}
+	cases := []struct {
+		name    string
+		devMode bool
+		remote  string
+		headers []string
+		want    string
+	}{
+		{name: "IPv4 loopback", devMode: true, remote: "127.9.8.7", headers: []string{"198.51.100.7"}, want: "198.51.100.7"},
+		{name: "IPv6 loopback", devMode: true, remote: "::1", headers: []string{"2001:db8::7"}, want: "2001:db8::7"},
+		{name: "mapped loopback", devMode: true, remote: "::ffff:127.0.0.8", headers: []string{"::ffff:192.0.2.8"}, want: "192.0.2.8"},
+		{name: "zone removed", devMode: true, remote: "127.0.0.1", headers: []string{"fe80::1%eth0"}, want: "fe80::1"},
+		{name: "production ignores", devMode: false, remote: "127.0.0.1", headers: []string{"198.51.100.8"}, want: "127.0.0.1"},
+		{name: "non-loopback ignores", devMode: true, remote: "192.0.2.20", headers: []string{"198.51.100.9"}, want: "192.0.2.20"},
+		{name: "invalid ignores", devMode: true, remote: "127.0.0.1", headers: []string{"not-an-ip"}, want: "127.0.0.1"},
+		{name: "port ignores", devMode: true, remote: "127.0.0.1", headers: []string{"198.51.100.9:80"}, want: "127.0.0.1"},
+		{name: "comma list ignores", devMode: true, remote: "127.0.0.1", headers: []string{"198.51.100.9, 203.0.113.9"}, want: "127.0.0.1"},
+		{name: "duplicate ignores", devMode: true, remote: "127.0.0.1", headers: []string{"198.51.100.9", "203.0.113.9"}, want: "127.0.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, release := proxyTestContext(t, tc.remote)
+			defer release()
+			for _, value := range tc.headers {
+				ctx.Context().Request.Header.Add(devClientIPHeader, value)
+			}
+			s := &Server{devMode: tc.devMode, proxyResolver: resolver}
+			if got := s.clientIP(ctx); got != tc.want {
+				t.Fatalf("client IP=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDevelopmentClientIPHeaderFallsBackToExistingResolverAndDoesNotTrustOrigin(t *testing.T) {
+	resolver := mustProxyResolver(t, "127.0.0.0/8")
+	ctx, release := proxyTestContext(t, "127.0.0.1")
+	defer release()
+	ctx.Context().Request.Header.Set(devClientIPHeader, "invalid")
+	ctx.Context().Request.Header.Set("X-Forwarded-For", "198.51.100.33")
+	ctx.Context().Request.Header.Set("X-Forwarded-Proto", "https")
+	ctx.Context().Request.Header.Set("X-Forwarded-Host", "forwarded.example")
+	s := &Server{devMode: true, proxyResolver: resolver}
+	if got := s.clientIP(ctx); got != "198.51.100.33" {
+		t.Fatalf("invalid development header did not fall back to resolver: %q", got)
+	}
+
+	directResolver, err := newProxyResolver(config.ServerConfig{})
+	if err != nil {
+		t.Fatalf("new direct resolver: %v", err)
+	}
+	s.proxyResolver = directResolver
+	ctx.Context().Request.Header.Set(devClientIPHeader, "203.0.113.44")
+	if got := s.clientIP(ctx); got != "203.0.113.44" {
+		t.Fatalf("valid development client IP=%q", got)
+	}
+	remote := netip.MustParseAddr("127.0.0.1")
+	if origin := s.resolveRequestOrigin(remote, "http", "direct.example:17878", "https", "forwarded.example"); origin != "http://direct.example:17878" {
+		t.Fatalf("development client header widened forwarded origin trust: %q", origin)
+	}
+}
+
+func proxyTestContext(t *testing.T, remote string) (*fiber.Ctx, func()) {
+	t.Helper()
+	address := net.ParseIP(remote)
+	if address == nil {
+		t.Fatalf("parse test remote %q", remote)
+	}
+	app := fiber.New()
+	requestContext := &fasthttp.RequestCtx{}
+	requestContext.SetRemoteAddr(&net.TCPAddr{IP: address, Port: 12345})
+	ctx := app.AcquireCtx(requestContext)
+	return ctx, func() { app.ReleaseCtx(ctx) }
 }
 
 func mustProxyResolver(t *testing.T, cidrs ...string) *proxyResolver {

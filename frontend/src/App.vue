@@ -56,10 +56,7 @@ async function handleLogout() {
     <aside class="sidebar">
       <RouterLink class="brand" to="/files" aria-label="回到文件浏览">
         <span class="brand-mark">FT</span>
-        <span>
-          <strong>文件传输台</strong>
-          <small>临时 · 私有 · 可审计</small>
-        </span>
+        <strong>文件传输台</strong>
       </RouterLink>
 
       <button
@@ -67,10 +64,14 @@ async function handleLogout() {
         type="button"
         aria-controls="main-navigation"
         :aria-expanded="mobileNavOpen"
+        :aria-label="mobileNavOpen ? '收起菜单' : '展开菜单'"
         @click="mobileNavOpen = !mobileNavOpen"
-      >{{ mobileNavOpen ? '收起导航' : '打开导航' }}</button>
+      >
+        <AppIcon name="menu" :size="20" />
+        <span>{{ mobileNavOpen ? '收起菜单' : '展开菜单' }}</span>
+      </button>
 
-      <nav id="main-navigation" class="nav-list" :data-open="mobileNavOpen" aria-label="主导航">
+      <nav id="main-navigation" class="nav-list" :class="{ 'is-open': mobileNavOpen }" aria-label="主导航">
         <RouterLink to="/files">
           <span class="nav-ico nav-files" aria-hidden="true" />
           <span>文件浏览</span>
@@ -107,7 +108,7 @@ async function handleLogout() {
         <div class="avatar" :data-role="isAdmin ? 'admin' : 'user'">{{ displayName.slice(0, 1) }}</div>
         <div class="meta">
           <strong>{{ displayName }}</strong>
-          <small>{{ roleLabel }}</small>
+          <span class="sidebar-role-label visually-hidden">{{ roleLabel }}</span>
         </div>
         <span class="status-dot" :title="'在线'" />
       </div>

@@ -528,9 +528,8 @@ onBeforeUnmount(() => {
         <section ref="dialogRef" class="picker-dialog" role="dialog" aria-modal="true" aria-labelledby="server-file-picker-title" aria-describedby="server-file-picker-description" @keydown="handleDialogKeydown">
           <header class="picker-header">
             <div>
-              <p class="eyebrow">服务端位置</p>
               <h2 id="server-file-picker-title">选择服务端{{ mode === 'file' ? '文件' : '目录' }}</h2>
-              <p id="server-file-picker-description">此选择器只用于定位现有文件或目录，不会修改服务端内容。</p>
+              <p id="server-file-picker-description" class="visually-hidden">此选择器只用于定位现有文件或目录，不会修改服务端内容。</p>
             </div>
             <button ref="closeRef" class="mini-btn" type="button" @click="close">关闭</button>
           </header>

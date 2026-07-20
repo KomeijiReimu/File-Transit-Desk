@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -550,6 +551,399 @@ func TestChatAuditMaintenanceAfterCommitIsBestEffort(t *testing.T) {
 	var retained int
 	if err := st.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&retained); err != nil || retained != 1 {
 		t.Fatalf("successful best-effort prune retained=%d err=%v", retained, err)
+	}
+}
+
+func TestChatBatchDeleteIsAtomicSortedAndEmitsIndependentEvents(t *testing.T) {
+	st := openChatStore(t)
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	messages := make([]ChatMessage, 0, 3)
+	for index := 0; index < 3; index++ {
+		message, _, err := st.CreateChatMessage(ChatCreateInput{
+			AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user",
+			SourceIP: "192.0.2.77", Body: "batch secret", CreatedAt: now.Add(time.Duration(index) * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("create batch message %d: %v", index, err)
+		}
+		messages = append(messages, message)
+	}
+	if _, seq, err := st.WithdrawChatMessage(messages[1].ID, "owner", "user", "192.0.2.77", now.Add(time.Minute), 5*time.Minute); err != nil || seq != 4 {
+		t.Fatalf("withdraw batch fixture seq=%d err=%v", seq, err)
+	}
+
+	mutations, err := st.BatchDeleteChatMessages([]int64{messages[2].ID, messages[0].ID, messages[1].ID}, "admin-session-hash", "198.51.100.7", now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("batch delete: %v", err)
+	}
+	if len(mutations) != 3 {
+		t.Fatalf("batch mutations=%d want=3", len(mutations))
+	}
+	for index, mutation := range mutations {
+		wantID := messages[index].ID
+		wantSeq := int64(5 + index)
+		if mutation.Message.ID != wantID || mutation.EventSeq != wantSeq || mutation.Message.Status() != ChatStatusDeleted || mutation.Message.Body.Valid || mutation.Message.SourceIP != "192.0.2.77" || !mutation.Message.DeletedBy.Valid {
+			t.Fatalf("mutation[%d]=%+v want id=%d seq=%d", index, mutation, wantID, wantSeq)
+		}
+	}
+	state := mustChatSyncState(t, st)
+	if state.Generation != 1 || state.LatestChangeSeq != 7 {
+		t.Fatalf("batch sync state=%+v", state)
+	}
+	changes, more, err := st.ChatChanges(4, state.Generation, 10)
+	if err != nil || more || len(changes) != 3 {
+		t.Fatalf("batch changes=%+v more=%v err=%v", changes, more, err)
+	}
+	for index, change := range changes {
+		if change.Kind != ChatChangeDelete || change.MessageID != messages[index].ID || change.Seq != int64(5+index) {
+			t.Fatalf("batch change[%d]=%+v", index, change)
+		}
+	}
+	logs, err := st.AuditLogs(20)
+	if err != nil {
+		t.Fatalf("batch audit logs: %v", err)
+	}
+	found := false
+	for _, entry := range logs {
+		if entry.Action != "chat_batch_delete" {
+			continue
+		}
+		found = true
+		if !strings.Contains(entry.Detail, "count=3") || strings.Contains(entry.Detail, "batch secret") || strings.Contains(entry.Detail, "admin-session-hash") {
+			t.Fatalf("unsafe batch audit: %+v", entry)
+		}
+	}
+	if !found {
+		t.Fatalf("batch success audit missing: %+v", logs)
+	}
+}
+
+func TestChatBatchDeleteConflictHasNoPartialMutation(t *testing.T) {
+	st := openChatStore(t)
+	now := time.Now().UTC()
+	first, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "first secret", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	second, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.2", Body: "second secret", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	if _, _, err := st.DeleteChatMessage(second.ID, "admin", "198.51.100.1", now.Add(time.Second)); err != nil {
+		t.Fatalf("delete conflict fixture: %v", err)
+	}
+	before := mustChatSyncState(t, st)
+	if _, err := st.BatchDeleteChatMessages([]int64{first.ID, second.ID}, "admin", "198.51.100.1", now.Add(2*time.Second)); !errors.Is(err, ErrChatBatchDeleteConflict) {
+		t.Fatalf("already-deleted batch conflict=%v", err)
+	}
+	stored, err := st.ChatMessage(first.ID)
+	if err != nil || stored.Status() != ChatStatusActive || !stored.Body.Valid || stored.Body.String != "first secret" {
+		t.Fatalf("batch partially deleted first message: %+v err=%v", stored, err)
+	}
+	after := mustChatSyncState(t, st)
+	if after != before {
+		t.Fatalf("batch conflict changed sync state before=%+v after=%+v", before, after)
+	}
+	if _, err := st.BatchDeleteChatMessages([]int64{first.ID, 99999}, "admin", "198.51.100.1", now.Add(3*time.Second)); !errors.Is(err, ErrChatBatchDeleteConflict) {
+		t.Fatalf("missing-id batch conflict=%v", err)
+	}
+	stored, err = st.ChatMessage(first.ID)
+	if err != nil || stored.Status() != ChatStatusActive || !stored.Body.Valid {
+		t.Fatalf("missing-id conflict partially deleted first message: %+v err=%v", stored, err)
+	}
+}
+
+func TestChatBatchDeleteRollsBackOnLaterChangeFailure(t *testing.T) {
+	st := openChatStore(t)
+	now := time.Now().UTC()
+	first, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "first", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	second, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.2", Body: "second", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	if _, err := st.DB.Exec(fmt.Sprintf(`CREATE TRIGGER reject_second_batch_change BEFORE INSERT ON chat_changes WHEN NEW.kind = 'delete' AND NEW.message_id = %d BEGIN SELECT RAISE(ABORT, 'reject batch change'); END`, second.ID)); err != nil {
+		t.Fatalf("create batch rollback trigger: %v", err)
+	}
+	before := mustChatSyncState(t, st)
+	if _, err := st.BatchDeleteChatMessages([]int64{first.ID, second.ID}, "admin", "198.51.100.1", now.Add(time.Second)); err == nil {
+		t.Fatalf("batch delete succeeded despite change failure")
+	}
+	for _, id := range []int64{first.ID, second.ID} {
+		message, err := st.ChatMessage(id)
+		if err != nil || message.Status() != ChatStatusActive || !message.Body.Valid {
+			t.Fatalf("message %d changed despite batch rollback: %+v err=%v", id, message, err)
+		}
+	}
+	if after := mustChatSyncState(t, st); after != before {
+		t.Fatalf("batch rollback changed sync state before=%+v after=%+v", before, after)
+	}
+}
+
+func TestOverlappingReverseOrderChatBatchesDoNotDeadlock(t *testing.T) {
+	st := openChatStore(t)
+	now := time.Now().UTC()
+	first, _, _ := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "first", CreatedAt: now})
+	second, _, _ := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.2", Body: "second", CreatedAt: now})
+	blocker, _ := st.beginChatMutation(second.ID)
+	results := make(chan error, 2)
+	go func() {
+		_, err := st.BatchDeleteChatMessages([]int64{second.ID, first.ID}, "admin-one", "198.51.100.1", now.Add(time.Second))
+		results <- err
+	}()
+	waitForChatMutationCount(t, st, second.ID, 2)
+	go func() {
+		_, err := st.BatchDeleteChatMessages([]int64{first.ID, second.ID}, "admin-two", "198.51.100.2", now.Add(time.Second))
+		results <- err
+	}()
+	waitForChatMutationCount(t, st, first.ID, 2)
+	st.endChatMutation(second.ID, blocker)
+	for index := 0; index < 2; index++ {
+		select {
+		case err := <-results:
+			if !errors.Is(err, ErrChatBatchDeleteConflict) {
+				t.Fatalf("overlapping batch error=%v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("overlapping reverse-order batches deadlocked")
+		}
+	}
+	for _, id := range []int64{first.ID, second.ID} {
+		message, err := st.ChatMessage(id)
+		if err != nil || message.Status() != ChatStatusActive {
+			t.Fatalf("conflicting batch changed message %d: %+v err=%v", id, message, err)
+		}
+	}
+}
+
+func TestChatBatchWithdrawAndSingleDeleteConcurrencyCompletes(t *testing.T) {
+	st := openChatStore(t)
+	now := time.Now().UTC()
+	first, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "first", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create first concurrency fixture: %v", err)
+	}
+	second, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.2", Body: "second", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create second concurrency fixture: %v", err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 3)
+	go func() {
+		<-start
+		_, err := st.BatchDeleteChatMessages([]int64{second.ID, first.ID}, "batch-admin", "198.51.100.1", now.Add(time.Second))
+		results <- err
+	}()
+	go func() {
+		<-start
+		_, _, err := st.WithdrawChatMessage(first.ID, "owner", "user", "192.0.2.1", now.Add(time.Second), 5*time.Minute)
+		results <- err
+	}()
+	go func() {
+		<-start
+		_, _, err := st.DeleteChatMessage(second.ID, "single-admin", "198.51.100.2", now.Add(time.Second))
+		results <- err
+	}()
+	close(start)
+	for index := 0; index < 3; index++ {
+		select {
+		case err := <-results:
+			if err != nil && !errors.Is(err, ErrChatBatchDeleteConflict) && !errors.Is(err, ErrChatStateConflict) && !errors.Is(err, ErrChatMessageNotFound) {
+				t.Fatalf("unexpected concurrent chat mutation error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("batch/withdraw/single-delete concurrency deadlocked")
+		}
+	}
+	for _, id := range []int64{first.ID, second.ID} {
+		message, err := st.ChatMessage(id)
+		if err != nil {
+			t.Fatalf("load concurrent message %d: %v", id, err)
+		}
+		if status := message.Status(); status != ChatStatusActive && status != ChatStatusWithdrawn && status != ChatStatusDeleted {
+			t.Fatalf("invalid concurrent message state: %+v", message)
+		}
+		if message.Status() == ChatStatusDeleted && message.Body.Valid {
+			t.Fatalf("deleted concurrent message retained body: %+v", message)
+		}
+	}
+}
+
+func TestChatClearAllGenerationHighWaterSequencesAndReplay(t *testing.T) {
+	st := openChatStore(t)
+	now := time.Now().UTC()
+	first, firstSeq, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "first", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	second, secondSeq, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.2", Body: "second", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	if _, withdrawSeq, err := st.WithdrawChatMessage(first.ID, "owner", "user", "192.0.2.1", now.Add(time.Second), 5*time.Minute); err != nil || withdrawSeq != 3 {
+		t.Fatalf("withdraw fixture seq=%d err=%v", withdrawSeq, err)
+	}
+	before := mustChatSyncState(t, st)
+	result, err := st.ClearChatMessages(before.Generation, before.LatestChangeSeq, "198.51.100.1", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("clear chat: %v", err)
+	}
+	if result.ClearedCount != 2 || result.Generation != before.Generation+1 || result.LatestChangeSeq != before.LatestChangeSeq {
+		t.Fatalf("clear result=%+v before=%+v", result, before)
+	}
+	for _, table := range []string{"chat_messages", "chat_changes"} {
+		var count int
+		if err := st.DB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("clear left %s count=%d err=%v", table, count, err)
+		}
+	}
+	if _, _, err := st.ChatChanges(before.LatestChangeSeq, before.Generation, 10); !errors.Is(err, ErrChatCursorResetRequired) {
+		t.Fatalf("old generation survived clear: %v", err)
+	}
+	if _, err := st.ClearChatMessages(before.Generation, before.LatestChangeSeq, "198.51.100.1", now.Add(3*time.Second)); !errors.Is(err, ErrChatClearConflict) {
+		t.Fatalf("clear replay error=%v", err)
+	}
+	later, laterSeq, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.3", Body: "later", CreatedAt: now.Add(4 * time.Second)})
+	if err != nil {
+		t.Fatalf("create after clear: %v", err)
+	}
+	if later.ID <= second.ID || laterSeq <= before.LatestChangeSeq || firstSeq != 1 || secondSeq != 2 {
+		t.Fatalf("sequences reused after clear: first=%d second=%d laterID=%d laterSeq=%d before=%+v", firstSeq, secondSeq, later.ID, laterSeq, before)
+	}
+}
+
+func TestChatClearEmptyNoopAndOrphanChanges(t *testing.T) {
+	t.Run("empty noop", func(t *testing.T) {
+		st := openChatStore(t)
+		before := mustChatSyncState(t, st)
+		result, err := st.ClearChatMessages(before.Generation, before.LatestChangeSeq, "198.51.100.1", time.Now())
+		if err != nil || result.ClearedCount != 0 || result.Generation != before.Generation || result.LatestChangeSeq != before.LatestChangeSeq {
+			t.Fatalf("empty clear result=%+v err=%v before=%+v", result, err, before)
+		}
+	})
+
+	t.Run("orphan change advances generation", func(t *testing.T) {
+		st := openChatStore(t)
+		if _, err := st.DB.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+			t.Fatalf("disable foreign keys: %v", err)
+		}
+		if _, err := st.DB.Exec(`INSERT INTO chat_changes(message_id, kind, created_at) VALUES(99999, 'delete', ?)`, time.Now()); err != nil {
+			t.Fatalf("insert orphan change: %v", err)
+		}
+		if _, err := st.DB.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+			t.Fatalf("restore foreign keys: %v", err)
+		}
+		before := mustChatSyncState(t, st)
+		result, err := st.ClearChatMessages(before.Generation, before.LatestChangeSeq, "198.51.100.1", time.Now())
+		if err != nil || result.ClearedCount != 0 || result.Generation != before.Generation+1 || result.LatestChangeSeq != before.LatestChangeSeq {
+			t.Fatalf("orphan clear result=%+v err=%v before=%+v", result, err, before)
+		}
+		var count int
+		if err := st.DB.QueryRow(`SELECT COUNT(*) FROM chat_changes`).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("orphan changes remained count=%d err=%v", count, err)
+		}
+	})
+}
+
+func TestChatClearFailuresRollBackEverything(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		trigger string
+	}{
+		{name: "message delete", trigger: `CREATE TRIGGER reject_chat_clear_delete BEFORE DELETE ON chat_messages BEGIN SELECT RAISE(ABORT, 'reject clear delete'); END`},
+		{name: "generation", trigger: `CREATE TRIGGER reject_chat_clear_generation BEFORE UPDATE ON chat_sync_metadata BEGIN SELECT RAISE(ABORT, 'reject clear generation'); END`},
+		{name: "audit", trigger: `CREATE TRIGGER reject_chat_clear_audit BEFORE INSERT ON audit_logs WHEN NEW.action = 'chat_clear' BEGIN SELECT RAISE(ABORT, 'reject clear audit'); END`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openChatStore(t)
+			now := time.Now().UTC()
+			message, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "must survive", CreatedAt: now})
+			if err != nil {
+				t.Fatalf("create clear rollback fixture: %v", err)
+			}
+			before := mustChatSyncState(t, st)
+			if _, err := st.DB.Exec(tc.trigger); err != nil {
+				t.Fatalf("create clear failure trigger: %v", err)
+			}
+			if _, err := st.ClearChatMessages(before.Generation, before.LatestChangeSeq, "198.51.100.1", now.Add(time.Second)); err == nil {
+				t.Fatalf("clear succeeded despite %s failure", tc.name)
+			}
+			stored, err := st.ChatMessage(message.ID)
+			if err != nil || stored.Status() != ChatStatusActive || !stored.Body.Valid || stored.Body.String != "must survive" {
+				t.Fatalf("clear %s failure changed message: %+v err=%v", tc.name, stored, err)
+			}
+			if after := mustChatSyncState(t, st); after != before {
+				t.Fatalf("clear %s failure changed sync state before=%+v after=%+v", tc.name, before, after)
+			}
+			var changes int
+			if err := st.DB.QueryRow(`SELECT COUNT(*) FROM chat_changes`).Scan(&changes); err != nil || changes != 1 {
+				t.Fatalf("clear %s failure changed events count=%d err=%v", tc.name, changes, err)
+			}
+		})
+	}
+}
+
+func TestChatClearCreateAndRetentionConcurrencyCompletes(t *testing.T) {
+	for iteration := 0; iteration < 10; iteration++ {
+		st := openChatStore(t)
+		now := time.Now().UTC()
+		for index := 0; index < 4; index++ {
+			if _, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "old", CreatedAt: now.AddDate(0, 0, -2)}); err != nil {
+				t.Fatalf("iteration %d create old message: %v", iteration, err)
+			}
+		}
+		before := mustChatSyncState(t, st)
+		start := make(chan struct{})
+		results := make(chan error, 3)
+		go func() {
+			<-start
+			_, err := st.ClearChatMessages(before.Generation, before.LatestChangeSeq, "198.51.100.1", now)
+			results <- err
+		}()
+		go func() {
+			<-start
+			_, _, err := st.CreateChatMessage(ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.2", Body: "concurrent create", CreatedAt: now})
+			results <- err
+		}()
+		go func() {
+			<-start
+			_, err := st.CleanupChat(now, 1, 50000, 2)
+			results <- err
+		}()
+		close(start)
+		for index := 0; index < 3; index++ {
+			select {
+			case err := <-results:
+				if err != nil && !errors.Is(err, ErrChatClearConflict) {
+					t.Fatalf("iteration %d concurrent clear/create/retention error: %v", iteration, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("iteration %d clear/create/retention deadlocked", iteration)
+			}
+		}
+		var integrity string
+		if err := st.DB.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
+			t.Fatalf("iteration %d database integrity=%q err=%v", iteration, integrity, err)
+		}
+		if _, err := st.CurrentChatSyncState(); err != nil {
+			t.Fatalf("iteration %d read sync state: %v", iteration, err)
+		}
+		if err := st.DB.Close(); err != nil {
+			t.Fatalf("iteration %d close store: %v", iteration, err)
+		}
+	}
+}
+
+func waitForChatMutationCount(t *testing.T, st *Store, id int64, count int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for st.chatMutationCount(id) < count && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := st.chatMutationCount(id); got < count {
+		t.Fatalf("message %d mutation count=%d want at least %d", id, got, count)
 	}
 }
 

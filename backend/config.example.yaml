@@ -3,7 +3,7 @@ server:
   port: 17878
   # HTTP keep-alive 请求间连续空闲超时；仅重启生效，不是请求或传输总时长。
   keepalive_idle_timeout_seconds: 120
-  # 直接运行保持 false/[]。Compose 经内置 Nginx 时改为 true，并使用下方 172.28.0.0/24。
+  # 直接运行保持 false/[]。Compose 经内置 Nginx 时改为 true，并使用下方 172.28.0.0/24；代理信任配置仅重启生效。
   trust_proxy_headers: false
   trusted_proxy_cidrs: []
 database:

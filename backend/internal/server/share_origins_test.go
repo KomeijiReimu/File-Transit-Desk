@@ -312,10 +312,7 @@ func TestShareOriginsKeepsTrustedHTTPSOriginSeparateFromLoopbackListener(t *test
 	cfg.Server.Host = "127.0.0.1"
 	cfg.Server.Port = 17878
 	cfg.Server.TrustProxyHeaders = true
-	// Fiber's in-memory App.Test transport uses an unspecified synthetic peer;
-	// trust that test peer here while the separate untrusted case verifies the
-	// production boundary rejects spoofed forwarding headers.
-	cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/0", "::/0"}
+	cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/32"}
 	app := New(cfg, st)
 	if err := st.CreateSessionWithIdle("proxy-admin", time.Now().Add(time.Hour), time.Now().Add(time.Hour), "admin", "admin"); err != nil {
 		t.Fatalf("create admin session: %v", err)

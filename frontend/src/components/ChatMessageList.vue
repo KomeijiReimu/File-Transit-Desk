@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
 import ChatMessageCard from '@/components/ChatMessage.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -12,11 +12,19 @@ const props = withDefaults(defineProps<{
   loadingOlder?: boolean
   olderError?: string
   newMessageCount?: number
+  selectedIds?: number[]
+  selectionDisabled?: boolean
+  selectionAtLimit?: boolean
+  actionsDisabled?: boolean
 }>(), {
   hasMore: false,
   loadingOlder: false,
   olderError: '',
   newMessageCount: 0,
+  selectedIds: () => [],
+  selectionDisabled: false,
+  selectionAtLimit: false,
+  actionsDisabled: false,
 })
 
 const emit = defineEmits<{
@@ -24,11 +32,13 @@ const emit = defineEmits<{
   'jump-latest': []
   withdraw: [message: ChatMessage]
   delete: [message: ChatMessage]
+  'selection-change': [message: ChatMessage, selected: boolean]
   'bottom-change': [nearBottom: boolean]
 }>()
 
 const scrollRef = ref<HTMLElement | null>(null)
 const liveReady = ref(false)
+const selectedSet = computed(() => new Set(props.selectedIds))
 
 function reducedMotion() {
   return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -75,6 +85,10 @@ function onScroll() {
   emit('bottom-change', isNearBottom())
 }
 
+function forwardSelection(message: ChatMessage, selected: boolean) {
+  emit('selection-change', message, selected)
+}
+
 onMounted(async () => {
   await nextTick()
   scrollToBottom(false)
@@ -115,11 +129,16 @@ defineExpose({ isNearBottom, scrollToBottom, loadOlderPreservingPosition, focusL
           :key="message.id"
           :message="message"
           :admin="admin"
+          :selectable="admin && message.status !== 'deleted'"
+          :selected="selectedSet.has(message.id)"
+          :selection-disabled="selectionDisabled || (!selectedSet.has(message.id) && selectionAtLimit)"
+          :actions-disabled="actionsDisabled"
           @withdraw="emit('withdraw', $event)"
           @delete="emit('delete', $event)"
+          @selection-change="forwardSelection"
         />
       </div>
-      <EmptyState v-else title="还没有消息" description="发送第一条纯文本消息，开始这段交流。" icon="message-circle" />
+      <EmptyState v-else title="还没有消息" icon="message-circle" />
     </div>
 
     <Transition name="chat-new-message">

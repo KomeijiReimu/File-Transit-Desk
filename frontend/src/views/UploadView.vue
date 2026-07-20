@@ -303,11 +303,7 @@ onUnmounted(() => {
 <template>
   <section class="page-stack">
     <header class="page-header split">
-      <div>
-        <p class="eyebrow">上传任务</p>
-        <h1>文件上传</h1>
-        <p>只显示可上传的位置；上传过程可随时取消，并会显示明确进度和错误原因。</p>
-      </div>
+      <h1>文件上传</h1>
       <div class="header-actions">
         <RouterLink class="ghost-btn" :to="filesRoute">查看此目录文件</RouterLink>
         <GlassSelect :model-value="selectedDirId" class="page-select" :options="dirOptions" aria-label="选择上传目录" placeholder="选择目录" @update:model-value="requestDirectoryChange" />
@@ -318,13 +314,13 @@ onUnmounted(() => {
     <div v-if="notice" class="alert success" role="status" aria-live="polite">{{ notice }}</div>
     <div v-if="sessionNotice" class="alert info" role="status" aria-live="polite">{{ sessionNotice }}</div>
 
-    <EmptyState v-if="!loading && !error && !dirs.length" title="还没有可用目录" description="请先在后端配置可上传目录。" />
+    <EmptyState v-if="!loading && !error && !dirs.length" title="还没有可用目录" />
 
     <template v-else-if="selectedDir">
       <div class="panel upload-target-card">
         <div>
           <strong>{{ selectedDir.label || selectedDir.name }}</strong>
-          <p>{{ selectedDir.description || '已选择上传目标' }}</p>
+          <p>{{ selectedDir.description || selectedDir.root || selectedDir.id }}</p>
         </div>
         <div class="upload-path-field">
           <label for="upload-target-path"><span>上传路径</span></label>
@@ -344,17 +340,14 @@ onUnmounted(() => {
           @drop="onDrop"
         >
           <div class="dropzone-symbol" aria-hidden="true"><span /></div>
-          <div class="dropzone-copy">
-            <strong>拖拽文件到此上传</strong>
-            <small>或点击按钮选择文件，队列支持失败重试</small>
-          </div>
+          <strong>拖拽文件到此上传</strong>
           <button class="upload-btn" type="button" :disabled="uploadBusy || !canUpload" @click="chooseFiles">选择文件</button>
           <input ref="fileInput" class="visually-hidden" type="file" multiple :disabled="uploadBusy || !canUpload" @change="onFileChange" />
         </section>
 
         <div v-if="limits" class="upload-limit-note">
           单文件上限 {{ formatBytes(limits.uploadMaxFileBytes) }}；单次请求上限 {{ formatBytes(limits.uploadMaxBytes) }}。
-          每个文件开始传输前会建立临时授权；请不要关闭页面，关闭或断网会中断上传。
+          请不要关闭页面，关闭或断网会中断上传。
         </div>
 
         <ul v-if="uploadQueue.length" class="upload-queue">

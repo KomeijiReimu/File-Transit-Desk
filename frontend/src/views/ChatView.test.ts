@@ -66,6 +66,7 @@ function message(id: number, overrides: Partial<ChatMessage> = {}): ChatMessage 
     deletedAt: null,
     canWithdraw: false,
     withdrawUntil: null,
+    sourceIP: `192.0.2.${id}`,
     ...overrides,
   }
 }
@@ -87,6 +88,16 @@ function createFeed(initialMessages: ChatMessage[] = []) {
   const initialLoading = ref(false)
   const generation = ref<number | null>(1)
   const cursor = ref(1)
+  const latestChangeSeq = ref(1)
+  const selectedIds = ref<number[]>([])
+  const selectedCount = ref(0)
+  const selectionAtLimit = ref(false)
+  const selectionError = ref('')
+  const updateSelection = (ids: number[]) => {
+    selectedIds.value = ids
+    selectedCount.value = ids.length
+    selectionAtLimit.value = ids.length >= 100
+  }
   const rebind = vi.fn(async () => {
     messages.value = []
     feedCapabilities.value = null
@@ -94,6 +105,8 @@ function createFeed(initialMessages: ChatMessage[] = []) {
     initialLoading.value = false
     generation.value = null
     cursor.value = 0
+    latestChangeSeq.value = 0
+    updateSelection([])
     return false
   })
   return {
@@ -110,6 +123,11 @@ function createFeed(initialMessages: ChatMessage[] = []) {
     nextBeforeId: ref<number | null>(null),
     generation,
     cursor,
+    latestChangeSeq,
+    selectedIds,
+    selectedCount,
+    selectionAtLimit,
+    selectionError,
     syncing: ref(false),
     syncWarning: ref(''),
     refreshNotice: ref(''),
@@ -127,6 +145,26 @@ function createFeed(initialMessages: ChatMessage[] = []) {
     send: vi.fn(async (_body: string) => message(99, { isMine: true })),
     withdraw: vi.fn(async (_id: number) => message(1, { status: 'withdrawn', body: null, isMine: true })),
     remove: vi.fn(async (_id: number) => message(1, { status: 'deleted', body: null })),
+    toggleSelection: vi.fn((id: number, selected: boolean) => {
+      const current = new Set(selectedIds.value)
+      if (selected) current.add(id)
+      else current.delete(id)
+      updateSelection([...current])
+      return true
+    }),
+    clearSelection: vi.fn(() => updateSelection([])),
+    batchDelete: vi.fn(async (ids: number[]) => {
+      messages.value = messages.value.map((entry) => ids.includes(entry.id)
+        ? { ...entry, status: 'deleted' as const, body: null }
+        : entry)
+      updateSelection(selectedIds.value.filter((id) => !ids.includes(id)))
+      return { deletedCount: ids.length, mutations: [] }
+    }),
+    clearAll: vi.fn(async () => {
+      messages.value = []
+      updateSelection([])
+      return { clearedCount: 1, generation: 2, latestChangeSeq: 1 }
+    }),
   }
 }
 
@@ -169,6 +207,22 @@ afterEach(() => {
 })
 
 describe('ChatView interaction', () => {
+  it('keeps chat status and controls without rendering explanatory microcopy', async () => {
+    const feed = createFeed([])
+    chatViewMocks.useChatFeed.mockReturnValue(feed)
+    const wrapper = mount(ChatView)
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('仅限登录用户')
+    expect(wrapper.text()).not.toContain('约每 3 秒')
+    expect(wrapper.text()).not.toContain('仅当前已登录用户可进入')
+    expect(wrapper.find('.chat-page-header p').exists()).toBe(false)
+    expect(wrapper.find('.chat-stage-bar small').exists()).toBe(false)
+    expect(wrapper.find('.chat-projection-note span').exists()).toBe(false)
+    expect(wrapper.find('.empty-state p').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('retains the exact draft and shows Retry-After feedback when sending fails', async () => {
     const feed = createFeed([message(1)])
     feed.send.mockRejectedValueOnce(new ApiError('rate limited', 429, undefined, 'chat_send_rate_limited', 3))
@@ -351,8 +405,78 @@ describe('ChatView interaction', () => {
     feed.initialized.value = true
     await nextTick()
     expect(wrapper.text()).not.toContain('普通用户不可见原文')
-    expect(wrapper.text()).not.toContain('198.51.100.2')
+    expect(wrapper.text()).toContain('198.51.100.2')
     expect(wrapper.find('.chat-action-button.danger').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('uses a guarded batch-delete confirmation and updates selected messages immediately', async () => {
+    setAuthenticated('admin', 'admin-binding-a')
+    const pending = deferred<void>()
+    const feed = createFeed([message(1), message(2)])
+    feed.batchDelete.mockImplementationOnce(async (ids: number[]) => {
+      await pending.promise
+      feed.messages.value = feed.messages.value.map((entry) => ids.includes(entry.id)
+        ? { ...entry, status: 'deleted' as const, body: null }
+        : entry)
+      ids.forEach((id) => feed.toggleSelection(id, false))
+      return { deletedCount: ids.length, mutations: [] }
+    })
+    chatViewMocks.useChatFeed.mockReturnValue(feed)
+    const wrapper = mount(ChatView, { attachTo: document.body })
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll<HTMLInputElement>('input[type="checkbox"]')
+    await checkboxes[0]?.setValue(true)
+    await checkboxes[1]?.setValue(true)
+    expect(wrapper.get('.chat-selection-count').text()).toContain('2')
+    await wrapper.get('.chat-bulk-toolbar .ghost-btn').trigger('click')
+    await nextTick()
+
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')
+    const cancel = dialog?.querySelector<HTMLButtonElement>('.confirm-actions .ghost-btn')
+    const confirm = dialog?.querySelector<HTMLButtonElement>('.confirm-actions .primary-btn')
+    expect(dialog?.textContent).toContain('将删除已选择的 2 条消息，此操作不可恢复。')
+    expect(document.activeElement).toBe(cancel)
+    confirm?.click()
+    await flushPromises()
+    expect(feed.batchDelete).toHaveBeenCalledTimes(1)
+    expect(cancel?.disabled).toBe(true)
+    expect(confirm?.disabled).toBe(true)
+    expect(wrapper.findAll<HTMLInputElement>('input[type="checkbox"]').every((input) => input.element.disabled)).toBe(true)
+    expect(wrapper.findAll<HTMLButtonElement>('.chat-action-button.danger').every((button) => button.element.disabled)).toBe(true)
+    cancel?.click()
+    confirm?.click()
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(feed.batchDelete).toHaveBeenCalledTimes(1)
+
+    pending.resolve()
+    await flushPromises()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(feed.selectedIds.value).toEqual([])
+    expect(feed.messages.value.every((entry) => entry.status === 'deleted')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('requires a fresh clear confirmation after a CAS conflict', async () => {
+    setAuthenticated('admin', 'admin-binding-a')
+    const feed = createFeed([message(1)])
+    feed.clearAll.mockRejectedValueOnce(new ApiError('conflict', 409, undefined, 'chat_clear_conflict'))
+    chatViewMocks.useChatFeed.mockReturnValue(feed)
+    const wrapper = mount(ChatView, { attachTo: document.body })
+    await flushPromises()
+
+    await wrapper.get('.chat-bulk-toolbar .ghost-btn.danger').trigger('click')
+    await nextTick()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')
+    expect(dialog?.textContent).toContain('全部聊天消息将被清空，此操作不可恢复。')
+    expect(document.activeElement).toBe(dialog?.querySelector('.confirm-actions .ghost-btn'))
+    dialog?.querySelector<HTMLButtonElement>('.confirm-actions .primary-btn')?.click()
+    await flushPromises()
+
+    expect(feed.clearAll).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(wrapper.text()).toContain('消息已更新，请重新确认清空。')
     wrapper.unmount()
   })
 
@@ -377,7 +501,7 @@ describe('ChatView interaction', () => {
     wrapper.unmount()
   })
 
-  it('closes a pending delete dialog and clears the draft on subject change', async () => {
+  it('closes a pending batch-delete dialog and clears selection and draft on subject change', async () => {
     setAuthenticated('admin', 'admin-binding-a')
     const feed = createFeed([message(7, {
       status: 'withdrawn',
@@ -388,9 +512,11 @@ describe('ChatView interaction', () => {
     const wrapper = mount(ChatView, { attachTo: document.body })
     await flushPromises()
     await wrapper.get('textarea').setValue('不能跨主体保留的草稿')
-    await wrapper.get('.chat-action-button.danger').trigger('click')
+    await wrapper.get<HTMLInputElement>('input[type="checkbox"]').setValue(true)
+    await wrapper.get('.chat-bulk-toolbar .ghost-btn').trigger('click')
     await nextTick()
     expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(feed.selectedIds.value).toEqual([7])
 
     setUnknown()
     await nextTick()
@@ -398,6 +524,7 @@ describe('ChatView interaction', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull()
     expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('')
     expect(feed.messages.value).toEqual([])
+    expect(feed.selectedIds.value).toEqual([])
     wrapper.unmount()
   })
 

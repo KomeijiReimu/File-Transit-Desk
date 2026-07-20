@@ -30,8 +30,11 @@ type Store struct {
 	auditRetain     atomic.Int64
 	auditPruneEvery atomic.Uint64
 	auditWriteCount atomic.Uint64
-	chatMutationMu  sync.Mutex
-	chatMutations   map[int64]*chatMutationState
+	// chatDestructiveMu coordinates destructive chat operations inside one
+	// backend process backed by one SQLite store. It is not a cross-process lock.
+	chatDestructiveMu sync.RWMutex
+	chatMutationMu    sync.Mutex
+	chatMutations     map[int64]*chatMutationState
 }
 
 type Token struct {
@@ -1048,6 +1051,8 @@ var ErrInvalidAuditFilter = errors.New("invalid audit filter")
 
 var auditFailureActions = map[string]struct{}{
 	"chat_delete_failed":                    {},
+	"chat_batch_delete_failed":              {},
+	"chat_clear_failed":                     {},
 	"chat_withdraw_failed":                  {},
 	"config_resource_published_sync_failed": {},
 	"csrf_denied":                           {},

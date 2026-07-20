@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,8 @@ var (
 	ErrChatWithdrawExpired     = errors.New("chat message withdraw window expired")
 	ErrChatStateConflict       = errors.New("chat message state conflict")
 	ErrChatCursorResetRequired = errors.New("chat cursor reset required")
+	ErrChatBatchDeleteConflict = errors.New("chat batch delete conflict")
+	ErrChatClearConflict       = errors.New("chat clear conflict")
 )
 
 type ChatMessage struct {
@@ -72,9 +75,39 @@ type ChatSyncState struct {
 	LatestChangeSeq int64
 }
 
+type ChatMutation struct {
+	Message  ChatMessage
+	EventSeq int64
+}
+
+type ChatBatchDeleteConflictError struct {
+	MessageID int64
+	Reason    string
+}
+
+func (err *ChatBatchDeleteConflictError) Error() string {
+	return fmt.Sprintf("%v: message_id=%d reason=%s", ErrChatBatchDeleteConflict, err.MessageID, err.Reason)
+}
+
+func (err *ChatBatchDeleteConflictError) Unwrap() error {
+	return ErrChatBatchDeleteConflict
+}
+
+type ChatClearResult struct {
+	ClearedCount    int
+	Generation      int64
+	LatestChangeSeq int64
+}
+
 type chatMutationState struct {
 	gate   sync.Mutex
 	active int
+}
+
+type chatMutationLease struct {
+	id         int64
+	state      *chatMutationState
+	overlapped bool
 }
 
 func (s *Store) migrateChat() error {
@@ -123,6 +156,8 @@ func (s *Store) CreateChatMessage(input ChatCreateInput) (ChatMessage, int64, er
 		input.CreatedAt = time.Now()
 	}
 	input.CreatedAt = input.CreatedAt.UTC()
+	s.chatDestructiveMu.RLock()
+	defer s.chatDestructiveMu.RUnlock()
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return ChatMessage{}, 0, err
@@ -293,6 +328,8 @@ func (s *Store) WithdrawChatMessage(id int64, authorKey, actorRole, actorIP stri
 	if id < 1 || window <= 0 {
 		return ChatMessage{}, 0, ErrChatWithdrawForbidden
 	}
+	s.chatDestructiveMu.RLock()
+	defer s.chatDestructiveMu.RUnlock()
 	mutation, overlapped := s.beginChatMutation(id)
 	defer s.endChatMutation(id, mutation)
 	now = now.UTC()
@@ -363,6 +400,8 @@ func (s *Store) DeleteChatMessage(id int64, deletedBy, actorIP string, now time.
 	if deletedBy == "" || len(deletedBy) > 256 {
 		return ChatMessage{}, 0, errors.New("invalid chat delete actor")
 	}
+	s.chatDestructiveMu.RLock()
+	defer s.chatDestructiveMu.RUnlock()
 	mutation, overlapped := s.beginChatMutation(id)
 	defer s.endChatMutation(id, mutation)
 	now = now.UTC()
@@ -426,11 +465,214 @@ WHERE id = ?
 	return message, seq, nil
 }
 
+func (s *Store) BatchDeleteChatMessages(ids []int64, deletedBy, actorIP string, now time.Time) ([]ChatMutation, error) {
+	normalized, err := normalizeChatBatchIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+	deletedBy = strings.TrimSpace(deletedBy)
+	if deletedBy == "" || len(deletedBy) > 256 {
+		return nil, errors.New("invalid chat batch delete actor")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+
+	s.chatDestructiveMu.RLock()
+	defer s.chatDestructiveMu.RUnlock()
+	leases := s.beginChatMutations(normalized)
+	defer s.endChatMutations(leases)
+
+	for _, lease := range leases {
+		if lease.overlapped {
+			return nil, s.recordChatBatchDeleteConflictLocked(len(normalized), lease.id, "concurrent_conflict", actorIP, now)
+		}
+	}
+
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for _, id := range normalized {
+		var deletedAt sql.NullTime
+		err := tx.QueryRow(`SELECT deleted_at FROM chat_messages WHERE id = ?`, id).Scan(&deletedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := insertChatAuditTx(tx, "chat_batch_delete_failed", actorIP, chatBatchAuditDetail(len(normalized), id, "missing"), now); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, err
+			}
+			s.bestEffortAuditMaintenanceAfterCommit()
+			return nil, &ChatBatchDeleteConflictError{MessageID: id, Reason: "missing"}
+		}
+		if err != nil {
+			return nil, err
+		}
+		if deletedAt.Valid {
+			if err := insertChatAuditTx(tx, "chat_batch_delete_failed", actorIP, chatBatchAuditDetail(len(normalized), id, "already_deleted"), now); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, err
+			}
+			s.bestEffortAuditMaintenanceAfterCommit()
+			return nil, &ChatBatchDeleteConflictError{MessageID: id, Reason: "already_deleted"}
+		}
+	}
+
+	mutations := make([]ChatMutation, 0, len(normalized))
+	for _, id := range normalized {
+		result, err := tx.Exec(`
+UPDATE chat_messages
+SET body = NULL, deleted_at = ?, deleted_by = ?
+WHERE id = ? AND deleted_at IS NULL`, now, deletedBy, id)
+		if err != nil {
+			return nil, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if affected != 1 {
+			if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+				return nil, err
+			}
+			return nil, s.recordChatBatchDeleteConflictLocked(len(normalized), id, "concurrent_conflict", actorIP, now)
+		}
+		seq, err := insertChatChangeTx(tx, id, ChatChangeDelete, now)
+		if err != nil {
+			return nil, err
+		}
+		message, err := queryChatMessageTx(tx, id)
+		if err != nil {
+			return nil, err
+		}
+		mutations = append(mutations, ChatMutation{Message: message, EventSeq: seq})
+	}
+	if err := insertChatAuditTx(tx, "chat_batch_delete", actorIP, chatBatchAuditDetail(len(normalized), 0, "deleted"), now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	s.bestEffortAuditMaintenanceAfterCommit()
+	return mutations, nil
+}
+
+func (s *Store) recordChatBatchDeleteConflictLocked(count int, id int64, reason, actorIP string, now time.Time) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertChatAuditTx(tx, "chat_batch_delete_failed", actorIP, chatBatchAuditDetail(count, id, reason), now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.bestEffortAuditMaintenanceAfterCommit()
+	return &ChatBatchDeleteConflictError{MessageID: id, Reason: reason}
+}
+
+func (s *Store) ClearChatMessages(expectedGeneration, expectedLatestChangeSeq int64, actorIP string, now time.Time) (ChatClearResult, error) {
+	if expectedGeneration < 1 || expectedLatestChangeSeq < 0 {
+		return ChatClearResult{}, errors.New("invalid chat clear expectation")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+
+	s.chatDestructiveMu.Lock()
+	defer s.chatDestructiveMu.Unlock()
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return ChatClearResult{}, err
+	}
+	defer tx.Rollback()
+	state, err := chatSyncState(tx)
+	if err != nil {
+		return ChatClearResult{}, err
+	}
+	if state.Generation != expectedGeneration || state.LatestChangeSeq != expectedLatestChangeSeq {
+		if err := insertChatAuditTx(tx, "chat_clear_failed", actorIP, chatClearAuditDetail(0, state.Generation, "conflict"), now); err != nil {
+			return ChatClearResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return ChatClearResult{}, err
+		}
+		s.bestEffortAuditMaintenanceAfterCommit()
+		return ChatClearResult{}, ErrChatClearConflict
+	}
+
+	var messageCount, changeCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM chat_messages`).Scan(&messageCount); err != nil {
+		return ChatClearResult{}, err
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM chat_changes`).Scan(&changeCount); err != nil {
+		return ChatClearResult{}, err
+	}
+	changesResult, err := tx.Exec(`DELETE FROM chat_changes`)
+	if err != nil {
+		return ChatClearResult{}, err
+	}
+	deletedChanges, err := changesResult.RowsAffected()
+	if err != nil {
+		return ChatClearResult{}, err
+	}
+	messagesResult, err := tx.Exec(`DELETE FROM chat_messages`)
+	if err != nil {
+		return ChatClearResult{}, err
+	}
+	deletedMessages, err := messagesResult.RowsAffected()
+	if err != nil {
+		return ChatClearResult{}, err
+	}
+	if deletedMessages != int64(messageCount) || deletedChanges != int64(changeCount) {
+		return ChatClearResult{}, errors.New("chat clear row count changed")
+	}
+	result := ChatClearResult{
+		ClearedCount:    int(deletedMessages),
+		Generation:      state.Generation,
+		LatestChangeSeq: state.LatestChangeSeq,
+	}
+	operationResult := "noop"
+	if deletedMessages > 0 || deletedChanges > 0 {
+		updated, err := tx.Exec(`UPDATE chat_sync_metadata SET generation = generation + 1 WHERE singleton = 1`)
+		if err != nil {
+			return ChatClearResult{}, err
+		}
+		rows, err := updated.RowsAffected()
+		if err != nil {
+			return ChatClearResult{}, err
+		}
+		if rows != 1 {
+			return ChatClearResult{}, errors.New("chat sync metadata missing")
+		}
+		result.Generation++
+		operationResult = "cleared"
+	}
+	if err := insertChatAuditTx(tx, "chat_clear", actorIP, chatClearAuditDetail(result.ClearedCount, result.Generation, operationResult), now); err != nil {
+		return ChatClearResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ChatClearResult{}, err
+	}
+	s.bestEffortAuditMaintenanceAfterCommit()
+	return result, nil
+}
+
 func (s *Store) CleanupChat(now time.Time, retentionDays, maxMessages, batch int) (int, error) {
 	if retentionDays < 1 || maxMessages < 1 || batch < 1 {
 		return 0, errors.New("invalid chat cleanup policy")
 	}
 	cutoff := now.UTC().AddDate(0, 0, -retentionDays)
+	s.chatDestructiveMu.Lock()
+	defer s.chatDestructiveMu.Unlock()
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return 0, err
@@ -587,6 +829,45 @@ func chatAuditDetail(id int64, actorRole, result string) string {
 	return fmt.Sprintf("message_id=%d actor_role=%s result=%s", id, sanitizeChatActor(actorRole), sanitizeChatActor(result))
 }
 
+func chatBatchAuditDetail(count int, firstConflictID int64, result string) string {
+	if count < 0 {
+		count = 0
+	}
+	detail := fmt.Sprintf("count=%d result=%s", count, sanitizeChatBatchResult(result))
+	if firstConflictID > 0 {
+		detail += fmt.Sprintf(" first_conflict_id=%d", firstConflictID)
+	}
+	return detail
+}
+
+func chatClearAuditDetail(count int, generation int64, result string) string {
+	if count < 0 {
+		count = 0
+	}
+	if generation < 0 {
+		generation = 0
+	}
+	return fmt.Sprintf("count=%d result=%s generation=%d", count, sanitizeChatClearResult(result), generation)
+}
+
+func sanitizeChatBatchResult(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "deleted", "missing", "already_deleted", "concurrent_conflict", "invalid_request", "rate_limited":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
+}
+
+func sanitizeChatClearResult(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "cleared", "noop", "conflict", "invalid_request", "rate_limited":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
+}
+
 func sanitizeChatActor(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "admin" || value == "user" {
@@ -619,6 +900,41 @@ func (s *Store) beginChatMutation(messageID int64) (*chatMutationState, bool) {
 	s.chatMutationMu.Unlock()
 	state.gate.Lock()
 	return state, true
+}
+
+func normalizeChatBatchIDs(ids []int64) ([]int64, error) {
+	if len(ids) < 1 || len(ids) > 100 {
+		return nil, errors.New("chat batch delete requires 1 to 100 ids")
+	}
+	normalized := append([]int64(nil), ids...)
+	for _, id := range normalized {
+		if id < 1 {
+			return nil, errors.New("chat batch delete ids must be positive")
+		}
+	}
+	sort.Slice(normalized, func(left, right int) bool { return normalized[left] < normalized[right] })
+	for index := 1; index < len(normalized); index++ {
+		if normalized[index] == normalized[index-1] {
+			return nil, errors.New("chat batch delete ids must be unique")
+		}
+	}
+	return normalized, nil
+}
+
+func (s *Store) beginChatMutations(ids []int64) []chatMutationLease {
+	leases := make([]chatMutationLease, 0, len(ids))
+	for _, id := range ids {
+		state, overlapped := s.beginChatMutation(id)
+		leases = append(leases, chatMutationLease{id: id, state: state, overlapped: overlapped})
+	}
+	return leases
+}
+
+func (s *Store) endChatMutations(leases []chatMutationLease) {
+	for index := len(leases) - 1; index >= 0; index-- {
+		lease := leases[index]
+		s.endChatMutation(lease.id, lease.state)
+	}
 }
 
 func (s *Store) endChatMutation(messageID int64, state *chatMutationState) {

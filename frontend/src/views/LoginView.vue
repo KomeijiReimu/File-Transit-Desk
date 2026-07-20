@@ -157,7 +157,6 @@ async function submit() {
 <template>
   <main id="main-content" class="login-page" tabindex="-1" data-route-focus>
     <section class="login-hero">
-      <p class="eyebrow">文件传输台</p>
       <h1>安全访问文件传输台</h1>
     </section>
 
@@ -167,7 +166,6 @@ async function submit() {
           <AppIcon name="alert-triangle" :size="25" />
         </span>
         <div>
-          <p class="eyebrow">连接状态</p>
           <h2 id="service-unavailable-title">服务暂时不可用</h2>
         </div>
       </div>
@@ -191,14 +189,10 @@ async function submit() {
         <span v-if="reconnecting" class="login-reconnect-loader" aria-hidden="true" />
         {{ reconnecting ? '正在连接…' : '重新连接' }}
       </button>
-      <small class="login-unavailable-footnote">重新连接只会检查现有会话；若服务确认会话无效，页面会自动显示正常登录表单。</small>
     </section>
 
     <form v-else class="login-card" @submit.prevent="submit">
-      <div>
-        <p class="eyebrow">{{ mode === 'totp' ? '动态验证码' : '管理员入口' }}</p>
-        <h2>{{ mode === 'totp' ? '登录文件传输台' : '管理员登录' }}</h2>
-      </div>
+      <h2>{{ mode === 'totp' ? '登录文件传输台' : '管理员登录' }}</h2>
 
       <div class="tabs" role="tablist" aria-label="登录方式">
         <button
@@ -315,10 +309,6 @@ async function submit() {
   align-items: center;
 }
 
-.login-unavailable-heading .eyebrow {
-  margin-bottom: 5px;
-}
-
 .login-unavailable-icon {
   width: 56px;
   height: 56px;
@@ -373,12 +363,6 @@ async function submit() {
 
 @keyframes login-reconnect-spin {
   to { transform: rotate(360deg); }
-}
-
-.login-unavailable-footnote {
-  color: var(--muted);
-  line-height: 1.55;
-  text-wrap: pretty;
 }
 
 @media (max-width: 480px) {

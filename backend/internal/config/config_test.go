@@ -204,6 +204,19 @@ func TestConfigValidatesTrustedProxyCIDRs(t *testing.T) {
 	if err := c.validate(); err == nil {
 		t.Fatalf("expected more than 64 CIDRs rejected")
 	}
+	for _, cidr := range []string{
+		"0.0.0.0/0",
+		"::/0",
+		"::ffff:0.0.0.0/96",
+		"::fffe:0:0/95",
+	} {
+		candidate := validTestConfig()
+		candidate.Server.TrustProxyHeaders = true
+		candidate.Server.TrustedProxyCIDRs = []string{cidr}
+		if err := candidate.validate(); err == nil {
+			t.Fatalf("expected trust-all proxy CIDR %q rejected", cidr)
+		}
+	}
 }
 
 func TestConfigAbuseDefaultsAndBounds(t *testing.T) {

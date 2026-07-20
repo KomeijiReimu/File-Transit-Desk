@@ -308,8 +308,7 @@ export interface ChatMessage {
   deletedAt: string | null
   canWithdraw: boolean
   withdrawUntil: string | null
-  // 仅管理员投影返回；普通投影的归一化流程会主动移除此字段。
-  sourceIP?: string
+  sourceIP: string
 }
 
 export interface ChatChange {
@@ -339,6 +338,17 @@ export interface ChatMutationResponse {
   message: ChatMessage
   // eventSeq 只描述本次变更，不能作为全局 changes 游标。
   eventSeq: number
+}
+
+export interface ChatBatchDeleteResponse {
+  deletedCount: number
+  mutations: ChatMutationResponse[]
+}
+
+export interface ChatClearResponse {
+  clearedCount: number
+  generation: number
+  latestChangeSeq: number
 }
 
 export interface ChatCapabilities {

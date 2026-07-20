@@ -305,7 +305,7 @@ async function dismissActionError() {
 }
 
 function resourceDescription(dir: DirectoryInfo) {
-  return dir.description || (dir.type === 'file' ? '单文件共享' : '共享目录')
+  return dir.description || dir.root || dir.id
 }
 
 function resourcePermissionLabel(dir: DirectoryInfo) {
@@ -383,11 +383,7 @@ onBeforeUnmount(() => {
 <template>
   <section ref="pageRef" class="page-stack files-page">
     <header class="page-header split">
-      <div>
-        <p class="eyebrow">文件空间</p>
-        <h1>文件浏览</h1>
-        <p>像打开文件夹一样进入共享位置，再沿路径查看文件。</p>
-      </div>
+      <h1>文件浏览</h1>
     </header>
 
     <div v-if="loading || listError" ref="listStateRef" class="list-state-anchor" :tabindex="listError ? -1 : undefined">
@@ -395,7 +391,7 @@ onBeforeUnmount(() => {
     </div>
     <p class="visually-hidden" aria-live="polite">{{ liveMessage }}</p>
 
-    <EmptyState v-if="!loading && !listError && !dirs.length" title="还没有可用目录" description="请先在后端配置可访问目录。" />
+    <EmptyState v-if="!loading && !listError && !dirs.length" title="还没有可用目录" />
 
     <div v-if="dirs.length" ref="resourceBrowserRef" class="resource-browser" :aria-busy="loading" tabindex="-1" data-motion>
       <button
@@ -412,19 +408,19 @@ onBeforeUnmount(() => {
         <span class="resource-icon" aria-hidden="true"><span /></span>
         <span class="resource-copy">
           <strong>{{ dir.label || dir.name }}</strong>
-          <small>{{ resourceDescription(dir) }}</small>
+          <small v-if="resourceDescription(dir)">{{ resourceDescription(dir) }}</small>
           <small>{{ resourcePermissionLabel(dir) }}</small>
         </span>
       </button>
     </div>
 
-    <EmptyState v-if="!loading && dirs.length && !selectedDir" title="请选择共享位置" description="点击上方文件夹即可进入对应位置。" />
+    <EmptyState v-if="!loading && dirs.length && !selectedDir" title="请选择共享位置" />
 
     <template v-if="selectedDir">
       <div class="panel dir-summary" data-motion>
         <div>
           <strong>{{ selectedDir.label || selectedDir.name }}</strong>
-          <p>{{ selectedDir.description || selectedDir.root || '已配置目录' }}</p>
+          <p>{{ selectedDir.description || selectedDir.root || selectedDir.id }}</p>
         </div>
         <div class="pill-row">
           <span class="pill" :class="selectedIsFileResource ? 'ok' : ''">{{ selectedIsFileResource ? '单文件' : '目录' }}</span>
@@ -486,7 +482,7 @@ onBeforeUnmount(() => {
             </tr>
           </tbody>
         </table>
-        <EmptyState v-else-if="!loading && !truncated" title="当前路径为空" description="这里暂时没有文件或子目录。" />
+        <EmptyState v-else-if="!loading && !truncated" title="当前路径为空" />
         <EmptyState v-else-if="!loading && truncated" title="扫描范围内没有可显示项目" description="目录中可能仍有未扫描内容；可调整服务端扫描范围后重试。" />
         <div v-if="showLoadMoreFooter" class="load-more-footer">
           <div v-if="appendError" ref="appendErrorRef" class="alert error state-error" role="alert" tabindex="-1">
@@ -494,7 +490,6 @@ onBeforeUnmount(() => {
             <button class="ghost-btn" type="button" :disabled="loadingMore" @click="retryAppend">重试本页</button>
           </div>
           <div class="load-more-actions">
-            <span class="muted-text">{{ listingSummary }}</span>
             <button
               v-if="!appendError"
               ref="loadMoreButtonRef"

@@ -54,13 +54,6 @@ const headline = computed(() => {
   return isUpload.value ? '收件箱已就绪' : '文件已为你准备好'
 })
 
-const subline = computed(() => {
-  if (!info.value || !validFlag.value) return reasonLabel.value
-  return isUpload.value
-    ? '把文件拖到下方，或选择文件即可上传。'
-    : '点击下方按钮即可开始下载。'
-})
-
 const usesLabel = computed(() => {
   if (!info.value) return ''
   const used = info.value.uses ?? info.value.used ?? 0
@@ -273,7 +266,7 @@ onUnmounted(() => {
       <header class="share-header">
         <div class="brand" aria-label="文件传输台临时分享">
           <span class="brand-mark">FT</span>
-          <span><strong>文件传输台</strong><small>临时分享</small></span>
+          <strong>文件传输台</strong>
         </div>
       </header>
 
@@ -281,9 +274,7 @@ onUnmounted(() => {
 
       <article v-if="info" class="share-card" :data-kind="tokenType">
         <div class="share-card-glow" aria-hidden="true" />
-        <p class="eyebrow">{{ isUpload ? '临时收件' : '临时下载' }}</p>
         <h1>{{ headline }}</h1>
-        <p class="share-sub">{{ subline }}</p>
 
         <dl class="share-meta">
           <div>
@@ -328,7 +319,6 @@ onUnmounted(() => {
             >
               <div class="dropzone-symbol" aria-hidden="true"><span /></div>
               <strong>把文件拖到这里</strong>
-              <small>或点击此处选择文件，支持多文件</small>
               <button class="upload-btn" type="button" :disabled="uploadBusy" @click="pickFiles">选择文件</button>
               <input ref="fileInput" class="visually-hidden" type="file" multiple :disabled="uploadBusy" @change="onFileChange" />
             </section>
@@ -389,10 +379,6 @@ onUnmounted(() => {
           <EmptyState title="未知链接类型" description="无法判断该分享的用途，请确认链接是否完整。" />
         </template>
       </article>
-
-      <footer class="share-foot">
-        <small>由文件传输台提供临时分享</small>
-      </footer>
     </div>
   </main>
 </template>

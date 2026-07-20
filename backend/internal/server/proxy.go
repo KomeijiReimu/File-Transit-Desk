@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/netip"
@@ -12,7 +13,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-const maxForwardedForNodes = 32
+const (
+	maxForwardedForNodes = 32
+	devClientIPHeader    = "X-FileTrans-Dev-Client-IP"
+)
 
 type proxyResolver struct {
 	trusted []netip.Prefix
@@ -35,12 +39,31 @@ func newProxyResolver(serverConfig config.ServerConfig) (*proxyResolver, error) 
 		if err != nil {
 			return nil, fmt.Errorf("invalid trusted proxy CIDR")
 		}
+		if unsafeProxyTrustPrefix(prefix) {
+			return nil, fmt.Errorf("trusted proxy CIDR must not cover all IPv4 or IPv6 addresses")
+		}
 		if prefix.Addr().Is4In6() && prefix.Bits() >= 96 {
 			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+		}
+		if unsafeProxyTrustPrefix(prefix) {
+			return nil, fmt.Errorf("trusted proxy CIDR must not cover all IPv4 or IPv6 addresses")
 		}
 		resolver.trusted = append(resolver.trusted, prefix.Masked())
 	}
 	return resolver, nil
+}
+
+func unsafeProxyTrustPrefix(prefix netip.Prefix) bool {
+	prefix = prefix.Masked()
+	if prefix.Addr().Is4() && prefix.Bits() == 0 {
+		return true
+	}
+	if prefix.Addr().Is6() && !prefix.Addr().Is4In6() && prefix.Bits() == 0 {
+		return true
+	}
+	mappedFirst := netip.MustParseAddr("::ffff:0.0.0.0")
+	mappedLast := netip.MustParseAddr("::ffff:255.255.255.255")
+	return prefix.Addr().Is6() && prefix.Contains(mappedFirst) && prefix.Contains(mappedLast)
 }
 
 func (r *proxyResolver) isTrusted(address netip.Addr) bool {
@@ -84,6 +107,51 @@ func parseProxyIP(value string) (netip.Addr, error) {
 		}
 	}
 	return netip.Addr{}, fmt.Errorf("invalid address")
+}
+
+func parseDevClientIP(value string) (netip.Addr, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, ",\r\n") {
+		return netip.Addr{}, fmt.Errorf("invalid development client address")
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("invalid development client address")
+	}
+	if address.Zone() != "" {
+		address = address.WithZone("")
+	}
+	address = address.Unmap()
+	if !address.IsValid() {
+		return netip.Addr{}, fmt.Errorf("invalid development client address")
+	}
+	return address, nil
+}
+
+func singleRequestHeaderValues(c *fiber.Ctx, name string) []string {
+	values := make([]string, 0, 1)
+	c.Context().Request.Header.VisitAll(func(key, value []byte) {
+		if bytes.EqualFold(key, []byte(name)) {
+			values = append(values, string(value))
+		}
+	})
+	return values
+}
+
+func devClientIP(c *fiber.Ctx, remote netip.Addr) (string, bool) {
+	remote = remote.Unmap()
+	if !remote.IsLoopback() {
+		return "", false
+	}
+	values := singleRequestHeaderValues(c, devClientIPHeader)
+	if len(values) != 1 {
+		return "", false
+	}
+	address, err := parseDevClientIP(values[0])
+	if err != nil {
+		return "", false
+	}
+	return address.String(), true
 }
 
 func (r *proxyResolver) resolveClientIP(c *fiber.Ctx) string {

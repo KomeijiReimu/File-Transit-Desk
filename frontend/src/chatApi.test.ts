@@ -28,6 +28,8 @@ describe('chat API wiring', () => {
     setCurrentSessionBinding(binding)
     const fetchMock = vi.fn((url: string, _options?: RequestInit) => {
       if (url === '/api/chat/capabilities') return response({ maxMessageChars: 10 })
+      if (url === '/api/admin/chat/messages/batch-delete') return response({ deletedCount: 2, mutations: [] })
+      if (url === '/api/admin/chat/messages/clear') return response({ clearedCount: 2, generation: 3, latestChangeSeq: 7 })
       if (url.includes('/changes')) return response({ changes: [], generation: 2, nextAfterSeq: 7, hasMore: false, latestChangeSeq: 7 })
       if (url.includes('/messages') && !url.endsWith('/withdraw')) {
         if (url === '/api/chat/messages') return response({ message: { id: 9 }, eventSeq: 11 }, 201)
@@ -47,6 +49,8 @@ describe('chat API wiring', () => {
     await api.createChatMessage('纯文本')
     await api.withdrawChatMessage(9)
     await api.deleteChatMessage(9)
+    await api.batchDeleteChatMessages([9, 10])
+    await api.clearChatMessages(2, 7)
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       '/api/chat/capabilities',
@@ -57,6 +61,8 @@ describe('chat API wiring', () => {
       '/api/chat/messages',
       '/api/chat/messages/9/withdraw',
       '/api/admin/chat/messages/9',
+      '/api/admin/chat/messages/batch-delete',
+      '/api/admin/chat/messages/clear',
     ])
     expect(fetchMock.mock.calls.some(([url]) => url === '/api/auth/heartbeat')).toBe(false)
 
@@ -66,5 +72,25 @@ describe('chat API wiring', () => {
     expect(new Headers(createOptions.headers).get('X-Session-Binding')).toBe(binding)
     expect(fetchMock.mock.calls[6]?.[1]).toMatchObject({ method: 'POST', credentials: 'include' })
     expect(fetchMock.mock.calls[7]?.[1]).toMatchObject({ method: 'DELETE', credentials: 'include' })
+    const batchOptions = fetchMock.mock.calls[8]?.[1] as unknown as RequestInit
+    expect(batchOptions).toMatchObject({ method: 'POST', credentials: 'include', body: JSON.stringify({ ids: [9, 10] }) })
+    expect(new Headers(batchOptions.headers).get('X-Session-Binding')).toBe(binding)
+    const clearOptions = fetchMock.mock.calls[9]?.[1] as unknown as RequestInit
+    expect(clearOptions).toMatchObject({
+      method: 'POST',
+      credentials: 'include',
+      body: JSON.stringify({ confirm: 'CLEAR_ALL_MESSAGES', expectedGeneration: 2, expectedLatestChangeSeq: 7 }),
+    })
+    expect(new Headers(clearOptions.headers).get('X-Session-Binding')).toBe(binding)
+  })
+
+  it('rejects invalid batch-delete ID sets before issuing a request', () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(() => api.batchDeleteChatMessages([])).toThrowError('批量删除请求无效。')
+    expect(() => api.batchDeleteChatMessages([1, 1])).toThrowError('批量删除请求无效。')
+    expect(() => api.batchDeleteChatMessages(Array.from({ length: 101 }, (_, index) => index + 1))).toThrowError('批量删除请求无效。')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

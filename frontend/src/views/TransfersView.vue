@@ -174,11 +174,7 @@ onUnmounted(() => {
 <template>
   <section ref="pageRef" class="page-stack transfers-page">
     <header class="page-header split">
-      <div>
-        <p class="eyebrow">实时任务</p>
-        <h1>正在传输</h1>
-        <p>查看当前上传和下载。上传可以可靠取消；下载保持极速通道，只做运行状态观测。</p>
-      </div>
+      <h1>正在传输</h1>
       <button class="ghost-btn" type="button" :disabled="loading" @click="load()">刷新</button>
     </header>
 
@@ -201,11 +197,8 @@ onUnmounted(() => {
 
     <div v-if="!loading && (lastSuccessfulAt || !error)" class="panel table-panel transfer-panel" data-motion>
       <div class="panel-head">
-        <div>
-          <h2>活跃传输</h2>
-          <p class="muted-text">自动观察当前上传与下载；下载通道以速度优先，进度可能延迟更新。</p>
-        </div>
-        <span class="pill muted">{{ dataStale ? `数据可能已过期 · ${refreshStatus}` : `${refreshStatus} · 每 2 秒刷新` }}</span>
+        <h2>活跃传输</h2>
+        <span class="pill muted">{{ dataStale ? `数据可能已过期 · ${refreshStatus}` : refreshStatus }}</span>
       </div>
       <div v-if="transfers.length" class="transfer-list">
         <article v-for="item in transfers" :key="item.id" class="transfer-card" :data-kind="item.type === 'upload' ? 'upload' : 'download'">
@@ -273,7 +266,7 @@ onUnmounted(() => {
           </div>
         </article>
       </div>
-      <EmptyState v-else title="没有活跃传输" description="当前没有正在上传或下载的任务。" />
+      <EmptyState v-else title="没有活跃传输" />
     </div>
 
     <ConfirmDialog

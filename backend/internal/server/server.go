@@ -525,6 +525,8 @@ func (s *Server) routes(app *fiber.App) {
 	app.Get("/api/admin/chat/messages", s.adminOnly(s.adminChatMessages))
 	app.Get("/api/admin/chat/changes", s.adminOnly(s.adminChatChanges))
 	app.Delete("/api/admin/chat/messages/:id", s.adminOnly(s.deleteChatMessage))
+	app.Post("/api/admin/chat/messages/batch-delete", s.adminOnly(s.batchDeleteChatMessages))
+	app.Post("/api/admin/chat/messages/clear", s.adminOnly(s.clearChatMessages))
 	app.Get("/api/transfers/active", s.adminOnly(s.activeTransfers))
 	app.Post("/api/transfers/:id/cancel", s.adminOnly(s.cancelTransfer))
 	app.Get("/api/tokens", s.adminOnly(s.listTokens))
@@ -903,10 +905,16 @@ func normalizeLoginCode(code string) string {
 }
 
 func (s *Server) clientIP(c *fiber.Ctx) string {
+	remote := socketRemoteIP(c)
+	if s.devMode {
+		if address, ok := devClientIP(c, remote); ok {
+			return address
+		}
+	}
 	if s.proxyResolver != nil {
 		return s.proxyResolver.resolveClientIP(c)
 	}
-	return socketRemoteIP(c).String()
+	return remote.String()
 }
 
 func (s *Server) setSessionCookie(c *fiber.Ctx, value string, expiresAt time.Time) {
@@ -3571,8 +3579,12 @@ func actionLabel(action string) string {
 		"file_picker_denied":                    "文件选择拒绝",
 		"chat_withdraw":                         "撤回聊天消息",
 		"chat_delete":                           "删除聊天消息",
+		"chat_batch_delete":                     "批量删除聊天消息",
+		"chat_clear":                            "清空聊天消息",
 		"chat_withdraw_failed":                  "撤回聊天消息失败",
 		"chat_delete_failed":                    "删除聊天消息失败",
+		"chat_batch_delete_failed":              "批量删除聊天消息失败",
+		"chat_clear_failed":                     "清空聊天消息失败",
 	}
 	if label, ok := labels[action]; ok {
 		return label

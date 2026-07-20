@@ -22,6 +22,7 @@ function message(id: number): ChatMessage {
     deletedAt: null,
     canWithdraw: false,
     withdrawUntil: null,
+    sourceIP: `192.0.2.${id}`,
   }
 }
 
@@ -99,5 +100,29 @@ describe('ChatMessageList', () => {
     expect(button.text()).toContain('有 3 条新消息')
     await button.trigger('click')
     expect(wrapper.emitted('jump-latest')).toHaveLength(1)
+  })
+
+  it('disables unselected controls at the limit and never selects deleted messages', async () => {
+    const wrapper = mount(ChatMessageList, {
+      props: {
+        messages: [
+          message(1),
+          message(2),
+          { ...message(3), status: 'deleted', body: null },
+        ],
+        admin: true,
+        selectedIds: [1],
+        selectionAtLimit: true,
+      },
+    })
+
+    const checkboxes = wrapper.findAll<HTMLInputElement>('input[type="checkbox"]')
+    expect(checkboxes).toHaveLength(2)
+    expect(checkboxes[0]?.element.disabled).toBe(false)
+    expect(checkboxes[1]?.element.disabled).toBe(true)
+    expect(wrapper.findAll('.chat-message')[2]?.find('input[type="checkbox"]').exists()).toBe(false)
+
+    await checkboxes[0]?.setValue(false)
+    expect(wrapper.emitted('selection-change')?.[0]).toEqual([expect.objectContaining({ id: 1 }), false])
   })
 })

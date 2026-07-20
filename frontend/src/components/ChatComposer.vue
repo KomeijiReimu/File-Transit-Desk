@@ -101,7 +101,7 @@ defineExpose({ focus })
 
     <div class="chat-compose-footer">
       <div class="chat-compose-guidance">
-        <p :id="hintId">Enter 发送 · Shift + Enter 换行</p>
+        <p :id="hintId" class="visually-hidden">Enter 发送，Shift 加 Enter 换行。</p>
         <div v-if="capabilities" class="chat-metrics" aria-label="消息大小">
           <span :data-over="metrics.characterExceeded">{{ metrics.characters }} / {{ capabilities.maxMessageChars }} 字符</span>
           <span :data-over="metrics.bodyBytesExceeded">{{ metrics.bodyBytes }} / {{ capabilities.maxMessageBytes }} 正文字节</span>

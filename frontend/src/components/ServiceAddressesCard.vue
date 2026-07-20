@@ -19,11 +19,11 @@ type DisplayCandidate = ShareOriginCandidate & {
   group: AddressGroupKey
 }
 
-const groupDefinitions: Array<{ key: AddressGroupKey; title: string; description: string }> = [
-  { key: 'current', title: '当前入口', description: '此浏览器正在使用' },
-  { key: 'configured', title: '公开地址', description: '显式配置的对外访问地址' },
-  { key: 'interface', title: '网络接口', description: '与监听范围匹配的本机地址' },
-  { key: 'other', title: '其他候选', description: '由服务端补充提供' },
+const groupDefinitions: Array<{ key: AddressGroupKey; title: string }> = [
+  { key: 'current', title: '当前入口' },
+  { key: 'configured', title: '公开地址' },
+  { key: 'interface', title: '网络接口' },
+  { key: 'other', title: '其他候选' },
 ]
 
 const candidates = ref<ShareOriginCandidate[]>([])
@@ -301,9 +301,7 @@ onBeforeUnmount(() => {
           <AppIcon name="link" :size="26" />
         </span>
         <div>
-          <p class="eyebrow">连接入口</p>
           <h2 id="service-addresses-title">服务访问地址</h2>
-          <p>候选地址根据当前入口、显式公开地址和本机网络接口生成。地址仅供复制，不会在此页面直接打开。</p>
         </div>
       </div>
       <div class="service-address-summary" role="status" aria-live="polite">
@@ -323,10 +321,7 @@ onBeforeUnmount(() => {
         :aria-labelledby="`service-address-group-${group.key}`"
       >
         <div class="service-address-group-head">
-          <div>
-            <h3 :id="`service-address-group-${group.key}`">{{ group.title }}</h3>
-            <p>{{ group.description }}</p>
-          </div>
+          <h3 :id="`service-address-group-${group.key}`">{{ group.title }}</h3>
           <span>{{ group.items.length }}</span>
         </div>
 
@@ -384,11 +379,7 @@ onBeforeUnmount(() => {
 
     <section v-if="listenDiagnostics.length" class="service-listener-diagnostics" aria-labelledby="service-listener-title">
       <header class="service-listener-head">
-        <div>
-          <p class="service-listener-kicker">后端监听诊断</p>
-          <h3 id="service-listener-title">服务进程监听</h3>
-        </div>
-        <span>仅供诊断</span>
+        <h3 id="service-listener-title">服务进程监听</h3>
       </header>
       <p class="service-listener-description">这里显示后端进程实际监听的端点。使用反向代理时，它可能只是内部监听端口，并不是浏览器访问地址，因此不会加入上方复制列表。</p>
       <div class="service-listener-list">
@@ -457,7 +448,7 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr);
   gap: 16px;
-  align-items: start;
+  align-items: center;
 }
 
 .service-address-icon {
@@ -472,24 +463,12 @@ onBeforeUnmount(() => {
   box-shadow: 0 14px 34px rgba(39, 152, 157, .2), inset 0 1px 0 rgba(255, 255, 255, .32);
 }
 
-.service-address-title-wrap .eyebrow {
-  margin-bottom: 5px;
-}
-
 .service-address-title-wrap h2 {
   margin: 0;
   font-family: "Songti SC", "Noto Serif CJK SC", serif;
   font-size: clamp(24px, 3vw, 34px);
   line-height: 1.12;
   text-wrap: balance;
-}
-
-.service-address-title-wrap p:last-child {
-  max-width: 720px;
-  margin: 8px 0 0;
-  color: var(--muted);
-  line-height: 1.65;
-  text-wrap: pretty;
 }
 
 .service-address-summary {
@@ -548,10 +527,10 @@ onBeforeUnmount(() => {
 }
 
 .service-address-group-head {
-  min-height: 48px;
-  padding: 5px 6px 10px;
+  min-height: 36px;
+  padding: 3px 6px 8px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
@@ -559,13 +538,6 @@ onBeforeUnmount(() => {
 .service-address-group-head h3 {
   margin: 0;
   font: 700 15px/1.35 "Songti SC", "Noto Serif CJK SC", serif;
-}
-
-.service-address-group-head p {
-  margin: 3px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
 }
 
 .service-address-group-head > span {
@@ -740,35 +712,14 @@ onBeforeUnmount(() => {
 
 .service-listener-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-}
-
-.service-listener-kicker {
-  margin: 0 0 3px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: .11em;
-  text-transform: uppercase;
 }
 
 .service-listener-head h3 {
   margin: 0;
   font: 700 17px/1.35 "Songti SC", "Noto Serif CJK SC", serif;
-}
-
-.service-listener-head > span {
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  padding: 5px 9px;
-  border-radius: 999px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, .055);
-  font-size: 11px;
-  white-space: nowrap;
 }
 
 .service-listener-description {

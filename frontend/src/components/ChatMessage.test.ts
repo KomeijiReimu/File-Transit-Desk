@@ -16,28 +16,39 @@ function message(overrides: Partial<ChatMessage> = {}): ChatMessage {
     deletedAt: null,
     canWithdraw: false,
     withdrawUntil: null,
+    sourceIP: '192.0.2.10',
     ...overrides,
   }
 }
 
-afterEach(() => vi.useRealTimers())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('ChatMessage', () => {
-  it('shows an ordinary withdrawn tombstone without the original or source IP', () => {
+  it('shows an ordinary withdrawn tombstone with its IP but without the original or admin-only fields', () => {
+    const entry = {
+      ...message({
+        status: 'withdrawn',
+        body: '普通用户绝不能看到的原文',
+        sourceIP: '198.51.100.8',
+      }),
+      authorKey: 'hidden-author-key',
+      deletedBy: 'hidden-admin-key',
+    } as ChatMessage
     const wrapper = mount(ChatMessageCard, {
       props: {
         admin: false,
-        message: message({
-          status: 'withdrawn',
-          body: '普通用户绝不能看到的原文',
-          sourceIP: '198.51.100.8',
-        }),
+        message: entry,
       },
     })
 
     expect(wrapper.text()).toContain('该消息已被撤回')
     expect(wrapper.text()).not.toContain('普通用户绝不能看到的原文')
-    expect(wrapper.text()).not.toContain('198.51.100.8')
+    expect(wrapper.text()).toContain('198.51.100.8')
+    expect(wrapper.text()).not.toContain('hidden-author-key')
+    expect(wrapper.text()).not.toContain('hidden-admin-key')
   })
 
   it('shows the admin-only withdrawn original and IP as literal plain text', () => {
@@ -61,7 +72,7 @@ describe('ChatMessage', () => {
     expect((window as unknown as { __xss?: boolean }).__xss).toBeUndefined()
   })
 
-  it('never renders a deleted body or management metadata and removes all actions', () => {
+  it('shows a deleted message IP while never rendering its body or actions', () => {
     const wrapper = mount(ChatMessageCard, {
       props: {
         admin: true,
@@ -76,8 +87,31 @@ describe('ChatMessage', () => {
 
     expect(wrapper.text()).toContain('该消息已由管理员删除')
     expect(wrapper.text()).not.toContain('即使错误传入也不能显示')
-    expect(wrapper.text()).not.toContain('192.0.2.55')
+    expect(wrapper.text()).toContain('192.0.2.55')
     expect(wrapper.find('button').exists()).toBe(false)
+  })
+
+  it('shows IP metadata on an ordinary active message without administrator controls', () => {
+    const wrapper = mount(ChatMessageCard, {
+      props: { admin: false, message: message({ sourceIP: '203.0.113.9' }) },
+    })
+
+    expect(wrapper.text()).toContain('203.0.113.9')
+    expect(wrapper.text()).toContain('普通消息')
+    expect(wrapper.find('.chat-action-button.danger').exists()).toBe(false)
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false)
+  })
+
+  it('renders an administrator selection control only for non-deleted messages', async () => {
+    const wrapper = mount(ChatMessageCard, {
+      props: { admin: true, selectable: true, selected: false, message: message() },
+    })
+    const checkbox = wrapper.get('input[type="checkbox"]')
+    await checkbox.setValue(true)
+    expect(wrapper.emitted('selection-change')?.[0]).toEqual([expect.objectContaining({ id: 1 }), true])
+
+    await wrapper.setProps({ message: message({ status: 'deleted', body: null }), selectable: false })
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false)
   })
 
   it.each([
@@ -92,9 +126,11 @@ describe('ChatMessage', () => {
     expect(wrapper.emitted('delete')?.[0]?.[0]).toMatchObject({ status })
   })
 
-  it('expires the withdrawal button from the server deadline and emits only while enabled', async () => {
+  it('uses a one-shot expiry without rendering a countdown or starting an interval', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T08:00:00Z'))
+    const intervalSpy = vi.spyOn(window, 'setInterval')
+    const timeoutSpy = vi.spyOn(window, 'setTimeout')
     const entry = message({
       isMine: true,
       canWithdraw: true,
@@ -103,12 +139,19 @@ describe('ChatMessage', () => {
     const wrapper = mount(ChatMessageCard, { props: { admin: false, message: entry } })
     const button = wrapper.get('.chat-action-button')
 
-    expect(button.text()).toContain('00:02')
+    expect(button.text()).toBe('撤回')
+    expect(button.attributes('aria-label')).toBe('撤回消息')
+    expect(intervalSpy).not.toHaveBeenCalled()
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2_000)
     await button.trigger('click')
     expect(wrapper.emitted('withdraw')).toHaveLength(1)
 
-    await vi.advanceTimersByTimeAsync(2_000)
-    expect(button.text()).toContain('撤回已过期')
-    expect(button.attributes('disabled')).toBeDefined()
+    const expiryCallback = timeoutSpy.mock.calls.find(([, delay]) => delay === 2_000)?.[0]
+    expect(expiryCallback).toBeTypeOf('function')
+    vi.setSystemTime(new Date('2026-07-20T08:00:02Z'))
+    ;(expiryCallback as () => void)()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.chat-action-button').exists()).toBe(false)
+    expect(intervalSpy).not.toHaveBeenCalled()
   })
 })

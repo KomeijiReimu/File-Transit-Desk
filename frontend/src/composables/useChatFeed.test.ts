@@ -7,9 +7,11 @@ import {
   type ChatMessageWatermark,
 } from '@/composables/useChatFeed'
 import type {
+  ChatBatchDeleteResponse,
   ChatCapabilities,
   ChatChange,
   ChatChangesResponse,
+  ChatClearResponse,
   ChatHistoryResponse,
   ChatMessage,
   ChatMutationResponse,
@@ -43,6 +45,7 @@ function message(id: number, overrides: Partial<ChatMessage> = {}): ChatMessage 
     deletedAt: null,
     canWithdraw: false,
     withdrawUntil: null,
+    sourceIP: `192.0.2.${id}`,
     ...overrides,
   }
 }
@@ -86,6 +89,15 @@ function makeClient(overrides: Partial<ChatApiClient> = {}) {
     createChatMessage: vi.fn(async (body: string) => mutation(message(90, { body, isMine: true }))),
     withdrawChatMessage: vi.fn(async (id: number) => mutation(message(id, { body: null, status: 'withdrawn', isMine: true }))),
     deleteChatMessage: vi.fn(async (id: number) => mutation(message(id, { body: null, status: 'deleted' }))),
+    batchDeleteChatMessages: vi.fn(async (ids: number[]): Promise<ChatBatchDeleteResponse> => ({
+      deletedCount: ids.length,
+      mutations: ids.map((id, index) => mutation(message(id, { body: null, status: 'deleted' }), 1_000 + index)),
+    })),
+    clearChatMessages: vi.fn(async (): Promise<ChatClearResponse> => ({
+      clearedCount: 0,
+      generation: 2,
+      latestChangeSeq: 4,
+    })),
     ...overrides,
   } as ChatApiClient & Record<keyof ChatApiClient, ReturnType<typeof vi.fn>>
 }
@@ -126,10 +138,15 @@ describe('useChatFeed', () => {
     expect(chatWatermarkIsNewer(mark(10, 'changes', 2), { ...mark(11, 'changes', 2), generation: 2 })).toBe(false)
   })
 
-  it('loads the capability-sized latest history, sorts by id and strips ordinary projection secrets', async () => {
+  it('loads the capability-sized latest history, keeps ordinary IPs and strips withdrawn originals', async () => {
+    const leaked = {
+      ...message(2, { status: 'withdrawn', body: '仅管理员原文', sourceIP: '198.51.100.2' }),
+      authorKey: 'hidden-author-key',
+      deletedBy: 'hidden-admin-key',
+    } as ChatMessage
     const client = makeClient({
       chatMessages: vi.fn(async () => history([
-        message(2, { status: 'withdrawn', body: '仅管理员原文', sourceIP: '198.51.100.2' }),
+        leaked,
         message(1),
         message(2, { status: 'withdrawn', body: '最后版本', sourceIP: '198.51.100.3' }),
       ], { nextBeforeId: 1, hasMore: true, latestChangeSeq: 12 })),
@@ -141,7 +158,9 @@ describe('useChatFeed', () => {
     expect(client.chatMessages).toHaveBeenCalledWith(false, { limit: 50 }, expect.any(AbortSignal))
     expect(feed.messages.value.map((entry) => entry.id)).toEqual([1, 2])
     expect(feed.messages.value[1]).toMatchObject({ body: null, status: 'withdrawn' })
-    expect(feed.messages.value[1]).not.toHaveProperty('sourceIP')
+    expect(feed.messages.value[1]).toMatchObject({ sourceIP: '198.51.100.2' })
+    expect(feed.messages.value[1]).not.toHaveProperty('authorKey')
+    expect(feed.messages.value[1]).not.toHaveProperty('deletedBy')
     expect(feed.cursor.value).toBe(12)
     expect(feed.hasMore.value).toBe(true)
     feed.dispose()
@@ -201,7 +220,7 @@ describe('useChatFeed', () => {
     expect(client.chatCapabilities).toHaveBeenCalledTimes(2)
     expect(client.chatMessages).toHaveBeenLastCalledWith(false, { limit: 50 }, expect.any(AbortSignal))
     expect(feed.messages.value[0]).toMatchObject({ status: 'withdrawn', body: null })
-    expect(feed.messages.value[0]).not.toHaveProperty('sourceIP')
+    expect(feed.messages.value[0]).toMatchObject({ sourceIP: '203.0.113.2' })
 
     await feed.syncNow()
     expect(client.chatChanges).toHaveBeenLastCalledWith(false, { afterSeq: 20, generation: 2, limit: 500 }, expect.any(AbortSignal))
@@ -384,6 +403,7 @@ describe('useChatFeed', () => {
       random: () => 0.5,
     })
     await feed.start()
+    feed.toggleSelection(1, true)
 
     const forbiddenSync = feed.syncNow()
     const forbiddenDelete = feed.remove(1)
@@ -392,12 +412,13 @@ describe('useChatFeed', () => {
     expect(feed.messages.value).toEqual([])
     expect(feed.capabilities.value).toBeNull()
     expect(feed.generation.value).toBeNull()
+    expect(feed.selectedIds.value).toEqual([])
     expect(revalidateAuth).toHaveBeenCalledTimes(1)
 
     await feed.rebind({ subjectKey: 'authenticated|user|binding-b', admin: false, active: true })
     expect(client.chatMessages).toHaveBeenLastCalledWith(false, { limit: 50 }, expect.any(AbortSignal))
     expect(feed.messages.value[0]).toMatchObject({ status: 'withdrawn', body: null })
-    expect(feed.messages.value[0]).not.toHaveProperty('sourceIP')
+    expect(feed.messages.value[0]).toMatchObject({ sourceIP: '192.0.2.2' })
     await feed.syncNow()
     expect(client.chatChanges).toHaveBeenLastCalledWith(false, { afterSeq: 20, generation: 2, limit: 500 }, expect.any(AbortSignal))
 
@@ -409,6 +430,7 @@ describe('useChatFeed', () => {
 
   it('clears session_subject_changed without starting a second auth revalidation', async () => {
     const revalidateAuth = vi.fn()
+    const onProjectionInvalidated = vi.fn()
     const client = makeClient({
       chatMessages: vi.fn(async () => history([
         message(1, { status: 'withdrawn', body: '敏感原文', sourceIP: '192.0.2.10' }),
@@ -420,14 +442,18 @@ describe('useChatFeed', () => {
       active: true,
       subjectKey: 'authenticated|admin|binding-a',
       revalidateAuth,
+      onProjectionInvalidated,
       client,
       random: () => 0.5,
     })
     await feed.start()
+    feed.toggleSelection(1, true)
 
     await feed.syncNow()
     expect(feed.messages.value).toEqual([])
     expect(feed.generation.value).toBeNull()
+    expect(feed.selectedIds.value).toEqual([])
+    expect(onProjectionInvalidated).toHaveBeenCalledTimes(1)
     expect(revalidateAuth).not.toHaveBeenCalled()
     feed.dispose()
   })
@@ -550,6 +576,219 @@ describe('useChatFeed', () => {
     feed.dispose()
   })
 
+  it('applies batch-delete mutation watermarks without advancing the changes cursor', async () => {
+    const client = makeClient({
+      chatMessages: vi.fn(async () => history([message(1), message(2)], { latestChangeSeq: 10 })),
+      batchDeleteChatMessages: vi.fn(async () => ({
+        deletedCount: 2,
+        mutations: [
+          mutation(message(1, { status: 'deleted', body: null }), 11),
+          mutation(message(2, { status: 'deleted', body: null }), 12),
+        ],
+      })),
+    })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
+    await feed.start()
+    feed.toggleSelection(1, true)
+    feed.toggleSelection(2, true)
+
+    await feed.batchDelete([1, 2])
+
+    expect(client.batchDeleteChatMessages).toHaveBeenCalledWith([1, 2], expect.any(AbortSignal))
+    expect(feed.messages.value).toEqual([
+      expect.objectContaining({ id: 1, status: 'deleted', body: null }),
+      expect.objectContaining({ id: 2, status: 'deleted', body: null }),
+    ])
+    expect(feed.selectedIds.value).toEqual([])
+    expect(feed.cursor.value).toBe(10)
+    expect(feed.latestChangeSeq.value).toBe(12)
+    feed.dispose()
+  })
+
+  it('keeps batch selection after a failed request', async () => {
+    const client = makeClient({
+      chatMessages: vi.fn(async () => history([message(1), message(2)], { latestChangeSeq: 10 })),
+      batchDeleteChatMessages: vi.fn(async () => {
+        throw new ApiError('conflict', 409, undefined, 'chat_batch_delete_conflict')
+      }),
+    })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
+    await feed.start()
+    feed.toggleSelection(1, true)
+    feed.toggleSelection(2, true)
+
+    await expect(feed.batchDelete([1, 2])).rejects.toMatchObject({ code: 'chat_batch_delete_conflict' })
+    expect(feed.selectedIds.value).toEqual([1, 2])
+    feed.dispose()
+  })
+
+  it('ignores a late batch tombstone older than an applied change watermark', async () => {
+    const batchResponse = deferred<ChatBatchDeleteResponse>()
+    const client = makeClient({
+      chatMessages: vi.fn(async () => history([message(1)], { latestChangeSeq: 10 })),
+      batchDeleteChatMessages: vi.fn(() => batchResponse.promise),
+      chatChanges: vi.fn(async () => changes([
+        change(12, message(1, { status: 'deleted', body: null, sourceIP: '203.0.113.12' }), 'delete'),
+      ], { nextAfterSeq: 12, latestChangeSeq: 12 })),
+    })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
+    await feed.start()
+    feed.toggleSelection(1, true)
+    const deleting = feed.batchDelete([1])
+    await flushMicrotasks()
+    await feed.syncNow()
+
+    batchResponse.resolve({
+      deletedCount: 1,
+      mutations: [mutation(message(1, { status: 'deleted', body: null, sourceIP: '198.51.100.11' }), 11)],
+    })
+    await deleting
+    expect(feed.messages.value[0]).toMatchObject({ status: 'deleted', sourceIP: '203.0.113.12' })
+    expect(feed.cursor.value).toBe(12)
+    feed.dispose()
+  })
+
+  it('enforces the 100-message selection cap and removes messages deleted by changes', async () => {
+    const entries = Array.from({ length: 102 }, (_, index) => message(index + 1))
+    entries[101] = message(102, { status: 'deleted', body: null })
+    const client = makeClient({
+      chatMessages: vi.fn(async () => history(entries, { latestChangeSeq: 200 })),
+      chatChanges: vi.fn(async () => changes([
+        change(201, message(1, { status: 'deleted', body: null }), 'delete'),
+      ], { nextAfterSeq: 201, latestChangeSeq: 201 })),
+    })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
+    await feed.start()
+    for (let id = 1; id <= 100; id += 1) expect(feed.toggleSelection(id, true)).toBe(true)
+
+    expect(feed.toggleSelection(101, true)).toBe(false)
+    expect(feed.selectionError.value).toBe('最多选择 100 条消息。')
+    expect(feed.toggleSelection(102, true)).toBe(false)
+    expect(feed.selectedCount.value).toBe(100)
+    expect(feed.selectionAtLimit.value).toBe(true)
+
+    await feed.syncNow()
+    expect(feed.selectedIds.value).not.toContain(1)
+    expect(feed.selectedCount.value).toBe(99)
+    expect(feed.selectionError.value).toBe('')
+    feed.dispose()
+  })
+
+  it('clears atomically, reloads the new generation and ignores old changes and batch responses', async () => {
+    const oldChanges = deferred<ChatChangesResponse>()
+    const oldBatch = deferred<ChatBatchDeleteResponse>()
+    const client = makeClient({
+      chatMessages: vi.fn()
+        .mockResolvedValueOnce(history([message(1)], { generation: 1, latestChangeSeq: 10 }))
+        .mockResolvedValueOnce(history([], { generation: 2, latestChangeSeq: 10 })),
+      chatChanges: vi.fn(() => oldChanges.promise),
+      batchDeleteChatMessages: vi.fn(() => oldBatch.promise),
+      clearChatMessages: vi.fn(async () => ({ clearedCount: 1, generation: 2, latestChangeSeq: 10 })),
+    })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
+    await feed.start()
+    feed.toggleSelection(1, true)
+    const syncing = feed.syncNow()
+    const deleting = feed.batchDelete([1])
+    await flushMicrotasks()
+
+    await feed.clearAll()
+    expect(client.clearChatMessages).toHaveBeenCalledWith(1, 10, expect.any(AbortSignal))
+    expect(feed.messages.value).toEqual([])
+    expect(feed.generation.value).toBe(2)
+    expect(feed.cursor.value).toBe(10)
+    expect(feed.selectedIds.value).toEqual([])
+
+    oldChanges.resolve(changes([
+      change(11, message(9, { body: '迟到 changes', sourceIP: '198.51.100.9' })),
+    ], { generation: 1, nextAfterSeq: 11, latestChangeSeq: 11 }))
+    oldBatch.resolve({
+      deletedCount: 1,
+      mutations: [mutation(message(1, { status: 'deleted', body: null }), 11)],
+    })
+    await Promise.all([syncing, deleting])
+    expect(feed.messages.value).toEqual([])
+    expect(feed.generation.value).toBe(2)
+    feed.dispose()
+  })
+
+  it('reloads on a clear CAS conflict and requires a new confirmation without retrying clear', async () => {
+    const client = makeClient({
+      chatMessages: vi.fn()
+        .mockResolvedValueOnce(history([message(1)], { generation: 3, latestChangeSeq: 20 }))
+        .mockResolvedValueOnce(history([message(2, { body: '最新快照' })], { generation: 3, latestChangeSeq: 22 })),
+      clearChatMessages: vi.fn(async () => {
+        throw new ApiError('conflict', 409, undefined, 'chat_clear_conflict')
+      }),
+    })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
+    await feed.start()
+    feed.toggleSelection(1, true)
+
+    await expect(feed.clearAll()).rejects.toMatchObject({
+      code: 'chat_clear_conflict',
+      message: '消息已更新，请重新确认清空。',
+    })
+    expect(client.clearChatMessages).toHaveBeenCalledTimes(1)
+    expect(client.clearChatMessages).toHaveBeenCalledWith(3, 20, expect.any(AbortSignal))
+    expect(feed.messages.value).toEqual([expect.objectContaining({ id: 2, body: '最新快照' })])
+    expect(feed.generation.value).toBe(3)
+    expect(feed.cursor.value).toBe(22)
+    expect(feed.selectedIds.value).toEqual([])
+    feed.dispose()
+  })
+
+  it('uses the latest mutation watermark for clear CAS without advancing the cursor', async () => {
+    const client = makeClient({
+      chatMessages: vi.fn()
+        .mockResolvedValueOnce(history([], { generation: 1, latestChangeSeq: 10 }))
+        .mockResolvedValueOnce(history([], { generation: 2, latestChangeSeq: 15 })),
+      createChatMessage: vi.fn(async () => mutation(message(5, { isMine: true }), 15)),
+      clearChatMessages: vi.fn(async () => ({ clearedCount: 1, generation: 2, latestChangeSeq: 15 })),
+    })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
+    await feed.start()
+    await feed.send('新消息')
+    expect(feed.cursor.value).toBe(10)
+    expect(feed.latestChangeSeq.value).toBe(15)
+
+    await feed.clearAll()
+    expect(client.clearChatMessages).toHaveBeenCalledWith(1, 15, expect.any(AbortSignal))
+    expect(feed.generation.value).toBe(2)
+    expect(feed.cursor.value).toBe(15)
+    feed.dispose()
+  })
+
+  it('clears selection and ignores old batch and clear responses after a subject rebind', async () => {
+    const oldBatch = deferred<ChatBatchDeleteResponse>()
+    const oldClear = deferred<ChatClearResponse>()
+    const client = makeClient({
+      chatMessages: vi.fn()
+        .mockResolvedValueOnce(history([message(1)], { generation: 1, latestChangeSeq: 10 }))
+        .mockResolvedValueOnce(history([message(20, { body: '普通新主体' })], { generation: 2, latestChangeSeq: 30 })),
+      batchDeleteChatMessages: vi.fn(() => oldBatch.promise),
+      clearChatMessages: vi.fn(() => oldClear.promise),
+    })
+    const feed = useChatFeed({ admin: true, subjectKey: 'admin-a', client, random: () => 0.5 })
+    await feed.start()
+    feed.toggleSelection(1, true)
+    const deleting = feed.batchDelete([1])
+    const clearing = feed.clearAll()
+    await flushMicrotasks()
+
+    await feed.rebind({ subjectKey: 'user-b', admin: false, active: true })
+    expect(feed.selectedIds.value).toEqual([])
+    expect(feed.messages.value).toEqual([expect.objectContaining({ id: 20, body: '普通新主体' })])
+
+    oldBatch.resolve({ deletedCount: 1, mutations: [mutation(message(1, { status: 'deleted', body: null }), 11)] })
+    oldClear.resolve({ clearedCount: 1, generation: 2, latestChangeSeq: 10 })
+    await Promise.all([deleting, clearing])
+    expect(feed.messages.value).toEqual([expect.objectContaining({ id: 20, body: '普通新主体' })])
+    expect(feed.generation.value).toBe(2)
+    expect(feed.selectedIds.value).toEqual([])
+    feed.dispose()
+  })
+
   it('keeps an admin change sourceIP when the same-seq create mutation completes later', async () => {
     const createResponse = deferred<ChatMutationResponse>()
     const client = makeClient({
@@ -645,7 +884,7 @@ describe('useChatFeed', () => {
 
     await feed.send('即时 mutation')
     expect(feed.messages.value[0]).toMatchObject({ body: '即时 mutation' })
-    expect(feed.messages.value[0]).not.toHaveProperty('sourceIP')
+    expect(feed.messages.value[0]).toMatchObject({ sourceIP: '192.0.2.8' })
     expect(feed.cursor.value).toBe(9)
 
     await feed.syncNow()
@@ -783,13 +1022,15 @@ describe('useChatFeed', () => {
       chatMessages: vi.fn(async () => history([message(1)], { latestChangeSeq: 5 })),
       createChatMessage: vi.fn(() => pendingMutation.promise),
     })
-    const feed = useChatFeed({ admin: false, client, random: () => 0.5 })
+    const feed = useChatFeed({ admin: true, client, random: () => 0.5 })
     await feed.start()
+    feed.toggleSelection(1, true)
     const sending = feed.send('dispose 后不得插入')
     await flushMicrotasks()
 
     feed.dispose()
     expect(feed.messages.value).toEqual([])
+    expect(feed.selectedIds.value).toEqual([])
     pendingMutation.resolve(mutation(message(2, { body: '迟到 mutation', isMine: true }), 6))
     await sending
     expect(feed.messages.value).toEqual([])

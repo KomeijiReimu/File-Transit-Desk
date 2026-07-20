@@ -39,8 +39,8 @@ let appliedInitialQuery = false
 const form = reactive({ type: 'download' as 'download' | 'upload', dirId: '', path: '', ttlMinutes: 60, maxUses: 1 })
 const fieldErrors = reactive({ dirId: '', path: '', ttlMinutes: '', maxUses: '' })
 const typeOptions = [
-  { label: '下载令牌', value: 'download', hint: '外部访客领取文件' },
-  { label: '上传令牌', value: 'upload', hint: '外部访客提交文件' },
+  { label: '下载令牌', value: 'download' },
+  { label: '上传令牌', value: 'upload' },
 ]
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === form.dirId))
 const selectedDirIsFile = computed(() => selectedDir.value?.type === 'file')
@@ -50,7 +50,7 @@ const usableDirs = computed(() => dirs.value.filter((dir) => form.type === 'down
 const dirOptions = computed(() => usableDirs.value.map((dir) => ({
   label: dir.label || dir.name,
   value: dir.id,
-  hint: `${dir.type === 'file' ? '单文件' : '目录'} · ${dir.description || dir.root || dir.id}`,
+  hint: dir.description || dir.root || dir.id,
 })))
 
 function tokenType(token: TokenInfo) {
@@ -292,9 +292,7 @@ onMounted(load)
 <template>
   <section class="page-stack">
     <header class="page-header">
-      <p class="eyebrow">分享授权</p>
       <h1>令牌管理</h1>
-      <p>创建临时下载或上传链接，并控制目录、路径、有效期与使用次数。</p>
     </header>
 
     <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? loadError : ''" retry-label="重新加载" @retry="load" />
@@ -308,7 +306,6 @@ onMounted(load)
     <div v-if="(!loading && !loadError) || dirs.length || tokens.length" class="grid two">
       <form class="panel form-grid" @submit.prevent="createToken">
         <h2>创建一次性链接</h2>
-        <p class="muted-text">下载令牌的路径必须是已存在的具体文件；上传令牌的路径表示接收目录。</p>
         <label>类型
           <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择令牌类型" />
         </label>
@@ -365,10 +362,9 @@ onMounted(load)
         </div>
       </form>
 
-      <div class="panel insight-card">
+      <div class="panel insight-card compact">
         <span class="big-number">{{ tokens.length }}</span>
         <strong>当前令牌</strong>
-        <p>撤销用于立刻让链接失效并清理已兑换下载票据；删除对已失效令牌只移除记录，对仍可用令牌会一并失效。</p>
       </div>
     </div>
 
@@ -398,7 +394,7 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
-      <EmptyState v-else-if="!loading && (!loadError || lastSuccessfulAt)" title="还没有令牌" description="创建一个短期链接后，它会显示在这里。" />
+      <EmptyState v-else-if="!loading && (!loadError || lastSuccessfulAt)" title="还没有令牌" />
     </div>
 
     <ConfirmDialog

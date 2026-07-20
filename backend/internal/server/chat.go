@@ -7,8 +7,10 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,10 +23,11 @@ import (
 )
 
 const (
-	chatDefaultPageSize = 50
-	chatMaxPageSize     = 100
-	chatMaxChangePage   = 500
-	chatMaxRequestBytes = 8192
+	chatDefaultPageSize                 = 50
+	chatMaxPageSize                     = 100
+	chatMaxChangePage                   = 500
+	chatMaxRequestBytes                 = 8192
+	chatAdminDestructiveMaxRequestBytes = 4096
 
 	chatActionPerSessionPerMinute = 120
 	chatActionPerIPPerMinute      = 300
@@ -35,6 +38,7 @@ type chatMessageDTO struct {
 	ID            int64      `json:"id"`
 	AuthorTag     string     `json:"authorTag"`
 	Role          string     `json:"role"`
+	SourceIP      string     `json:"sourceIP"`
 	Body          *string    `json:"body"`
 	Status        string     `json:"status"`
 	IsMine        bool       `json:"isMine"`
@@ -86,6 +90,17 @@ type chatChangesResponse[T any] struct {
 type chatMutationResponse[T any] struct {
 	Message  T     `json:"message"`
 	EventSeq int64 `json:"eventSeq"`
+}
+
+type chatBatchDeleteResponse[T any] struct {
+	DeletedCount int                       `json:"deletedCount"`
+	Mutations    []chatMutationResponse[T] `json:"mutations"`
+}
+
+type chatClearResponse struct {
+	ClearedCount    int   `json:"clearedCount"`
+	Generation      int64 `json:"generation"`
+	LatestChangeSeq int64 `json:"latestChangeSeq"`
 }
 
 type chatCapabilitiesResponse struct {
@@ -276,6 +291,57 @@ func (s *Server) deleteChatMessage(c *fiber.Ctx) error {
 	return c.JSON(chatMutationResponse[adminChatMessageDTO]{Message: s.adminChatMessageProjection(message, actorKey, role, now), EventSeq: seq})
 }
 
+func (s *Server) batchDeleteChatMessages(c *fiber.Ctx) error {
+	actorKey, role := chatViewer(c)
+	ip := s.clientIP(c)
+	ids, err := decodeChatBatchDeleteBody(c)
+	if err != nil {
+		s.bestEffortAudit("chat_batch_delete_failed", ip, chatBatchRequestAuditDetail(0, "invalid_request"))
+		return err
+	}
+	if err := s.checkChatActionRateKind(c, actorKey, ip, "batch-delete"); err != nil {
+		s.bestEffortAudit("chat_batch_delete_failed", ip, chatBatchRequestAuditDetail(len(ids), "rate_limited"))
+		return err
+	}
+	mutations, err := s.store.BatchDeleteChatMessages(ids, actorKey, ip, s.chatCurrentTime())
+	if err != nil {
+		if errors.Is(err, store.ErrChatBatchDeleteConflict) {
+			return newCodedAPIError(fiber.StatusConflict, "chat_batch_delete_conflict", "批量删除与当前消息状态冲突，请刷新后重试。")
+		}
+		return err
+	}
+	items := make([]chatMutationResponse[adminChatMessageDTO], 0, len(mutations))
+	for _, mutation := range mutations {
+		items = append(items, chatMutationResponse[adminChatMessageDTO]{
+			Message:  s.adminChatMessageProjection(mutation.Message, actorKey, role, s.chatCurrentTime()),
+			EventSeq: mutation.EventSeq,
+		})
+	}
+	return c.JSON(chatBatchDeleteResponse[adminChatMessageDTO]{DeletedCount: len(items), Mutations: items})
+}
+
+func (s *Server) clearChatMessages(c *fiber.Ctx) error {
+	actorKey, _ := chatViewer(c)
+	ip := s.clientIP(c)
+	expectedGeneration, expectedLatestChangeSeq, err := decodeChatClearBody(c)
+	if err != nil {
+		s.bestEffortAudit("chat_clear_failed", ip, chatClearRequestAuditDetail(0, "invalid_request"))
+		return err
+	}
+	if err := s.checkChatActionRateKind(c, actorKey, ip, "clear"); err != nil {
+		s.bestEffortAudit("chat_clear_failed", ip, chatClearRequestAuditDetail(expectedGeneration, "rate_limited"))
+		return err
+	}
+	result, err := s.store.ClearChatMessages(expectedGeneration, expectedLatestChangeSeq, ip, s.chatCurrentTime())
+	if err != nil {
+		if errors.Is(err, store.ErrChatClearConflict) {
+			return newCodedAPIError(fiber.StatusConflict, "chat_clear_conflict", "聊天清空条件已过期，请刷新后重新确认。")
+		}
+		return err
+	}
+	return c.JSON(chatClearResponse{ClearedCount: result.ClearedCount, Generation: result.Generation, LatestChangeSeq: result.LatestChangeSeq})
+}
+
 func (s *Server) chatMessageProjection(message store.ChatMessage, viewerKey, viewerRole string, now time.Time) chatMessageDTO {
 	status := message.Status()
 	body := chatProjectedBody(message, false)
@@ -290,7 +356,7 @@ func (s *Server) chatMessageProjection(message store.ChatMessage, viewerKey, vie
 		canWithdraw = !now.Before(message.CreatedAt) && !now.After(until)
 	}
 	return chatMessageDTO{
-		ID: message.ID, AuthorTag: message.AuthorTag, Role: message.AuthorRole, Body: body,
+		ID: message.ID, AuthorTag: message.AuthorTag, Role: message.AuthorRole, SourceIP: message.SourceIP, Body: body,
 		Status: status, IsMine: isMine, CreatedAt: message.CreatedAt.UTC(), WithdrawnAt: withdrawnAt,
 		DeletedAt: deletedAt, CanWithdraw: canWithdraw, WithdrawUntil: withdrawUntil,
 	}
@@ -460,6 +526,109 @@ func decodeChatCreateBody(c *fiber.Ctx) (string, error) {
 	return *input.Body, nil
 }
 
+func decodeChatBatchDeleteBody(c *fiber.Ctx) ([]int64, error) {
+	if !chatJSONContentType(c) {
+		return nil, newCodedAPIError(fiber.StatusUnsupportedMediaType, "chat_batch_delete_content_type_invalid", "批量删除仅接受 JSON。")
+	}
+	body, err := readBoundedChatAdminBody(c, "chat_batch_delete")
+	if err != nil {
+		return nil, err
+	}
+	if !utf8.Valid(body) {
+		return nil, newCodedAPIError(fiber.StatusBadRequest, "chat_batch_delete_request_invalid", "批量删除请求无效。")
+	}
+	var input struct {
+		IDs *[]int64 `json:"ids"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || input.IDs == nil {
+		return nil, newCodedAPIError(fiber.StatusBadRequest, "chat_batch_delete_request_invalid", "批量删除请求无效。")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, newCodedAPIError(fiber.StatusBadRequest, "chat_batch_delete_request_invalid", "批量删除请求无效。")
+	}
+	ids := append([]int64(nil), (*input.IDs)...)
+	if len(ids) < 1 || len(ids) > 100 {
+		return nil, newCodedAPIError(fiber.StatusBadRequest, "chat_batch_delete_request_invalid", "批量删除必须包含 1 到 100 个消息编号。")
+	}
+	for _, id := range ids {
+		if id < 1 {
+			return nil, newCodedAPIError(fiber.StatusBadRequest, "chat_batch_delete_request_invalid", "批量删除消息编号无效。")
+		}
+	}
+	sort.Slice(ids, func(left, right int) bool { return ids[left] < ids[right] })
+	for index := 1; index < len(ids); index++ {
+		if ids[index] == ids[index-1] {
+			return nil, newCodedAPIError(fiber.StatusBadRequest, "chat_batch_delete_request_invalid", "批量删除消息编号不能重复。")
+		}
+	}
+	return ids, nil
+}
+
+func decodeChatClearBody(c *fiber.Ctx) (int64, int64, error) {
+	if !chatJSONContentType(c) {
+		return 0, 0, newCodedAPIError(fiber.StatusUnsupportedMediaType, "chat_clear_content_type_invalid", "清空聊天仅接受 JSON。")
+	}
+	body, err := readBoundedChatAdminBody(c, "chat_clear")
+	if err != nil {
+		return 0, 0, err
+	}
+	if !utf8.Valid(body) {
+		return 0, 0, newCodedAPIError(fiber.StatusBadRequest, "chat_clear_request_invalid", "清空聊天请求无效。")
+	}
+	var input struct {
+		Confirm                 *string `json:"confirm"`
+		ExpectedGeneration      *int64  `json:"expectedGeneration"`
+		ExpectedLatestChangeSeq *int64  `json:"expectedLatestChangeSeq"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || input.Confirm == nil || input.ExpectedGeneration == nil || input.ExpectedLatestChangeSeq == nil {
+		return 0, 0, newCodedAPIError(fiber.StatusBadRequest, "chat_clear_request_invalid", "清空聊天请求无效。")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return 0, 0, newCodedAPIError(fiber.StatusBadRequest, "chat_clear_request_invalid", "清空聊天请求无效。")
+	}
+	if *input.Confirm != "CLEAR_ALL_MESSAGES" || *input.ExpectedGeneration < 1 || *input.ExpectedLatestChangeSeq < 0 {
+		return 0, 0, newCodedAPIError(fiber.StatusBadRequest, "chat_clear_request_invalid", "清空聊天确认参数无效。")
+	}
+	return *input.ExpectedGeneration, *input.ExpectedLatestChangeSeq, nil
+}
+
+func chatJSONContentType(c *fiber.Ctx) bool {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(c.Get(fiber.HeaderContentType)))
+	return err == nil && strings.EqualFold(mediaType, fiber.MIMEApplicationJSON)
+}
+
+func readBoundedChatAdminBody(c *fiber.Ctx, operation string) ([]byte, error) {
+	invalidCode := operation + "_request_invalid"
+	tooLargeCode := operation + "_request_too_large"
+	invalidMessage := "聊天管理请求无效。"
+	tooLargeMessage := "聊天管理请求过大。"
+	rejectLarge := func() error {
+		return newCodedAPIError(fiber.StatusRequestEntityTooLarge, tooLargeCode, tooLargeMessage)
+	}
+	if contentLength := c.Request().Header.ContentLength(); contentLength > chatAdminDestructiveMaxRequestBytes {
+		return nil, rejectLarge()
+	}
+	if stream := c.Request().BodyStream(); stream != nil {
+		body, err := io.ReadAll(io.LimitReader(stream, chatAdminDestructiveMaxRequestBytes+1))
+		if err != nil {
+			return nil, newCodedAPIError(fiber.StatusBadRequest, invalidCode, invalidMessage)
+		}
+		if len(body) > chatAdminDestructiveMaxRequestBytes {
+			return nil, rejectLarge()
+		}
+		return body, nil
+	}
+	body := c.Body()
+	if len(body) > chatAdminDestructiveMaxRequestBytes {
+		return nil, rejectLarge()
+	}
+	return body, nil
+}
+
 func readBoundedChatBody(c *fiber.Ctx) ([]byte, error) {
 	rejectLarge := func() error {
 		return newCodedAPIError(fiber.StatusRequestEntityTooLarge, "chat_request_too_large", "聊天消息请求过大。")
@@ -543,6 +712,10 @@ func (s *Server) checkChatActionRate(c *fiber.Ctx, sessionID, ip string, admin b
 	if admin {
 		kind = "delete"
 	}
+	return s.checkChatActionRateKind(c, sessionID, ip, kind)
+}
+
+func (s *Server) checkChatActionRateKind(c *fiber.Ctx, sessionID, ip, kind string) error {
 	allowed, retry := s.chatWindowLimiter().AllowMany([]limitSpec{
 		{Key: "chat-action-global:" + kind, Limit: chatActionGlobalPerMinute, Window: time.Minute},
 		{Key: "chat-action-session:" + kind + ":" + sessionID, Limit: chatActionPerSessionPerMinute, Window: time.Minute},
@@ -553,6 +726,20 @@ func (s *Server) checkChatActionRate(c *fiber.Ctx, sessionID, ip string, admin b
 	}
 	c.Set(fiber.HeaderRetryAfter, retryAfterSeconds(retry))
 	return newCodedAPIError(fiber.StatusTooManyRequests, "chat_action_rate_limited", "聊天操作过于频繁，请稍后重试。")
+}
+
+func chatBatchRequestAuditDetail(count int, result string) string {
+	if count < 0 {
+		count = 0
+	}
+	return fmt.Sprintf("count=%d result=%s", count, result)
+}
+
+func chatClearRequestAuditDetail(generation int64, result string) string {
+	if generation < 0 {
+		generation = 0
+	}
+	return fmt.Sprintf("count=0 result=%s generation=%d", result, generation)
 }
 
 func chatMutationStoreError(err error) error {

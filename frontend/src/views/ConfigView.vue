@@ -66,8 +66,8 @@ const policyDirty = computed(() => policySignature.value !== policyBaseline.valu
 const hasUnsavedChanges = computed(() => formDirty.value || policyDirty.value)
 const discardDialogOpen = computed(() => Boolean(pendingEdit.value) || Boolean(pendingDiscardAction.value))
 const typeOptions = [
-  { label: '目录', value: 'directory', hint: '可浏览文件夹，可按需允许上传' },
-  { label: '单文件', value: 'file', hint: '只暴露一个文件，不能上传' },
+  { label: '目录', value: 'directory' },
+  { label: '单文件', value: 'file' },
 ]
 
 function resourceType(resource: DirectoryInfo) {
@@ -343,11 +343,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 <template>
   <section class="page-stack config-page">
     <header class="page-header split">
-      <div>
-        <p class="eyebrow">系统配置</p>
-        <h1>配置管理</h1>
-        <p>管理员可以在这里管理共享目录和单文件资源；认证、数据库和监听端口等敏感配置仍保留在服务端配置文件中。</p>
-      </div>
+      <h1>配置管理</h1>
       <button class="ghost-btn" type="button" @click="requestReload">刷新配置</button>
     </header>
 
@@ -365,10 +361,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
     <div v-if="configData" class="grid two">
       <form ref="resourceFormRef" class="panel form-grid resource-form" @submit.prevent="submitResource">
         <div class="form-title-row">
-          <div>
-            <h2>{{ editing ? '编辑共享资源' : '新增共享资源' }}</h2>
-            <p class="muted-text">目录资源可以浏览和上传；单文件资源只暴露一个文件用于下载。</p>
-          </div>
+          <h2>{{ editing ? '编辑共享资源' : '新增共享资源' }}</h2>
           <button v-if="editing" class="mini-btn" type="button" @click="requestResetForm">取消编辑</button>
         </div>
         <label>类型
@@ -406,10 +399,9 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         </button>
       </form>
 
-      <div class="panel insight-card config-insight">
+      <div class="panel insight-card compact config-insight">
         <span class="big-number">{{ resources.length }}</span>
         <strong>共享资源</strong>
-        <p>目录和单文件资源会写回配置文件，并在保存成功后对新请求立即生效。删除资源会让后续访问该资源的旧令牌和票据失去目录边界。</p>
       </div>
     </div>
 
@@ -422,7 +414,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           <div class="resource-head">
             <div>
               <h2>{{ resource.name }}</h2>
-              <p>{{ resourceTypeLabel(resource) }} · {{ resource.id }}</p>
+              <p>{{ resource.id }}</p>
             </div>
             <span class="pill" :class="resourceType(resource) === 'file' ? 'ok' : ''">{{ resourceTypeLabel(resource) }}</span>
           </div>
@@ -438,7 +430,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         </div>
       </article>
     </section>
-    <EmptyState v-if="configData && !loading && !loadError && !resources.length" title="没有共享资源" description="添加一个目录或单文件资源后，普通用户即可在文件浏览中看到它。" />
+    <EmptyState v-if="configData && !loading && !loadError && !resources.length" title="没有共享资源" />
 
     <section v-if="configData" class="panel policy-panel">
       <h2>运行策略概览</h2>

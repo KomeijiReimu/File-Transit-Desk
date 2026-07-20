@@ -1,6 +1,6 @@
 import { ApiError } from '@/api'
 
-export type ChatErrorContext = 'capabilities' | 'history' | 'sync' | 'send' | 'withdraw' | 'delete'
+export type ChatErrorContext = 'capabilities' | 'history' | 'sync' | 'send' | 'withdraw' | 'delete' | 'batch-delete' | 'clear'
 
 function retryAfterText(error: ApiError) {
   if (error.retryAfter === undefined) return ''
@@ -50,6 +50,21 @@ export function chatErrorMessage(error: unknown, context: ChatErrorContext) {
       return '聊天同步参数已失效，请重新加载聊天记录。'
     case 'chat_cursor_reset_required':
       return '聊天记录状态已变化，正在重新加载。'
+    case 'chat_batch_delete_conflict':
+      return '消息状态已更新，请同步后重试。'
+    case 'chat_batch_delete_request_invalid':
+      return '所选消息无效，请重新选择。'
+    case 'chat_batch_delete_request_too_large':
+      return '所选消息过多，请减少后重试。'
+    case 'chat_batch_delete_content_type_invalid':
+      return '批量删除请求无效，请刷新后重试。'
+    case 'chat_clear_conflict':
+      return '消息已更新，请重新确认清空。'
+    case 'chat_clear_request_invalid':
+    case 'chat_clear_content_type_invalid':
+      return '清空请求无效，请刷新后重试。'
+    case 'chat_clear_request_too_large':
+      return '清空请求过大，请刷新后重试。'
     default:
       break
   }

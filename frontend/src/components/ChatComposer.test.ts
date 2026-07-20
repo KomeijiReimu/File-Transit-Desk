@@ -23,6 +23,9 @@ describe('ChatComposer', () => {
       props: { modelValue: '  hello  ', capabilities: capabilities() },
     })
     const textarea = wrapper.get('textarea')
+    const shortcutHint = wrapper.get('.chat-compose-guidance > p')
+
+    expect(shortcutHint.classes()).toContain('visually-hidden')
 
     await textarea.trigger('keydown', { key: 'Enter', shiftKey: true })
     expect(wrapper.emitted('send')).toBeUndefined()

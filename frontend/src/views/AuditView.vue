@@ -19,9 +19,9 @@ const dataStale = ref(false)
 const keyword = ref('')
 const status = ref('all')
 const statusOptions = [
-  { label: '全部记录', value: 'all', hint: '显示所有审计事件' },
-  { label: '正常行为', value: 'ok', hint: '登录、浏览、上传、下载' },
-  { label: '失败 / 拒绝', value: 'failed', hint: '失败、限速、无权限' },
+  { label: '全部记录', value: 'all' },
+  { label: '正常行为', value: 'ok' },
+  { label: '失败 / 拒绝', value: 'failed' },
 ]
 const hasFilters = computed(() => Boolean(keyword.value.trim()) || status.value !== 'all')
 const currentFilterKey = computed(() => `${status.value}\n${keyword.value.trim()}`)
@@ -165,7 +165,7 @@ function statusText(log: AuditLog) {
 <template>
   <section class="page-stack audit-page">
     <header class="page-header split">
-      <div><p class="eyebrow">安全审计</p><h1>访问记录</h1><p>查看最近登录、下载、上传、令牌访问等行为。</p></div>
+      <h1>访问记录</h1>
       <button class="ghost-btn" :disabled="loading" @click="refresh">刷新</button>
     </header>
 
@@ -208,7 +208,6 @@ function statusText(log: AuditLog) {
     <EmptyState
       v-else-if="displaysCurrentFilter && !loading && !dataStale && (!error || lastSuccessfulAt)"
       :title="hasFilters ? '没有匹配记录' : '暂无访问记录'"
-      :description="hasFilters ? '当前筛选条件在全部审计记录中没有匹配结果。' : '等待后端产生审计事件后再查看。'"
     />
   </section>
 </template>

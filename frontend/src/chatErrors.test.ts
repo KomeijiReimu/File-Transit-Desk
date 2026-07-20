@@ -16,6 +16,8 @@ describe('chat error copy', () => {
     ['chat_state_conflict', '消息状态已经变化，请同步后再试。'],
     ['chat_request_too_large', '消息请求超过服务器允许的大小，请缩短内容。'],
     ['chat_cursor_reset_required', '聊天记录状态已变化，正在重新加载。'],
+    ['chat_batch_delete_conflict', '消息状态已更新，请同步后重试。'],
+    ['chat_clear_conflict', '消息已更新，请重新确认清空。'],
   ])('maps %s to specific Chinese feedback', (code, expected) => {
     expect(chatErrorMessage(new ApiError('server message', 409, undefined, code), 'withdraw')).toBe(expected)
   })

@@ -14,9 +14,11 @@ const appMocks = vi.hoisted(() => ({
   probeAPICalls: vi.fn(),
 }))
 
-vi.mock('vue-router', () => ({
-  useRoute: () => appMocks.route,
-}))
+vi.mock('vue-router', async () => {
+  const { reactive } = await vi.importActual<typeof import('vue')>('vue')
+  appMocks.route = reactive(appMocks.route)
+  return { useRoute: () => appMocks.route }
+})
 
 vi.mock('@/auth', async () => {
   const { computed, reactive } = await vi.importActual<typeof import('vue')>('vue')
@@ -114,6 +116,45 @@ describe('application chat navigation', () => {
     const wrapper = mount(App, { global })
     expect(wrapper.text()).toContain('在线交流')
     expect(wrapper.text()).toContain('令牌管理')
+  })
+
+  it('uses an explicit menu control and toggles the compact navigation with a class', async () => {
+    const wrapper = mount(App, { global })
+    const toggle = wrapper.get('.mobile-nav-toggle')
+    const navigation = wrapper.get('#main-navigation')
+
+    expect(toggle.text()).toBe('展开菜单')
+    expect(toggle.attributes('aria-label')).toBe('展开菜单')
+    expect(toggle.attributes('aria-controls')).toBe('main-navigation')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(navigation.classes()).not.toContain('is-open')
+
+    await toggle.trigger('click')
+    expect(toggle.text()).toBe('收起菜单')
+    expect(toggle.attributes('aria-label')).toBe('收起菜单')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(navigation.classes()).toContain('is-open')
+  })
+
+  it('keeps the desktop navigation in the document and closes an expanded menu after routing', async () => {
+    const wrapper = mount(App, { global })
+    const navigation = wrapper.get('nav[aria-label="主导航"]')
+    expect(navigation.text()).toContain('文件浏览')
+    expect(navigation.text()).toContain('文件上传')
+    expect(wrapper.find('.brand small').exists()).toBe(false)
+    expect(wrapper.find('.sidebar-card .meta small').exists()).toBe(false)
+    expect(wrapper.get('.sidebar-role-label.visually-hidden').text()).toBe('受信用户会话')
+    expect(wrapper.get('.mobile-nav-toggle').attributes('aria-controls')).toBe(navigation.attributes('id'))
+
+    await wrapper.get('.mobile-nav-toggle').trigger('click')
+    expect(navigation.classes()).toContain('is-open')
+    appMocks.route.fullPath = '/upload'
+    appMocks.route.name = 'upload'
+    await nextTick()
+
+    expect(navigation.classes()).not.toContain('is-open')
+    expect(wrapper.get('.mobile-nav-toggle').text()).toBe('展开菜单')
+    expect(wrapper.get('.mobile-nav-toggle').attributes('aria-expanded')).toBe('false')
   })
 
   it.each(['share', 'login'])('keeps navigation off the public %s page', (name) => {

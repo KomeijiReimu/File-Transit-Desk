@@ -23,7 +23,7 @@ func TestChatAPIProjectionAuthorizationChangesAndAuditPrivacy(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	h := newChatAPIHarness(t, now, func(cfg *config.Config) {
 		cfg.Server.TrustProxyHeaders = true
-		cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/0", "::/0"}
+		cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/32"}
 	})
 	h.addSession(t, "user-a", "user")
 	h.addSession(t, "user-b", "user")
@@ -35,7 +35,7 @@ func TestChatAPIProjectionAuthorizationChangesAndAuditPrivacy(t *testing.T) {
 	assertChatResponse(t, createOne, http.StatusCreated, "")
 	var first chatMutationResponse[chatMessageDTO]
 	decodeChatResponse(t, createOne, &first)
-	if first.Message.Body == nil || *first.Message.Body != "withdrawn secret" || first.Message.AuthorTag == "" || first.Message.AuthorTag == "访客-" || first.Message.Role != "user" || !first.Message.IsMine || !first.Message.CanWithdraw {
+	if first.Message.Body == nil || *first.Message.Body != "withdrawn secret" || first.Message.AuthorTag == "" || first.Message.AuthorTag == "访客-" || first.Message.Role != "user" || first.Message.SourceIP != "198.51.100.44" || !first.Message.IsMine || !first.Message.CanWithdraw {
 		t.Fatalf("unexpected created message: %+v", first)
 	}
 	if strings.Contains(first.Message.AuthorTag, h.sessionHash(t, "user-a")[:6]) {
@@ -50,7 +50,7 @@ func TestChatAPIProjectionAuthorizationChangesAndAuditPrivacy(t *testing.T) {
 	assertChatResponse(t, ownerWithdraw, http.StatusOK, "")
 	var withdrawn chatMutationResponse[chatMessageDTO]
 	decodeChatResponse(t, ownerWithdraw, &withdrawn)
-	if withdrawn.Message.Status != "withdrawn" || withdrawn.Message.Body != nil || withdrawn.Message.CanWithdraw {
+	if withdrawn.Message.Status != "withdrawn" || withdrawn.Message.Body != nil || withdrawn.Message.SourceIP != "198.51.100.44" || withdrawn.Message.CanWithdraw {
 		t.Fatalf("ordinary withdraw projection leaked body or action: %+v", withdrawn)
 	}
 
@@ -83,10 +83,10 @@ func TestChatAPIProjectionAuthorizationChangesAndAuditPrivacy(t *testing.T) {
 	decodeChatResponse(t, ordinaryList, &ordinary)
 	ordinaryFirst := findOrdinaryChatMessage(t, ordinary.Messages, first.Message.ID)
 	ordinarySecond := findOrdinaryChatMessage(t, ordinary.Messages, second.Message.ID)
-	if ordinaryFirst.Status != "withdrawn" || ordinaryFirst.Body != nil || ordinarySecond.Status != "deleted" || ordinarySecond.Body != nil {
+	if ordinaryFirst.Status != "withdrawn" || ordinaryFirst.Body != nil || ordinaryFirst.SourceIP != "198.51.100.44" || ordinarySecond.Status != "deleted" || ordinarySecond.Body != nil || ordinarySecond.SourceIP != "198.51.100.44" {
 		t.Fatalf("ordinary list leaked tombstone body: first=%+v second=%+v", ordinaryFirst, ordinarySecond)
 	}
-	for _, forbidden := range []string{"sourceIP", "authorKey", "deletedBy", "withdrawn secret", "deleted secret", h.sessionHash(t, "user-a")} {
+	for _, forbidden := range []string{"authorKey", "deletedBy", "withdrawn secret", "deleted secret", h.sessionHash(t, "user-a")} {
 		if bytes.Contains(ordinaryRaw, []byte(forbidden)) {
 			t.Fatalf("ordinary DTO leaked %q: %s", forbidden, ordinaryRaw)
 		}
@@ -119,6 +119,9 @@ func TestChatAPIProjectionAuthorizationChangesAndAuditPrivacy(t *testing.T) {
 	}
 	assertChatChangeKinds(t, ordinaryChangePage.Changes, []string{"create", "withdraw", "create", "delete", "create"})
 	for _, change := range ordinaryChangePage.Changes {
+		if change.Message.SourceIP == "" {
+			t.Fatalf("ordinary change omitted source IP: %+v", change)
+		}
 		if change.Message.ID == first.Message.ID && change.Message.Body != nil {
 			t.Fatalf("ordinary changes leaked withdrawn body: %+v", change)
 		}
@@ -345,7 +348,7 @@ func TestChatSendRateLimitsAndTrustedProxyIP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newChatAPIHarness(t, now, func(cfg *config.Config) {
 				cfg.Server.TrustProxyHeaders = true
-				cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/0", "::/0"}
+				cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/32"}
 				tc.adjust(cfg)
 			})
 			h.addSession(t, "a", "user")
@@ -363,7 +366,7 @@ func TestChatSendRateLimitsAndTrustedProxyIP(t *testing.T) {
 	t.Run("trusted and untrusted source IP", func(t *testing.T) {
 		trusted := newChatAPIHarness(t, now, func(cfg *config.Config) {
 			cfg.Server.TrustProxyHeaders = true
-			cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/0", "::/0"}
+			cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/32"}
 		})
 		trusted.addSession(t, "user", "user")
 		trusted.addSession(t, "admin", "admin")
@@ -605,6 +608,238 @@ func TestChatMaintenanceUsesConfiguredRetentionBatch(t *testing.T) {
 	}
 }
 
+func TestAdminChatBatchDeleteAPIValidationAtomicityAndProjection(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	h := newChatAPIHarness(t, now, nil)
+	h.addSession(t, "user", "user")
+	h.addSession(t, "admin", "admin")
+	authorKey := h.sessionHash(t, "user")
+	create := func(index int) store.ChatMessage {
+		t.Helper()
+		message, _, err := h.store.CreateChatMessage(store.ChatCreateInput{
+			AuthorKey: authorKey, AuthorTag: "访客-AAAAAA", AuthorRole: "user",
+			SourceIP: fmt.Sprintf("192.0.2.%d", index%200+1), Body: fmt.Sprintf("batch-api-secret-%d", index), CreatedAt: now.Add(time.Duration(index) * time.Millisecond),
+		})
+		if err != nil {
+			t.Fatalf("create batch API fixture %d: %v", index, err)
+		}
+		return message
+	}
+
+	first := create(1)
+	second := create(2)
+	third := create(3)
+	path := "/api/admin/chat/messages/batch-delete"
+	userDenied := h.request(t, http.MethodPost, path, "user", []byte(fmt.Sprintf(`{"ids":[%d]}`, first.ID)), map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, userDenied, http.StatusForbidden, "")
+	csrfDenied := h.request(t, http.MethodPost, path, "admin", []byte(fmt.Sprintf(`{"ids":[%d]}`, first.ID)), map[string]string{"Content-Type": "application/json", "Origin": "https://attacker.example"})
+	assertChatResponse(t, csrfDenied, http.StatusForbidden, "")
+
+	for _, body := range []string{
+		`{"ids":[]}`,
+		`{"ids":[0]}`,
+		`{"ids":[1,1]}`,
+		`{"ids":"1"}`,
+		`{"ids":[1],"extra":true}`,
+		`{"ids":[1]} {}`,
+	} {
+		response := h.request(t, http.MethodPost, path, "admin", []byte(body), map[string]string{"Content-Type": "application/json"})
+		assertChatResponse(t, response, http.StatusBadRequest, "chat_batch_delete_request_invalid")
+	}
+
+	success := h.request(t, http.MethodPost, path, "admin", []byte(fmt.Sprintf(`{"ids":[%d,%d]}`, third.ID, first.ID)), map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, success, http.StatusOK, "")
+	var deleted chatBatchDeleteResponse[adminChatMessageDTO]
+	decodeChatResponse(t, success, &deleted)
+	if deleted.DeletedCount != 2 || len(deleted.Mutations) != 2 || deleted.Mutations[0].Message.ID != first.ID || deleted.Mutations[1].Message.ID != third.ID || deleted.Mutations[0].EventSeq+1 != deleted.Mutations[1].EventSeq {
+		t.Fatalf("unexpected batch response: %+v", deleted)
+	}
+	for _, mutation := range deleted.Mutations {
+		if mutation.Message.Status != "deleted" || mutation.Message.Body != nil || mutation.Message.SourceIP == "" {
+			t.Fatalf("unsafe batch mutation projection: %+v", mutation)
+		}
+	}
+
+	conflict := h.request(t, http.MethodPost, path, "admin", []byte(fmt.Sprintf(`{"ids":[%d,999999]}`, second.ID)), map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, conflict, http.StatusConflict, "chat_batch_delete_conflict")
+	storedSecond, err := h.store.ChatMessage(second.ID)
+	if err != nil || storedSecond.Status() != store.ChatStatusActive || !storedSecond.Body.Valid {
+		t.Fatalf("batch API conflict partially deleted message: %+v err=%v", storedSecond, err)
+	}
+
+	ordinaryResponse := h.request(t, http.MethodGet, "/api/chat/messages?limit=10", "user", nil, nil)
+	assertChatResponse(t, ordinaryResponse, http.StatusOK, "")
+	if !bytes.Contains(ordinaryResponse.body, []byte(`"sourceIP"`)) || bytes.Contains(ordinaryResponse.body, []byte("batch-api-secret-1")) || bytes.Contains(ordinaryResponse.body, []byte(`"authorKey"`)) || bytes.Contains(ordinaryResponse.body, []byte(`"deletedBy"`)) {
+		t.Fatalf("ordinary batch tombstone projection violated contract: %s", ordinaryResponse.body)
+	}
+
+	hundred := make([]int64, 0, 100)
+	for index := 0; index < 100; index++ {
+		hundred = append(hundred, create(index+10).ID)
+	}
+	payload, _ := json.Marshal(map[string]any{"ids": hundred})
+	hundredResponse := h.request(t, http.MethodPost, path, "admin", payload, map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, hundredResponse, http.StatusOK, "")
+	var hundredDeleted chatBatchDeleteResponse[adminChatMessageDTO]
+	decodeChatResponse(t, hundredResponse, &hundredDeleted)
+	if hundredDeleted.DeletedCount != 100 || len(hundredDeleted.Mutations) != 100 {
+		t.Fatalf("100-id batch response: %+v", hundredDeleted)
+	}
+	hundredOne := append(append([]int64(nil), hundred...), create(500).ID)
+	payload, _ = json.Marshal(map[string]any{"ids": hundredOne})
+	overLimit := h.request(t, http.MethodPost, path, "admin", payload, map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, overLimit, http.StatusBadRequest, "chat_batch_delete_request_invalid")
+
+	auditResponse := h.request(t, http.MethodGet, "/api/admin/audit?page=1&pageSize=200&status=all", "admin", nil, nil)
+	var auditPage auditPageDTO
+	decodeChatResponse(t, auditResponse, &auditPage)
+	foundSuccess := false
+	foundFailure := false
+	for _, entry := range auditPage.Logs {
+		switch entry.Action {
+		case "chat_batch_delete":
+			foundSuccess = entry.ActionLabel == "批量删除聊天消息" && entry.Status == "ok"
+		case "chat_batch_delete_failed":
+			foundFailure = entry.ActionLabel == "批量删除聊天消息失败" && entry.Status == "failed"
+		}
+		if strings.Contains(entry.Detail, "batch-api-secret") || strings.Contains(entry.Detail, authorKey) {
+			t.Fatalf("batch audit leaked sensitive data: %+v", entry)
+		}
+	}
+	if !foundSuccess || !foundFailure {
+		t.Fatalf("batch audit labels/classification missing: %+v", auditPage)
+	}
+}
+
+func TestAdminChatDestructiveRequestBody4096Boundaries(t *testing.T) {
+	now := time.Now().UTC()
+
+	t.Run("batch content length and chunked", func(t *testing.T) {
+		h := newChatAPIHarness(t, now, nil)
+		h.addSession(t, "user", "user")
+		h.addSession(t, "admin", "admin")
+		authorKey := h.sessionHash(t, "user")
+		create := func(body string) store.ChatMessage {
+			t.Helper()
+			message, _, err := h.store.CreateChatMessage(store.ChatCreateInput{AuthorKey: authorKey, AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: body, CreatedAt: now})
+			if err != nil {
+				t.Fatalf("create boundary message: %v", err)
+			}
+			return message
+		}
+		first := create("known boundary")
+		knownExact := paddedRawJSON([]byte(fmt.Sprintf(`{"ids":[%d]}`, first.ID)), chatAdminDestructiveMaxRequestBytes)
+		response := h.request(t, http.MethodPost, "/api/admin/chat/messages/batch-delete", "admin", knownExact, map[string]string{"Content-Type": "application/json"})
+		assertChatResponse(t, response, http.StatusOK, "")
+		knownOver := paddedRawJSON([]byte(`{"ids":[1]}`), chatAdminDestructiveMaxRequestBytes+1)
+		response = h.request(t, http.MethodPost, "/api/admin/chat/messages/batch-delete", "admin", knownOver, map[string]string{"Content-Type": "application/json"})
+		assertChatResponse(t, response, http.StatusRequestEntityTooLarge, "chat_batch_delete_request_too_large")
+
+		second := create("chunked boundary")
+		chunkedExact := paddedRawJSON([]byte(fmt.Sprintf(`{"ids":[%d]}`, second.ID)), chatAdminDestructiveMaxRequestBytes)
+		response = h.requestBodyStream(t, http.MethodPost, "/api/admin/chat/messages/batch-delete", "admin", chunkedExact, -1, map[string]string{"Content-Type": "application/json"})
+		assertChatResponse(t, response, http.StatusOK, "")
+		chunkedOver := paddedRawJSON([]byte(`{"ids":[1]}`), chatAdminDestructiveMaxRequestBytes+1)
+		response = h.requestBodyStream(t, http.MethodPost, "/api/admin/chat/messages/batch-delete", "admin", chunkedOver, -1, map[string]string{"Content-Type": "application/json"})
+		assertChatResponse(t, response, http.StatusRequestEntityTooLarge, "chat_batch_delete_request_too_large")
+	})
+
+	t.Run("clear has independent limit", func(t *testing.T) {
+		h := newChatAPIHarness(t, now, nil)
+		h.addSession(t, "admin", "admin")
+		state, err := h.store.CurrentChatSyncState()
+		if err != nil {
+			t.Fatalf("clear boundary state: %v", err)
+		}
+		base := []byte(fmt.Sprintf(`{"confirm":"CLEAR_ALL_MESSAGES","expectedGeneration":%d,"expectedLatestChangeSeq":%d}`, state.Generation, state.LatestChangeSeq))
+		for _, tc := range []struct {
+			name     string
+			size     int
+			bodySize int
+			status   int
+			code     string
+		}{
+			{name: "known exact", size: chatAdminDestructiveMaxRequestBytes, bodySize: chatAdminDestructiveMaxRequestBytes, status: http.StatusOK},
+			{name: "known over", size: chatAdminDestructiveMaxRequestBytes + 1, bodySize: chatAdminDestructiveMaxRequestBytes + 1, status: http.StatusRequestEntityTooLarge, code: "chat_clear_request_too_large"},
+			{name: "chunked exact", size: chatAdminDestructiveMaxRequestBytes, bodySize: -1, status: http.StatusOK},
+			{name: "chunked over", size: chatAdminDestructiveMaxRequestBytes + 1, bodySize: -1, status: http.StatusRequestEntityTooLarge, code: "chat_clear_request_too_large"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				payload := paddedRawJSON(base, tc.size)
+				response := h.requestBodyStream(t, http.MethodPost, "/api/admin/chat/messages/clear", "admin", payload, tc.bodySize, map[string]string{"Content-Type": "application/json"})
+				assertChatResponse(t, response, tc.status, tc.code)
+			})
+		}
+	})
+}
+
+func TestAdminChatClearAPIConflictResetAndAuditLabels(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	h := newChatAPIHarness(t, now, nil)
+	h.addSession(t, "user", "user")
+	h.addSession(t, "admin", "admin")
+	for index := 0; index < 2; index++ {
+		response := h.request(t, http.MethodPost, "/api/chat/messages", "user", jsonChatBody(fmt.Sprintf("clear-api-secret-%d", index)), map[string]string{"Content-Type": "application/json"})
+		assertChatResponse(t, response, http.StatusCreated, "")
+	}
+	historyResponse := h.request(t, http.MethodGet, "/api/chat/messages", "user", nil, nil)
+	var history chatMessagesResponse[chatMessageDTO]
+	decodeChatResponse(t, historyResponse, &history)
+	clearBody := []byte(fmt.Sprintf(`{"confirm":"CLEAR_ALL_MESSAGES","expectedGeneration":%d,"expectedLatestChangeSeq":%d}`, history.Generation, history.LatestChangeSeq))
+	userDenied := h.request(t, http.MethodPost, "/api/admin/chat/messages/clear", "user", clearBody, map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, userDenied, http.StatusForbidden, "")
+	csrfDenied := h.request(t, http.MethodPost, "/api/admin/chat/messages/clear", "admin", clearBody, map[string]string{"Content-Type": "application/json", "Origin": "https://attacker.example"})
+	assertChatResponse(t, csrfDenied, http.StatusForbidden, "")
+	for _, invalid := range []string{
+		`{"confirm":"NO","expectedGeneration":1,"expectedLatestChangeSeq":0}`,
+		`{"confirm":"CLEAR_ALL_MESSAGES","expectedGeneration":0,"expectedLatestChangeSeq":0}`,
+		`{"confirm":"CLEAR_ALL_MESSAGES","expectedGeneration":1,"expectedLatestChangeSeq":-1}`,
+		`{"confirm":"CLEAR_ALL_MESSAGES","expectedGeneration":1,"expectedLatestChangeSeq":0,"extra":true}`,
+		`{"confirm":"CLEAR_ALL_MESSAGES","expectedGeneration":1,"expectedLatestChangeSeq":0} {}`,
+	} {
+		response := h.request(t, http.MethodPost, "/api/admin/chat/messages/clear", "admin", []byte(invalid), map[string]string{"Content-Type": "application/json"})
+		assertChatResponse(t, response, http.StatusBadRequest, "chat_clear_request_invalid")
+	}
+
+	clearedResponse := h.request(t, http.MethodPost, "/api/admin/chat/messages/clear", "admin", clearBody, map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, clearedResponse, http.StatusOK, "")
+	var cleared chatClearResponse
+	decodeChatResponse(t, clearedResponse, &cleared)
+	if cleared.ClearedCount != 2 || cleared.Generation != history.Generation+1 || cleared.LatestChangeSeq != history.LatestChangeSeq {
+		t.Fatalf("clear API result=%+v history=%+v", cleared, history)
+	}
+	replay := h.request(t, http.MethodPost, "/api/admin/chat/messages/clear", "admin", clearBody, map[string]string{"Content-Type": "application/json"})
+	assertChatResponse(t, replay, http.StatusConflict, "chat_clear_conflict")
+	staleChanges := h.request(t, http.MethodGet, fmt.Sprintf("/api/chat/changes?afterSeq=%d&generation=%d", history.LatestChangeSeq, history.Generation), "user", nil, nil)
+	assertChatResponse(t, staleChanges, http.StatusConflict, "chat_cursor_reset_required")
+	emptyHistoryResponse := h.request(t, http.MethodGet, "/api/chat/messages", "user", nil, nil)
+	var emptyHistory chatMessagesResponse[chatMessageDTO]
+	decodeChatResponse(t, emptyHistoryResponse, &emptyHistory)
+	if len(emptyHistory.Messages) != 0 || emptyHistory.Generation != cleared.Generation || emptyHistory.LatestChangeSeq != cleared.LatestChangeSeq {
+		t.Fatalf("history after clear=%+v", emptyHistory)
+	}
+
+	auditResponse := h.request(t, http.MethodGet, "/api/admin/audit?page=1&pageSize=50&status=all", "admin", nil, nil)
+	var auditPage auditPageDTO
+	decodeChatResponse(t, auditResponse, &auditPage)
+	foundSuccess := false
+	foundFailure := false
+	for _, entry := range auditPage.Logs {
+		switch entry.Action {
+		case "chat_clear":
+			foundSuccess = entry.ActionLabel == "清空聊天消息" && entry.Status == "ok"
+		case "chat_clear_failed":
+			foundFailure = entry.ActionLabel == "清空聊天消息失败" && entry.Status == "failed"
+		}
+		if strings.Contains(entry.Detail, "clear-api-secret") || strings.Contains(entry.Detail, h.sessionHash(t, "admin")) {
+			t.Fatalf("clear audit leaked sensitive data: %+v", entry)
+		}
+	}
+	if !foundSuccess || !foundFailure {
+		t.Fatalf("clear audit labels/classification missing: %+v", auditPage)
+	}
+}
+
 type chatRateRequest struct {
 	sid string
 	ip  string
@@ -755,6 +990,13 @@ func paddedChatJSONBody(body string, totalBytes int) []byte {
 		panic("chat JSON fixture exceeds requested size")
 	}
 	return append(payload, bytes.Repeat([]byte{' '}, totalBytes-len(payload))...)
+}
+
+func paddedRawJSON(payload []byte, totalBytes int) []byte {
+	if len(payload) > totalBytes {
+		panic("JSON fixture exceeds requested size")
+	}
+	return append(append([]byte(nil), payload...), bytes.Repeat([]byte{' '}, totalBytes-len(payload))...)
 }
 
 func assertCodedChatError(t *testing.T, err error, status int, code string) {

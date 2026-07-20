@@ -627,8 +627,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("server.trusted_proxy_cidrs must contain at most 64 entries")
 	}
 	for _, value := range c.Server.TrustedProxyCIDRs {
-		if _, err := netip.ParsePrefix(strings.TrimSpace(value)); err != nil {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil {
 			return fmt.Errorf("server.trusted_proxy_cidrs contains an invalid CIDR")
+		}
+		if unsafeTrustedProxyPrefix(prefix) {
+			return fmt.Errorf("server.trusted_proxy_cidrs must not trust all IPv4 or IPv6 addresses")
 		}
 	}
 	seenPickerRoots := map[string]struct{}{}
@@ -738,6 +742,21 @@ func (c *Config) validate() error {
 		seenDirs[dir.ID] = struct{}{}
 	}
 	return nil
+}
+
+func unsafeTrustedProxyPrefix(prefix netip.Prefix) bool {
+	prefix = prefix.Masked()
+	if prefix.Addr().Is4() && prefix.Bits() == 0 {
+		return true
+	}
+	if prefix.Addr().Is6() && !prefix.Addr().Is4In6() && prefix.Bits() == 0 {
+		return true
+	}
+	// An IPv6 prefix at or above the IPv4-mapped /96 boundary can otherwise
+	// amount to trusting every IPv4 peer after address unmapping.
+	mappedFirst := netip.MustParseAddr("::ffff:0.0.0.0")
+	mappedLast := netip.MustParseAddr("::ffff:255.255.255.255")
+	return prefix.Addr().Is6() && prefix.Contains(mappedFirst) && prefix.Contains(mappedLast)
 }
 
 func normalizeResources(values []Dir, defaultType string) []Dir {

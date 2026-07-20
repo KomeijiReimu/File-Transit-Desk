@@ -21,6 +21,7 @@ type ChatListHandle = {
 
 type ChatComposerHandle = { focus: () => void }
 type PendingAction = { kind: 'withdraw' | 'delete'; message: ChatMessage }
+type PendingBulkAction = 'batch-delete' | 'clear'
 
 const pageRef = ref<HTMLElement | null>(null)
 const listRef = ref<ChatListHandle | null>(null)
@@ -32,6 +33,10 @@ const newMessageCount = ref(0)
 const pendingAction = ref<PendingAction | null>(null)
 const actionLoading = ref(false)
 const actionError = ref('')
+const pendingBulkAction = ref<PendingBulkAction | null>(null)
+const bulkLoading = ref(false)
+const bulkActionError = ref('')
+const bulkError = ref('')
 const retryingSync = ref(false)
 let followingOwnSend = false
 let viewSubjectRevision = 0
@@ -70,6 +75,7 @@ feed = useChatFeed({
   active: initialSubject.active,
   subjectKey: initialSubject.subjectKey,
   revalidateAuth: revalidateChatSubject,
+  onProjectionInvalidated: clearSubjectInteractionState,
 })
 
 useGsapEntrance(pageRef)
@@ -82,10 +88,6 @@ const connectionLabel = computed(() => {
 const connectionIcon = computed(() => feed.connectionState.value === 'interrupted'
   ? 'wifi-off'
   : feed.connectionState.value === 'loading' || feed.syncing.value ? 'refresh' : 'message-circle')
-const projectionLabel = computed(() => adminProjection.value ? '管理员视图' : '用户视图')
-const projectionDescription = computed(() => adminProjection.value
-  ? '可查看用户撤回前的内容与来源 IP，也可以删除消息。'
-  : '消息撤回或删除后，内容会按权限隐藏。')
 const dialogTitle = computed(() => pendingAction.value?.kind === 'delete' ? '删除这条消息？' : '撤回这条消息？')
 const dialogMessage = computed(() => pendingAction.value?.kind === 'delete'
   ? '删除后，所有人只会看到管理员删除提示，正文将不再显示。'
@@ -93,6 +95,12 @@ const dialogMessage = computed(() => pendingAction.value?.kind === 'delete'
 const dialogDetail = computed(() => pendingAction.value?.kind === 'delete'
   ? '管理员可以删除正常消息或已经撤回的消息，此操作不可恢复。'
   : '撤回仅在服务器给出的时间窗口内有效。')
+const destructiveBusy = computed(() => actionLoading.value || bulkLoading.value)
+const bulkDialogTitle = computed(() => pendingBulkAction.value === 'clear' ? '清空全部消息？' : '删除所选消息？')
+const bulkDialogMessage = computed(() => pendingBulkAction.value === 'clear'
+  ? '全部聊天消息将被清空，此操作不可恢复。'
+  : `将删除已选择的 ${feed.selectedCount.value} 条消息，此操作不可恢复。`)
+const bulkConfirmLabel = computed(() => pendingBulkAction.value === 'clear' ? '确认清空' : '确认删除')
 
 watch(draft, () => { sendError.value = '' })
 
@@ -100,6 +108,10 @@ function clearSubjectInteractionState() {
   pendingAction.value = null
   actionError.value = ''
   actionLoading.value = false
+  pendingBulkAction.value = null
+  bulkLoading.value = false
+  bulkActionError.value = ''
+  bulkError.value = ''
   newMessageCount.value = 0
   draft.value = ''
   sendError.value = ''
@@ -201,6 +213,7 @@ function onBottomChange(nearBottom: boolean) {
 }
 
 function requestAction(kind: PendingAction['kind'], message: ChatMessage) {
+  if (bulkLoading.value) return
   actionError.value = ''
   pendingAction.value = { kind, message }
 }
@@ -236,6 +249,56 @@ async function confirmAction() {
   }
 }
 
+function handleSelection(message: ChatMessage, selected: boolean) {
+  if (destructiveBusy.value) return
+  bulkError.value = ''
+  feed.toggleSelection(message.id, selected)
+}
+
+function requestBulkAction(action: PendingBulkAction) {
+  if (destructiveBusy.value) return
+  if (action === 'batch-delete' && feed.selectedCount.value < 1) return
+  bulkActionError.value = ''
+  bulkError.value = ''
+  pendingBulkAction.value = action
+}
+
+function closeBulkAction() {
+  if (bulkLoading.value) return
+  pendingBulkAction.value = null
+  bulkActionError.value = ''
+}
+
+async function confirmBulkAction() {
+  const action = pendingBulkAction.value
+  if (!action || destructiveBusy.value) return
+  const operationSubjectRevision = viewSubjectRevision
+  const selected = [...feed.selectedIds.value]
+  bulkLoading.value = true
+  bulkActionError.value = ''
+  bulkError.value = ''
+  try {
+    if (action === 'batch-delete') await feed.batchDelete(selected)
+    else await feed.clearAll()
+    if (operationSubjectRevision !== viewSubjectRevision) return
+    pendingBulkAction.value = null
+    await nextTick()
+    listRef.value?.focusLog()
+  } catch (error) {
+    if (operationSubjectRevision !== viewSubjectRevision) return
+    const context = action === 'batch-delete' ? 'batch-delete' : 'clear'
+    const message = chatErrorMessage(error, context)
+    if (action === 'clear' && error instanceof ApiError && error.code === 'chat_clear_conflict') {
+      pendingBulkAction.value = null
+      bulkError.value = message
+    } else {
+      bulkActionError.value = message
+    }
+  } finally {
+    if (operationSubjectRevision === viewSubjectRevision) bulkLoading.value = false
+  }
+}
+
 async function retrySync() {
   if (retryingSync.value) return
   const operationSubjectRevision = viewSubjectRevision
@@ -255,14 +318,10 @@ onBeforeUnmount(feed.dispose)
 <template>
   <section ref="pageRef" class="page-stack chat-page">
     <header class="page-header chat-page-header" data-motion>
-      <div>
-        <p class="eyebrow">仅限登录用户</p>
-        <h1 id="chat-page-title">在线交流</h1>
-        <p>在这里交流文件传输相关事项。撤回和删除后的内容会按权限显示。</p>
-      </div>
+      <h1 id="chat-page-title">在线交流</h1>
       <div class="chat-header-status" :data-state="feed.connectionState.value" role="status" aria-live="polite">
         <span class="chat-status-icon" aria-hidden="true"><AppIcon :name="connectionIcon" :size="21" /></span>
-        <span><strong>{{ connectionLabel }}</strong><small>约每 3 秒自动检查新消息</small></span>
+        <strong>{{ connectionLabel }}</strong>
       </div>
     </header>
 
@@ -276,12 +335,17 @@ onBeforeUnmount(feed.dispose)
       <div class="chat-stage-bar">
         <div class="chat-channel-mark">
           <span class="chat-live-dot" :data-state="feed.connectionState.value" aria-hidden="true" />
-          <span><strong>聊天室</strong><small>仅当前已登录用户可进入</small></span>
+          <strong>聊天室</strong>
         </div>
-        <div class="chat-projection-note">
-          <strong>{{ projectionLabel }}</strong>
-          <span>{{ projectionDescription }}</span>
+        <div v-if="adminProjection" class="chat-bulk-toolbar" aria-label="聊天批量操作">
+          <span class="chat-selection-count">已选 {{ feed.selectedCount.value }}</span>
+          <button class="ghost-btn" type="button" :disabled="destructiveBusy || feed.selectedCount.value < 1" @click="requestBulkAction('batch-delete')">删除所选</button>
+          <button class="ghost-btn danger" type="button" :disabled="destructiveBusy || !feed.initialized.value || feed.messages.value.length < 1" @click="requestBulkAction('clear')">清空全部</button>
         </div>
+      </div>
+
+      <div v-if="bulkError || feed.selectionError.value" class="chat-bulk-error" role="alert">
+        {{ bulkError || feed.selectionError.value }}
       </div>
 
       <Transition name="chat-notice">
@@ -317,11 +381,16 @@ onBeforeUnmount(feed.dispose)
           :loading-older="feed.loadingOlder.value"
           :older-error="feed.olderError.value"
           :new-message-count="newMessageCount"
+          :selected-ids="feed.selectedIds.value"
+          :selection-disabled="destructiveBusy"
+          :selection-at-limit="feed.selectionAtLimit.value"
+          :actions-disabled="destructiveBusy"
           @load-older="handleLoadOlder"
           @jump-latest="jumpToLatest"
           @bottom-change="onBottomChange"
           @withdraw="requestAction('withdraw', $event)"
           @delete="requestAction('delete', $event)"
+          @selection-change="handleSelection"
         />
       </div>
 
@@ -350,6 +419,18 @@ onBeforeUnmount(feed.dispose)
       danger
       @cancel="closeAction"
       @confirm="confirmAction"
+    />
+
+    <ConfirmDialog
+      :open="Boolean(pendingBulkAction)"
+      :title="bulkDialogTitle"
+      :message="bulkDialogMessage"
+      :confirm-label="bulkConfirmLabel"
+      :error="bulkActionError"
+      :loading="bulkLoading"
+      danger
+      @cancel="closeBulkAction"
+      @confirm="confirmBulkAction"
     />
   </section>
 </template>
