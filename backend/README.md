@@ -42,21 +42,22 @@ go run ./cmd/server -config config.yaml
 - 文件下载使用短期下载票据。票据绑定具体目录、路径、文件大小、修改时间，并会按 `downloads.content_hash_max_mb` 对文件内容写入 SHA-256 哈希；页面会话空闲过期后，已兑换票据的长下载和 HTTP Range 续传仍可继续，但文件被替换后旧票据会失效。
 - 管理员撤销或删除公开下载令牌时，会同步清理该令牌已兑换但尚未过期的下载票据，用于应急止血。共享资源路径、类型、权限变更或删除时，会同步撤销相关公开令牌并清理对应目录 ID 的下载票据和上传票据，避免旧授权指向新资源。
 - 对 `/api` 下会改变状态的请求，后端会校验非空 `Origin`，降低 Cookie 凭据接口的跨站请求风险。一键开发模式会额外允许同一主机名的前端开发端口来源，用于默认直连传输；生产或不同域名跨域访问仍必须写入 `cors.allow_origins`。
+- Vite 开发代理会基于入站 socket 地址覆盖 `X-FileTrans-Dev-Client-IP`、`X-Real-IP` 和 `X-Forwarded-For`，不保留或拼接浏览器伪造值。后端仅在显式 `-dev` 且直接 socket peer 为 loopback 时读取这个单值开发头；该例外只影响客户端地址解析，不会把该 peer 当作可信生产代理，也不会影响 forwarded host/proto、`Origin` 或 CSRF 判断。
 - 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
 - 临时令牌数据库只保存 SHA-256 哈希，明文只在创建响应中返回一次。
 - 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；登录态和公开分享前端默认走原始字节流上传，后端从连接开始直接读取请求体、写临时文件并更新传输进度。旧的 `multipart/form-data` 上传接口仍兼容保留，但不再是前端默认路径；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
 - 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-raw-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。所有 `/t/...` capability 响应以及 token/lease 创建与使用响应都会设置 `no-store`、`no-referrer` 和 `noindex` 等安全头。内置 nginx 会脱敏 `/t/<token>` 并忽略查询参数，但部署在它之前的外部 LB、CDN、WAF 和代理日志仍需独立禁止记录 capability、Referer 与 Authorization。
 - 服务维护内存传输注册表，管理员可查看活跃上传和下载。原始字节流上传的进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。若部署在反向代理后，应关闭上传请求体缓冲，例如 Nginx `proxy_request_buffering off;`，否则代理缓冲会让后端观测滞后。
 - 上传临时文件写在目标目录内，文件名形如 `.upload-*.tmp`；成功提交最终文件后会立即删除临时文件，失败、超限、客户端断开或管理员取消也会尽量删除。服务启动和定时任务会按配置清理超过保留期且不在活跃注册表中的崩溃残留临时文件。
-- 聊天只对已登录 TOTP 用户和管理员开放，公开 token 访客不可用。普通 DTO 不包含可信客户端 IP、内部所有权标识或撤回原文；管理员 DTO 可查看撤回原文和按 trusted proxy 规则解析的来源 IP。管理员删除会把当前 `chat_messages.body` 设为 `NULL` 并保留 tombstone，撤回/删除审计不写正文；这不是对 SQLite 历史页、WAL、备份或存储快照的取证级擦除承诺。
+- 聊天只对已登录 TOTP 用户和管理员开放，公开 token 访客不可用。普通 DTO 会向所有已登录用户返回 `sourceIP`，但不返回撤回原文、`authorKey`、`deletedBy` 等内部数据；管理员 DTO 可看到撤回消息原文，并且只有管理员接口具有单条删除、批量删除和清空权限。`sourceIP` 表示可信网络边界观察到的客户端地址，不承诺是公网 IP，可能受 NAT、VPN、CDN 或 LB 影响。删除会把当前 `chat_messages.body` 设为 `NULL` 并保留 tombstone，撤回/删除审计不写正文；这不是对 SQLite 历史页、WAL、备份或存储快照的取证级擦除承诺。
 
 ## 配置说明
 
 见 `config.example.yaml`：
 
 - `server.host/port`：监听地址。
-- `server.trust_proxy_headers`：是否启用可信代理头；直接运行必须保持 `false`。
-- `server.trusted_proxy_cidrs`：可信代理 socket 来源 CIDR。启用后必填、最多 64 项；只剥离链右侧可信代理，非法链回退 `X-Real-IP`，再失败回退 socket remote IP。
+- `server.trust_proxy_headers`：是否启用可信代理头；生产默认和直接运行均为 `false`，不会自动信任私网，修改后必须重启。
+- `server.trusted_proxy_cidrs`：可信代理 socket 来源 CIDR。启用后必填、最多 64 项；应使用能够表达实际代理 peer 的最小范围，单个固定 IPv4/IPv6 代理优先 `/32` 或 `/128`。配置校验与 resolver 构造都会拒绝 `0.0.0.0/0`、`::/0`，以及 IPv4-mapped `/96` 或更宽、足以覆盖全部 IPv4 的前缀。解析时只剥离链右侧明确可信的代理，非法链回退 `X-Real-IP`，再失败回退 socket remote IP。
 - `server.keepalive_idle_timeout_seconds`：HTTP keep-alive 请求之间的空闲超时，默认 120 秒。安全配置摘要只读展示，修改后需要重启；它不是上传、下载或单个请求的总时长，服务端不会设置固定 ReadTimeout/WriteTimeout。
 - `database.path`：SQLite 文件路径，启动自动迁移 `sessions`、`tokens`、`download_leases`、`upload_leases`、`chat_messages`、`chat_changes`、聊天同步元数据和 `audit_logs` 等表及索引。
 - `auth.totp_secret`：TOTP Base32 secret。
@@ -75,7 +76,9 @@ go run ./cmd/server -config config.yaml
 - `chat.ip_messages_per_minute`：每个可信解析客户端 IP 的发送上限，默认 60 条/分钟。
 - `chat.global_messages_per_minute`：单后端实例的发送总上限，默认 300 条/分钟。
 
-聊天三个速率桶同时生效，任一层拒绝都会返回 429 和 `Retry-After`。IP 必须依赖 `server.trust_proxy_headers` 与 `server.trusted_proxy_cidrs` 的正确部署；不可信来源的转发头会被忽略。普通聊天响应永远不返回 IP。
+聊天三个速率桶同时生效，任一层拒绝都会返回 429 和 `Retry-After`。所有已登录用户收到的普通聊天消息都包含 `sourceIP`；普通响应仍不会返回撤回原文、`authorKey` 或 `deletedBy`。该地址与限速、审计共用同一解析结果，必须依赖可信代理边界的正确部署；不可信来源的转发头会被忽略，NAT/VPN/CDN 也可能改变观察值。旧 SQLite 中已保存的 `127.0.0.1` 不会被猜测、反推或迁移，配置修正只影响新写入的消息和事件。
+
+生产代理必须在不可信入口处覆盖而不是拼接客户端提交的 `X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Host` 和 `X-Forwarded-Proto`，不使用的转发头应直接删除。多层 CDN/LB/Nginx 必须逐跳定义信任，每一跳只向下一跳传递自己确认过的链；后端端口应由防火墙、容器网络或安全组限制为仅受信代理可访问。示例 Compose 的 `172.28.0.0/24` 表示信任整个 Docker 网络中的每个地址，不只是 Nginx；只有网络成员完全受控时才应使用，能够固定代理地址时优先收窄为 `/32`。代理信任配置只在启动时构造，修改后需重启。
 - `auth.cookie_secure`：HTTPS 下启用安全 Cookie。
 - `downloads.lease_ttl_seconds`：下载票据默认有效期，点击下载或公开分享下载时兑换。
 - `downloads.lease_max_ttl_seconds`：下载票据最大有效期上限，防止误配置过长。
@@ -215,14 +218,18 @@ python3 scripts/hash-admin-password.py
 聊天室只有一条全局消息流，仅已登录的 TOTP `user` 与 `admin` 可访问；公开 `/t/...` 和 `/share/:token` 访客没有聊天权限。正文是纯文本，不解析 Markdown/HTML，也没有附件能力。所有聊天响应都带 `Cache-Control: no-store`。
 
 - `GET /api/chat/capabilities`：普通用户和管理员均可访问，返回当前 `maxMessageChars`、`maxMessageBytes`、固定 `maxRequestBytes: 8192`、`withdrawWindowSeconds` 以及 history/changes 页大小边界。
-- `GET /api/chat/messages?beforeId=&limit=`：普通 history，默认 50、最大 100，使用 keyset 分页；响应同时返回 `generation` 与 `latestChangeSeq`。普通 DTO 对撤回和删除消息都返回 `body: null`，且不包含来源 IP 或内部所有权标识。
+- `GET /api/chat/messages?beforeId=&limit=`：普通 history，默认 50、最大 100，使用 keyset 分页；响应同时返回 `generation` 与 `latestChangeSeq`。普通 DTO 在 active、withdrawn 和 deleted tombstone 中都返回 `sourceIP`；撤回和删除消息返回 `body: null`，且不包含撤回原文、`authorKey`、`deletedBy` 等内部字段。
 - `GET /api/chat/changes?afterSeq=N&generation=G&limit=`：普通增量流，默认 50、最大 500。generation 缺失/非法返回 400 `chat_generation_invalid`；generation 不匹配、`afterSeq` 高于高水位或变更序列不可信时返回 409 `chat_cursor_reset_required`，客户端必须丢弃本地消息并重新拉 history。
 - `POST /api/chat/messages`：发送 `{ "body": "纯文本" }`。包含 JSON 语法、空白和 escape 的完整原始请求体最多 8192 bytes；解码后的正文还要分别满足 2000 code points 和配置的 8192 UTF-8 bytes 默认上限。发送同时受 session/IP/global 三层限速。
 - `POST /api/chat/messages/:id/withdraw`：普通用户只能在默认 300 秒窗口内撤回自己的 `user` 消息；管理员不能借普通接口撤回他人消息。
-- `GET /api/admin/chat/messages`、`GET /api/admin/chat/changes`：管理员独立 DTO，分页与 generation/reset 契约和普通接口一致，但可见撤回原文及可信解析来源 IP。
-- `DELETE /api/admin/chat/messages/:id`：管理员删除任意消息；正文原子置 `NULL`，所有视图只保留 tombstone。审计记录动作、消息 ID、结果和 IP，不包含正文。
+- `GET /api/admin/chat/messages`、`GET /api/admin/chat/changes`：仅管理员可访问。分页与 generation/reset 契约和普通接口一致，并在 withdrawn 消息的 `body` 中保留撤回原文；来源地址同样通过 `sourceIP` 返回。
+- `DELETE /api/admin/chat/messages/:id`：仅管理员可访问。删除任意 active/withdrawn 消息，正文原子置 `NULL`，所有视图只保留 tombstone。审计不记录正文。
+- `POST /api/admin/chat/messages/batch-delete`：仅管理员可访问，严格 JSON 且原始请求体最多 4096 bytes：`{ "ids": [3, 8, 12] }`。必须提供 1–100 个不重复的正整数；未知字段、尾随 JSON、错误类型或重复 ID 返回 400 `chat_batch_delete_request_invalid`，非 JSON Content-Type 返回 415 `chat_batch_delete_content_type_invalid`，超限返回 413 `chat_batch_delete_request_too_large`。active/withdrawn 均可删除，每条消息都会执行 `body=NULL` 并产生独立、连续的 delete change；任一 ID 不存在、已删除或发生并发冲突时返回 409 `chat_batch_delete_conflict`，整批正文、状态和 changes 均不发生部分修改。成功响应为 `{ "deletedCount": 3, "mutations": [{ "message": { ... }, "eventSeq": 21 }] }`，每个 `eventSeq` 只表示对应即时 mutation，不能用作全局 changes cursor。
+- `POST /api/admin/chat/messages/clear`：仅管理员可访问，严格 JSON 且有独立的 4096-byte 上限。请求必须是 `{ "confirm": "CLEAR_ALL_MESSAGES", "expectedGeneration": 4, "expectedLatestChangeSeq": 120 }`；未知字段、尾随 JSON、错误类型或错误确认值返回 400 `chat_clear_request_invalid`，非 JSON Content-Type 返回 415 `chat_clear_content_type_invalid`，超限返回 413 `chat_clear_request_too_large`。后端在事务内对 generation 与 change 高水位做 CAS；陈旧值或重放返回 409 `chat_clear_conflict`，不删除聊天数据。CAS 成功后同一事务删除 `chat_messages` 和 `chat_changes`；任一表实际删行才把 generation 加一，两表都空时是 generation 不变的 no-op。成功响应为 `{ "clearedCount": 42, "generation": 5, "latestChangeSeq": 120 }`，其中 `latestChangeSeq` 是删除前高水位。SQLite 自增序列不会清零，后续 message ID/change seq 继续递增；旧 generation 客户端必须 reset 并重新拉 history。
 
 history 的消息、generation 和高水位来自同一短只读快照。首版客户端使用短轮询，不使用 WebSocket/SSE；页面隐藏时暂停轮询，恢复可见后继续，因此没有后台未读推送承诺。history 的 `latestChangeSeq` 和 changes 的 `nextAfterSeq` 才能推进全局同步；发送、撤回、删除响应里的 `eventSeq` 只标识该 mutation 事件，不能直接跳过其间事件作为 cursor。retention 按 90 天或 50000 条先到者分批清理，每批默认 500；只要实际删除消息，同一事务会推进 generation，使旧客户端在下一次 changes 请求收到 reset。
+
+聊天 create/withdraw/单删/批删共享 destructive read gate，retention 的每个短 batch 与 clear 使用 exclusive gate；批量 ID gate 按唯一 ID 升序获取后才开始事务，避免逆序批量死锁。这个协调语义只覆盖**单个后端进程和同一个 SQLite 实例**，不提供跨进程、跨主机或分布式互斥。单删、批删和 clear 的“不可恢复”仅指应用层 API 与当前表状态；它不承诺擦除 SQLite 历史页、WAL、备份、快照或外部日志。
 
 ### 临时令牌
 
@@ -298,7 +305,7 @@ history 的消息、generation 和高水位来自同一短只读快照。首版�
 
 完整且唯一的部署步骤、Compose 命令、端口与挂载权限说明见[仓库根 README 的“部署方式”](../README.md#部署方式)。
 
-示例 Compose 的前后端固定加入 `172.28.0.0/24`。使用内置 Nginx 时，后端配置必须启用 `trust_proxy_headers` 并将该 CIDR 写入 `trusted_proxy_cidrs`；若 subnet 冲突，必须同时修改 Compose subnet 和可信 CIDR。直接运行后端时保持 `false` 和空列表。
+示例 Compose 的前后端固定加入 `172.28.0.0/24`。使用内置 Nginx 时，后端配置可显式启用 `trust_proxy_headers` 并将该 CIDR 写入 `trusted_proxy_cidrs`，但这表示信任整个 `/24` 网络；网络内若还允许其他工作负载，应该为代理使用更精确的固定地址并优先配置 `/32`。内置 Nginx 会覆盖而不是追加 `X-Real-IP`、`X-Forwarded-For`、`X-Forwarded-Host` 和 `X-Forwarded-Proto`。若 subnet 冲突，必须同时修改 Compose subnet 和可信 CIDR；代理配置修改后重启后端。后端端口必须只对该受信网络开放，直接运行后端时保持 `false` 和空列表。
 
 后端镜像不会包含本地配置、数据库、上传文件或构建产物；最终以非 root 用户 `filetrans` 运行，并通过 `wget` 调用 `/api/health/ready` 做 readiness 检查。部署时必须将宿主机 `backend/config/` 目录挂载到 `/app/config/`，使 `backend/config/config.yaml` 对应容器内 `/app/config/config.yaml`，不能只挂载单个配置文件。
 

@@ -14,7 +14,7 @@
 - 下载使用短期下载票据，支持 HTTP Range 断点续传；公开下载令牌只在兑换票据时消耗一次使用次数，续传不重复扣次。
 - 外部访客可打开前端 `/share/{token}` 分享页完成下载或拖拽上传，不再依赖后端原生 HTML 页面。
 - 审计日志记录登录、目录访问、文件列表、上传、下载、令牌创建/撤销/使用等事件，并返回中文 `actionLabel`。
-- 支持可信反向代理后的真实 IP 识别，避免访问记录长期显示 `127.0.0.1`。
+- 支持记录“可信网络边界观察到的客户端地址”，用于聊天来源展示、限速和审计；该地址不承诺是公网 IP，可能受 NAT、VPN、CDN 或上游代理影响。
 - 管理员配置页提供“服务访问地址”，区分浏览器当前入口、显式公开地址、本机网卡候选和后端 listener 诊断。
 - 支持上传细粒度策略：单次请求总量、单文件大小、单次文件数量、扩展名白名单/黑名单、单上传令牌累计容量。
 
@@ -157,6 +157,8 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 
 脚本会显式向后端传入 `-dev -dev-frontend-port <端口>`。`FILE_TRANS_DEV_FRONTEND_PORT` 已废弃且不再生效；直接运行后端默认始终是生产模式，没有开发 CORS/CSRF 例外。
 
+通过 Vite 开发代理访问时，代理会从入站 socket 地址生成规范客户端地址，并覆盖浏览器可能伪造的 `X-FileTrans-Dev-Client-IP`、`X-Real-IP` 和 `X-Forwarded-For`；无法取得合法地址时会删除这些头。后端只有在显式 `-dev` 且直接 socket peer 是 loopback 时才读取 `X-FileTrans-Dev-Client-IP`。这个开发例外只用于客户端地址解析，不会扩大 `X-Forwarded-Host`、`X-Forwarded-Proto`、`Origin` 或 CSRF 的信任范围。
+
 如果后端启动失败，脚本会输出中文原因、后端日志尾部和日志文件路径。常见问题是 `backend/config.yaml` 的 YAML 缩进错误，例如 `file_picker` 应与 `storage` 同级，不能把 `roots/max_page_size/deny_names` 缩进到 `storage.shares` 下面。
 
 默认访问地址：
@@ -215,7 +217,7 @@ bun install
 bun run dev
 ```
 
-Vite 会把 `/api` 和 `/t` 代理到 `http://127.0.0.1:17878`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。代理目标默认使用 IPv4 地址，避免部分 Windows/Node 环境把 `localhost` 解析成 `::1` 后连接失败；代理转发时会把 `Origin` 改写为后端同源，避免通过局域网 IP 访问 Vite 时被后端 CSRF Origin 防护误拒绝。
+Vite 会把 `/api` 和 `/t` 代理到 `http://127.0.0.1:17878`。打开 Vite 输出的地址后，普通用户使用 TOTP 登录；管理员切换到“管理员账号”模式登录。代理目标默认使用 IPv4 地址，避免部分 Windows/Node 环境把 `localhost` 解析成 `::1` 后连接失败；代理会覆盖开发客户端地址头和 `X-Real-IP`/`X-Forwarded-For`，并把 `Origin` 改写为后端同源，避免通过局域网 IP 访问 Vite 时被后端 CSRF Origin 防护误拒绝。后端只在 `-dev` 且 Vite 到后端的直接 peer 为 loopback 时采用该开发地址，地址例外不会参与 Origin/CSRF 判断。
 
 手动分别启动时，如果只执行 `bun run dev -- --port 5174`，前端会安全地继续走 Vite 代理。若手动启动也想启用开发端口直连例外，需要以 `-dev -dev-frontend-port 5174` 启动后端，并给前端设置 `VITE_FRONTEND_PORT=5174`、`VITE_TRANSFER_PORT=<后端端口>`；更推荐直接使用根目录一键脚本。
 
@@ -303,14 +305,16 @@ cors:
 
 ## 全局聊天室
 
-登录后的 `/chat` 是一个单一全局聊天室，TOTP 普通用户与管理员看到同一条消息流；`/share/{token}` 等公开分享访客不能使用聊天。消息只接受纯文本 JSON，不渲染 Markdown 或 HTML，也不支持附件。普通用户只能在发送后 300 秒（5 分钟）内撤回自己的普通用户消息；普通端不会看到撤回原文、可信客户端 IP 或内部所有权标识，管理员可在独立管理视图中查看撤回原文和后端按 trusted proxy 规则解析出的来源 IP。
+登录后的 `/chat` 是一个单一全局聊天室，TOTP 普通用户与管理员看到同一条消息流；`/share/{token}` 等公开分享访客不能使用聊天。消息只接受纯文本 JSON，不渲染 Markdown 或 HTML，也不支持附件。普通用户只能在发送后 300 秒（5 分钟）内撤回自己的普通用户消息。所有已登录用户都会看到每条消息的 `sourceIP`，其含义是“后端可信网络边界观察到的客户端地址”，不是公网 IP 保证，可能是 NAT 出口、VPN 地址、CDN/LB 观察值或直连 socket 地址。普通用户仍看不到撤回原文、`authorKey`、`deletedBy` 等内部字段；管理员独立视图额外保留撤回原文和删除能力。
 
-管理员删除任意消息时，应用会在同一事务中把 SQLite 当前记录的正文设为 `NULL`，保留 tombstone、状态变更和不含正文的审计记录。这里描述的是应用层数据库语义，不承诺对 SQLite 历史页、WAL、文件系统快照、备份或外部日志做取证级擦除；需要这类保证时应同时执行专门的存储介质与备份销毁流程。
+管理员可删除单条消息、勾选 1–100 条唯一消息执行全原子批量删除，或使用带确认文本及同步状态 CAS 的“清空全部”。单条和批量删除都会把每条当前正文设为 `NULL`、写入删除元数据并分别产生 delete change；批量中任一消息不存在、已删除或发生并发冲突时整批不产生部分修改。清空会在一个事务内校验 `generation` 与 change 高水位，删除 `chat_messages`/`chat_changes`，在实际删除任一表记录时推进 generation，同时保留 SQLite 自增高水位，后续消息 ID 和 change seq 不会复用。旧 generation 客户端必须按 `chat_cursor_reset_required` 重新加载。
+
+这些删除语义只表示应用层不可再通过聊天 API 恢复正文，不承诺对 SQLite 历史页、WAL、文件系统快照、备份或外部日志做取证级擦除；需要这类保证时应同时执行专门的存储介质与备份销毁流程。聊天 create/withdraw/单删/批删、retention 与清空之间使用 destructive lock 协调，但该锁只覆盖单个后端进程和同一个 SQLite 实例，不是跨进程或分布式锁。升级不会反推或迁移旧 SQLite 消息中已经保存的 `127.0.0.1`，客户端地址改进只影响之后写入的新消息。
 
 默认消息边界和速率如下：
 
 - 正文最多 2000 个 Unicode code points，解码后的 UTF-8 正文最多 8192 bytes；包含 JSON 语法、空白和 escape 在内的原始 HTTP 请求体也固定最多 8192 bytes，原始请求限制可能先触发。
-- 发送速率为每 session 20 条/分钟、每可信客户端 IP 60 条/分钟、单实例全局 300 条/分钟，任一层达到上限都会返回 `Retry-After`。
+- 发送速率为每 session 20 条/分钟、每个可信网络边界解析出的客户端地址 60 条/分钟、单实例全局 300 条/分钟，任一层达到上限都会返回 `Retry-After`。
 - 初始/history 默认 50 条、单页最多 100 条；changes 默认 50 条、单页最多 500 条。
 - 消息按 90 天或 50000 条两项中先达到者保留，后台每个短事务最多清理 500 条。
 
@@ -367,8 +371,8 @@ rm -rf backend/uploads/*
 | 配置项 | 说明 |
 | --- | --- |
 | `server.host` / `server.port` | 服务监听地址和端口 |
-| `server.trust_proxy_headers` | 是否启用可信代理解析；直接运行保持 `false` |
-| `server.trusted_proxy_cidrs` | 可信代理 socket 来源 CIDR；启用代理解析时必填，最多 64 项 |
+| `server.trust_proxy_headers` | 是否启用可信代理解析；生产默认和直接运行均保持 `false`，修改后重启生效 |
+| `server.trusted_proxy_cidrs` | 可信代理 socket 来源 CIDR；启用时必填且最多 64 项，应使用最小精确范围，单代理优先 `/32` 或 `/128`；禁止 IPv4/IPv6 `/0` 及覆盖全部 IPv4 的 mapped 前缀 |
 | `server.keepalive_idle_timeout_seconds` | keep-alive 请求间空闲超时，默认 120 秒；只读展示且修改后需重启，不是传输总时长 |
 | `storage.directory_list_*` | 普通目录扫描窗口与分页上限，默认 5000/200；截断时不自动拉取全量 |
 | `file_picker.max_scan_entries` / `max_page_size` | 管理员 picker 扫描窗口与分页上限，默认 5000/200 |
@@ -426,8 +430,8 @@ cd backend
 mkdir -p config
 cp config.example.yaml config/config.yaml
 # 必须修改 auth.totp_secret、auth.admin，并确认 storage.dirs / storage.shares 指向需要开放的资源
-# Compose 内置 Nginx 使用固定网络 172.28.0.0/24：配置 trust_proxy_headers: true
-# 并设置 trusted_proxy_cidrs: ["172.28.0.0/24"]
+# Compose 内置 Nginx 使用固定网络 172.28.0.0/24：仅在确认整个网络内所有地址均可信时启用
+# trust_proxy_headers: true 并设置 trusted_proxy_cidrs: ["172.28.0.0/24"]
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
@@ -463,19 +467,24 @@ go run ./cmd/server -config config.yaml
 
 后端会托管 `web.static_dir` 指向的前端构建产物，并对非 `/api`、非 `/t` 路径回退到 `index.html`，适配 Vue 单页应用路由。
 
-### 反向代理与真实 IP
+### 可信代理与客户端地址
 
-若部署在 Nginx、Caddy、Traefik 等可信反向代理之后，并希望访问记录显示真实客户端 IP，需要：
+后端记录的是“可信网络边界观察到的客户端地址”，不承诺它是终端设备的公网 IP。NAT 会让多个客户端共享出口地址，VPN 会显示隧道地址，CDN/LB 可能只提供它观察到的上游地址；这些都是正常的部署语义。生产默认 `trust_proxy_headers: false` 且 `trusted_proxy_cidrs: []`，不会自动信任私网或任意转发头。
 
-1. 在反向代理层覆盖 `X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Host` 和 `X-Forwarded-Proto`，不要拼接客户端原始转发头；
-2. 将 `server.trust_proxy_headers` 设置为 `true`，并在 `server.trusted_proxy_cidrs` 中填写实际代理网络；
-3. 后端端口只允许代理访问。直接运行时保持 `false` 和空 CIDR 列表。
+若部署在 Nginx、Caddy、Traefik、CDN 或负载均衡器之后，并希望后端采用可信边界提供的客户端地址，需要：
 
-示例 Compose 固定内部网络为 `172.28.0.0/24`。使用该 Compose 时配置 `trust_proxy_headers: true` 和 `trusted_proxy_cidrs: ["172.28.0.0/24"]`。如果该 subnet 与现有 Docker 或宿主网络冲突，必须同时修改 Compose subnet 和后端 `trusted_proxy_cidrs`，二者不能只改一处。后端只根据 socket remote address 判断代理是否可信，直连请求中的伪造转发头会被忽略。
+1. 最靠近客户端的受信代理必须**覆盖** `X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Host` 和 `X-Forwarded-Proto`，或者删除不使用的转发头，不能继续传递浏览器提交的原始值；项目内置 Nginx 会分别以 `$remote_addr`、`$http_host` 和 `$scheme` 覆盖这些头。
+2. 将 `server.trust_proxy_headers` 显式设为 `true`，并在 `server.trusted_proxy_cidrs` 中填写实际代理 socket 来源。单个固定代理优先写 `/32`（IPv4）或 `/128`（IPv6），不要为了方便扩大范围。
+3. `0.0.0.0/0`、`::/0`、IPv4-mapped `/96` 及更宽的“覆盖全部 IPv4”前缀会被配置校验和 resolver 构造双重拒绝。
+4. 多层 CDN/LB/反向代理必须逐跳建立信任：每一跳覆盖来自不可信一侧的转发头，只把自己确认过的链传给下一跳；后端只信任 `trusted_proxy_cidrs` 中直接连接它的代理，并从链右侧剥离明确可信的代理节点。
+5. 防火墙、容器网络或安全组必须保证后端端口只能由受信代理访问，否则攻击者可绕过入口直接连接后端。
+6. 代理信任配置在启动时构造，修改后必须重启后端。直接运行或无法确认边界时继续保持 `false` 和空 CIDR 列表。
+
+示例 Compose 固定内部网络为 `172.28.0.0/24`。使用 `trusted_proxy_cidrs: ["172.28.0.0/24"]` 等价于信任该 Docker 网络内的每个地址，不只是当前 Nginx 容器，因此只能在该网络成员受控且后端端口不对其他来源开放时使用。如果可稳定取得代理单地址，应优先缩小为 `/32`。若 subnet 变化，必须同步更新 Compose 网络和可信 CIDR，并重启后端。后端只根据直接 socket remote address 判断代理是否可信，直连请求中的伪造转发头会被忽略。
 
 后端 `/api/health/live` 是不访问数据库的 liveness，`/api/health/ready` 和兼容别名 `/api/health` 是 readiness。首次停止信号会先摘除 readiness，再无限等待活跃上传、下载和 Range 完成。Compose 的 `stop_grace_period: 24h` 只是容器运行时最终强杀上限，不是应用传输 timeout；可能持续超过 24 小时的部署必须提高它。Kubernetes 同样应设置足够大的 `terminationGracePeriodSeconds`。keep-alive IdleTimeout 仅帮助关闭请求间空闲连接，ReadTimeout/WriteTimeout 保持为 0。
 
-登录失败限速和审计日志都会使用后端解析出的客户端 IP。
+登录失败限速、聊天 `sourceIP` 和审计日志都会使用同一套客户端地址解析结果。旧 SQLite 记录中已保存的 `127.0.0.1` 不会被猜测、反推或批量迁移；部署边界修正只影响之后的新事件和新消息。
 
 大文件下载限速建议放在反向代理层统一处理，例如 Nginx 可按部署场景配置 `limit_rate`、`limit_conn` 或更细的下载 location 策略，避免应用进程自行节流影响 HTTP Range 续传和静态文件发送效率。
 
@@ -557,7 +566,7 @@ downloads:
 - 公开令牌信息接口只返回有效令牌的有限元数据；过期、撤销、耗尽、上传容量耗尽的令牌只返回失效原因。
 - 上传采用临时文件完整写入后提交，避免半成品以最终文件名可见；前端默认使用原始字节流上传，便于后端从连接开始观测进度和执行取消；同时受数量、大小、扩展名和令牌累计容量限制。
 - 管理员“正在传输”页会展示活跃上传和下载。原始字节流上传有后端精确进度、速度和可靠取消；下载保持极速发送路径，只做最佳努力观测，不承诺可靠取消。
-- 审计和登录限速默认使用连接 IP；部署在可信反向代理后可启用 `server.trust_proxy_headers` 获取真实客户端 IP。
+- 审计、聊天来源和登录限速默认使用连接地址；部署在可信反向代理后可显式启用 `server.trust_proxy_headers`，取得该可信网络边界观察到的客户端地址，而不是公网 IP 保证。
 - 普通用户获取目录列表时不会返回服务端真实目录路径；管理员配置概览仍可看到目录根路径。
 
 ## 常用命令
