@@ -1,14 +1,14 @@
 package server
 
 import (
+	"io"
 	"net"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"filetrans-backend/internal/store"
-
-	"github.com/gofiber/fiber/v2"
 )
 
 func TestResolveListenEndpointNormalizesHostAndSelectsNetwork(t *testing.T) {
@@ -87,49 +87,64 @@ func TestNewWithOptionsSetsFiberNetworkFromListenHost(t *testing.T) {
 }
 
 func TestFiberCanStartRealIPv6ListenerWhenAvailable(t *testing.T) {
-	probe, err := net.Listen("tcp6", "[::1]:0")
+	listener, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
 		t.Skipf("IPv6 loopback listener unavailable: %v", err)
 	}
-	_ = probe.Close()
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), 100)
 	if err != nil {
+		_ = listener.Close()
 		t.Fatalf("open store: %v", err)
 	}
-	defer st.DB.Close()
+	t.Cleanup(func() { _ = st.DB.Close() })
 	cfg := testConfig(t.TempDir())
 	cfg.Server.Host = "::1"
 	app, err := NewWithOptions(cfg, st, "", Options{DevFrontendPort: 5173})
 	if err != nil {
+		_ = listener.Close()
 		t.Fatalf("new IPv6 server: %v", err)
 	}
-	t.Cleanup(func() { _ = app.Shutdown() })
-
-	started := make(chan fiber.ListenData, 1)
-	app.Hooks().OnListen(func(data fiber.ListenData) error {
-		started <- data
-		return nil
+	t.Cleanup(func() {
+		_ = app.Shutdown()
+		_ = listener.Close()
 	})
-	listenErr := make(chan error, 1)
-	go func() { listenErr <- app.Listen("[::1]:0") }()
 
-	var data fiber.ListenData
-	select {
-	case data = <-started:
-	case err := <-listenErr:
-		t.Fatalf("IPv6 listen failed before startup: %v", err)
-	case <-time.After(3 * time.Second):
-		t.Fatalf("IPv6 listener did not start")
+	listenErr := make(chan error, 1)
+	go func() { listenErr <- app.Listener(listener) }()
+
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: nil},
+		Timeout:   3 * time.Second,
 	}
-	connection, err := net.DialTimeout("tcp6", net.JoinHostPort("::1", data.Port), time.Second)
+	response, err := client.Get("http://" + listener.Addr().String() + "/api/health/live")
 	if err != nil {
-		t.Fatalf("dial real IPv6 listener: %v", err)
+		t.Fatalf("request real IPv6 listener: %v", err)
 	}
-	_ = connection.Close()
-	if err := app.Shutdown(); err != nil {
-		t.Fatalf("shutdown IPv6 listener: %v", err)
+	_, readErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read IPv6 health response: %v", readErr)
 	}
+	if closeErr != nil {
+		t.Fatalf("close IPv6 health response: %v", closeErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("IPv6 health status=%d want=%d", response.StatusCode, http.StatusOK)
+	}
+
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- app.Shutdown() }()
+	select {
+	case err := <-shutdownErr:
+		if err != nil {
+			t.Fatalf("shutdown IPv6 listener: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		_ = listener.Close()
+		t.Fatalf("shutdown IPv6 listener timed out")
+	}
+
 	select {
 	case err := <-listenErr:
 		if err != nil {

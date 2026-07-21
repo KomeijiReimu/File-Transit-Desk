@@ -453,35 +453,37 @@ onBeforeUnmount(() => {
         <div v-if="truncated" class="alert info listing-notice" role="status" aria-live="polite">
           {{ truncationMessage }}<template v-if="!hasMore"> 当前扫描范围已全部显示，但目录中可能仍有未扫描内容。</template>
         </div>
-        <table v-if="entries.length" id="files-list-table" class="data-table">
-          <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
-          <tbody>
-            <tr v-for="entry in entries" :key="entry.path || entry.name">
-              <td data-label="名称">
-                <button v-if="entryIsSafeDir(entry)" class="link-cell file-name" :disabled="loading" @click="openDir(entry)">
-                  <span class="file-type-ico folder" aria-hidden="true" />
-                  <span>{{ entry.name }}</span>
-                </button>
-                <span v-else class="file-name">
-                  <span class="file-type-ico" :class="entryVisualKind(entry)" aria-hidden="true" />
-                  <span>{{ entry.name }}</span>
-                </span>
-              </td>
-              <td data-label="大小">{{ entry.metadataKnown === false ? '未知' : entryIsDir(entry) ? '目录' : formatBytes(entry.size ?? undefined) }}</td>
-              <td data-label="修改时间">{{ entry.metadataKnown === false ? '未知' : formatDate(entry.modifiedAt || entry.mtime) }}</td>
-              <td data-label="操作">
-                <div class="row-actions">
-                  <button v-if="entryCanDownload(entry)" class="mini-btn" type="button" :disabled="loading || Boolean(downloadingPath)" @click="startDownload(entry)">
-                    {{ downloadingPath === (entry.path || joinPath(currentPath, entry.name)) ? '准备中…' : '下载' }}
+        <div v-if="entries.length" class="files-table-scroll">
+          <table id="files-list-table" class="data-table files-table">
+            <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="entry in entries" :key="entry.path || entry.name">
+                <td data-label="名称">
+                  <button v-if="entryIsSafeDir(entry)" class="link-cell file-name" :disabled="loading" @click="openDir(entry)">
+                    <span class="file-type-ico folder" aria-hidden="true" />
+                    <span>{{ entry.name }}</span>
                   </button>
-                  <RouterLink v-if="isAdmin && !loading && entryCanDownload(entry)" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('download', entry) }">创建分享</RouterLink>
-                  <RouterLink v-if="isAdmin && !loading && entryIsSafeDir(entry) && canUpload" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('upload', entry) }">上传分享</RouterLink>
-                  <span v-if="!hasEntryAction(entry)" class="muted-text">{{ entryUnavailableReason(entry) }}</span>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+                  <span v-else class="file-name">
+                    <span class="file-type-ico" :class="entryVisualKind(entry)" aria-hidden="true" />
+                    <span>{{ entry.name }}</span>
+                  </span>
+                </td>
+                <td data-label="大小">{{ entry.metadataKnown === false ? '未知' : entryIsDir(entry) ? '目录' : formatBytes(entry.size ?? undefined) }}</td>
+                <td data-label="修改时间">{{ entry.metadataKnown === false ? '未知' : formatDate(entry.modifiedAt || entry.mtime) }}</td>
+                <td class="actions files-actions-cell" data-label="操作">
+                  <div class="row-actions">
+                    <button v-if="entryCanDownload(entry)" class="mini-btn" type="button" :disabled="loading || Boolean(downloadingPath)" @click="startDownload(entry)">
+                      {{ downloadingPath === (entry.path || joinPath(currentPath, entry.name)) ? '准备中…' : '下载' }}
+                    </button>
+                    <RouterLink v-if="isAdmin && !loading && entryCanDownload(entry)" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('download', entry) }">创建分享</RouterLink>
+                    <RouterLink v-if="isAdmin && !loading && entryIsSafeDir(entry) && canUpload" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('upload', entry) }">上传分享</RouterLink>
+                    <span v-if="!hasEntryAction(entry)" class="muted-text">{{ entryUnavailableReason(entry) }}</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <EmptyState v-else-if="!loading && !truncated" title="当前路径为空" />
         <EmptyState v-else-if="!loading && truncated" title="扫描范围内没有可显示项目" description="目录中可能仍有未扫描内容；可调整服务端扫描范围后重试。" />
         <div v-if="showLoadMoreFooter" class="load-more-footer">
