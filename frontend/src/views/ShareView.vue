@@ -51,7 +51,7 @@ const reasonLabel = computed(() => {
 const headline = computed(() => {
   if (!info.value) return '正在准备分享…'
   if (!validFlag.value) return '分享已失效'
-  return isUpload.value ? '收件箱已就绪' : '文件已为你准备好'
+  return isUpload.value ? '上传文件' : '下载文件'
 })
 
 const usesLabel = computed(() => {

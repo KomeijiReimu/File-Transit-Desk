@@ -89,7 +89,6 @@ const selectedDir = computed(() => dirs.value.find((dir) => dir.id === selectedD
 const dirOptions = computed(() => dirs.value.map((dir) => ({
   label: dir.label || dir.name,
   value: dir.id,
-  hint: dir.description || dir.root || dir.id,
 })))
 const canUpload = computed(() => Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 // 返回浏览页时带回当前目录和上传路径，用户可直接检查刚上传的位置。

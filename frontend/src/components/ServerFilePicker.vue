@@ -614,7 +614,7 @@ onBeforeUnmount(() => {
                     </div>
                     <div v-if="loading" class="picker-table-state" role="row"><div role="cell" aria-colspan="5" class="state-block compact"><span class="loader" aria-hidden="true" /> 正在读取目录…</div></div>
                     <div v-if="!loading && !items.length && !truncated" class="picker-table-state" role="row"><div role="cell" aria-colspan="5" class="state-block compact">当前目录没有可显示的文件或文件夹。</div></div>
-                    <div v-else-if="!loading && !items.length && truncated" class="picker-table-state" role="row"><div role="cell" aria-colspan="5" class="empty-state compact"><strong>扫描范围内没有可显示项目</strong><small>目录中可能仍有未扫描内容。</small></div></div>
+                    <div v-else-if="!loading && !items.length && truncated" class="picker-table-state" role="row"><div role="cell" aria-colspan="5" class="empty-state compact"><strong>扫描范围内没有可显示项目</strong></div></div>
                   </div>
 
                   <div v-if="showLoadMoreFooter" class="load-more-footer picker-load-more-footer">
@@ -623,7 +623,6 @@ onBeforeUnmount(() => {
                       <button class="ghost-btn" type="button" :disabled="loading" @click="retryLoadPath">重试本页</button>
                     </div>
                     <div class="load-more-actions">
-                      <span class="muted-text">{{ listingSummary }}</span>
                       <button
                         v-if="!appendError"
                         ref="loadMoreButtonRef"

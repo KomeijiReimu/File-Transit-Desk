@@ -72,12 +72,6 @@ function statusLabel(item: TransferRecord) {
   return '下载中'
 }
 
-function observerNote(item: TransferRecord) {
-  if (item.totalBytes) return ''
-  if (item.bestEffort) return '下载走极速通道，进度可能稍后更新。'
-  return '后端暂未返回总量，正在持续观察传输状态。'
-}
-
 function speedOf(item: TransferRecord) {
   return formatSpeed(item.currentSpeedBps || item.averageSpeedBps)
 }
@@ -241,7 +235,6 @@ onUnmounted(() => {
               <div v-else class="upload-progress transfer-progress indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-label="`${fileTitle(item)} 正在观测传输状态`">
                 <span />
               </div>
-              <small v-if="observerNote(item)" class="transfer-note">{{ observerNote(item) }}</small>
             </div>
           </div>
 

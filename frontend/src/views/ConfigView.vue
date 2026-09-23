@@ -443,7 +443,6 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         <div><span>下载票据</span><strong>{{ Math.round((downloads?.leaseTTLSeconds || 0) / 60) }} 分钟</strong></div>
         <div><span>内容哈希阈值</span><strong>{{ downloads?.contentHashMaxMB }} MB</strong></div>
       </div>
-      <p class="muted-text">上传扩展名策略：允许 {{ storage?.allowedExtensions.length ? storage.allowedExtensions.join(', ') : '未设置白名单' }}；阻断 {{ storage?.blockedExtensions.join(', ') || '未设置黑名单' }}。</p>
     </section>
 
     <section v-if="configData" class="panel policy-panel upload-policy-editor">

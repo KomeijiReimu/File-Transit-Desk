@@ -52,7 +52,6 @@ const canUpload = computed(() => responseCanUpload.value ?? Boolean(selectedDir.
 const canDownload = computed(() => responseCanDownload.value ?? (selectedDir.value ? selectedDir.value.canDownload !== false && selectedDir.value.allowDownload !== false : false))
 const selectedIsFileResource = computed(() => selectedDir.value?.type === 'file')
 const crumbs = computed(() => [{ name: selectedDir.value?.name || '目录', path: '' }, ...currentPath.value.split('/').filter(Boolean).map((part, index, arr) => ({ name: part, path: arr.slice(0, index + 1).join('/') }))])
-const motionKey = computed(() => (!loading.value && dirs.value.length ? `${dirs.value.length}:${selectedDirId.value || 'none'}` : ''))
 const listingSummary = computed(() => {
   if (totalKnown.value && total.value !== null) return `共 ${total.value} 项 · 已显示 ${entries.value.length} 项`
   return `总数未知 · 已显示 ${entries.value.length} 项`
@@ -64,7 +63,7 @@ const truncationMessage = computed(() => {
 })
 const showLoadMoreFooter = computed(() => Boolean(entries.value.length && (hasMore.value || loadingMore.value || appendError.value || page.value > 1)))
 
-useGsapEntrance(pageRef, { refreshKey: () => motionKey.value })
+useGsapEntrance(pageRef)
 
 function tokenQuery(type: 'download' | 'upload', entry?: FileEntry) {
   const path = entry ? (entry.path || joinPath(currentPath.value, entry.name)) : currentPath.value
@@ -418,14 +417,8 @@ onBeforeUnmount(() => {
 
     <template v-if="selectedDir">
       <div class="panel dir-summary" data-motion>
-        <div>
-          <strong>{{ selectedDir.label || selectedDir.name }}</strong>
-          <p>{{ selectedDir.description || selectedDir.root || selectedDir.id }}</p>
-        </div>
         <div class="pill-row">
           <span class="pill" :class="selectedIsFileResource ? 'ok' : ''">{{ selectedIsFileResource ? '单文件' : '目录' }}</span>
-          <span class="pill" :class="canDownload ? 'ok' : 'muted'">{{ canDownload ? '允许下载' : '禁止下载' }}</span>
-          <span class="pill" :class="canUpload ? 'ok' : 'muted'">{{ canUpload ? '允许上传' : '禁止上传' }}</span>
         </div>
       </div>
 
@@ -485,7 +478,7 @@ onBeforeUnmount(() => {
           </table>
         </div>
         <EmptyState v-else-if="!loading && !truncated" title="当前路径为空" />
-        <EmptyState v-else-if="!loading && truncated" title="扫描范围内没有可显示项目" description="目录中可能仍有未扫描内容；可调整服务端扫描范围后重试。" />
+        <EmptyState v-else-if="!loading && truncated" title="扫描范围内没有可显示项目" />
         <div v-if="showLoadMoreFooter" class="load-more-footer">
           <div v-if="appendError" ref="appendErrorRef" class="alert error state-error" role="alert" tabindex="-1">
             <span>{{ appendError }}</span>

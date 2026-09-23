@@ -156,10 +156,6 @@ async function submit() {
 
 <template>
   <main id="main-content" class="login-page" tabindex="-1" data-route-focus>
-    <section class="login-hero">
-      <h1>安全访问文件传输台</h1>
-    </section>
-
     <section v-if="showUnavailableState" class="login-card login-unavailable-card" aria-labelledby="service-unavailable-title">
       <div class="login-unavailable-heading">
         <span class="login-unavailable-icon" aria-hidden="true">
@@ -171,7 +167,6 @@ async function submit() {
       </div>
 
       <div class="login-unavailable-copy">
-        <strong>登录状态尚未确认</strong>
         <p>网络连接或服务响应暂时中断。你的登录凭据可能仍然有效，无需立即重新输入密码或动态验证码。</p>
       </div>
 
@@ -192,7 +187,7 @@ async function submit() {
     </section>
 
     <form v-else class="login-card" @submit.prevent="submit">
-      <h2>{{ mode === 'totp' ? '登录文件传输台' : '管理员登录' }}</h2>
+      <h1>{{ mode === 'totp' ? '登录文件传输台' : '管理员登录' }}</h1>
 
       <div class="tabs" role="tablist" aria-label="登录方式">
         <button

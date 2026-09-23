@@ -332,12 +332,8 @@ onBeforeUnmount(feed.dispose)
       aria-labelledby="chat-page-title"
       :aria-busy="feed.initialLoading.value"
     >
-      <div class="chat-stage-bar">
-        <div class="chat-channel-mark">
-          <span class="chat-live-dot" :data-state="feed.connectionState.value" aria-hidden="true" />
-          <strong>聊天室</strong>
-        </div>
-        <div v-if="adminProjection" class="chat-bulk-toolbar" aria-label="聊天批量操作">
+      <div v-if="adminProjection" class="chat-stage-bar">
+        <div class="chat-bulk-toolbar" aria-label="聊天批量操作">
           <span class="chat-selection-count">已选 {{ feed.selectedCount.value }}</span>
           <button class="ghost-btn" type="button" :disabled="destructiveBusy || feed.selectedCount.value < 1" @click="requestBulkAction('batch-delete')">删除所选</button>
           <button class="ghost-btn danger" type="button" :disabled="destructiveBusy || !feed.initialized.value || feed.messages.value.length < 1" @click="requestBulkAction('clear')">清空全部</button>

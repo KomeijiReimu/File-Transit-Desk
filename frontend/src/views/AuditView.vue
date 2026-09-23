@@ -175,7 +175,7 @@ function statusText(log: AuditLog) {
         <GlassSelect v-model="status" :options="statusOptions" aria-label="筛选访问记录状态" />
       </label>
       <button class="ghost-btn" type="button" :disabled="loading && !hasFilters" @click="clearFilters">清空筛选</button>
-      <p class="filter-scope-note">筛选覆盖全部审计记录，支持动作代码、IP 和详情；界面中的中文动作名称不参与关键词匹配。</p>
+      <p class="filter-scope-note">中文动作名称不参与关键词匹配。</p>
     </div>
 
     <div v-if="displaysCurrentFilter && total > 0" class="panel pagination-bar">

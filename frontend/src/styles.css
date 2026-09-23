@@ -191,7 +191,7 @@ small, .muted-text { color: var(--muted); }
 .content > * { position: relative; z-index: 1; }
 .page-stack { display: grid; gap: clamp(18px, 2.2vw, 28px); max-width: 1200px; margin: 0 auto; }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-.page-header h1, .login-hero h1, .share-card h1 { margin: 0; font-family: "Songti SC", "Noto Serif CJK SC", serif; font-size: clamp(34px, 5vw, 62px); line-height: 1.04; text-wrap: balance; }
+.page-header h1, .share-card h1 { margin: 0; font-family: "Songti SC", "Noto Serif CJK SC", serif; font-size: clamp(34px, 5vw, 62px); line-height: 1.04; text-wrap: balance; }
 .page-header { display: grid; gap: 10px; }
 .muted-text, .empty-state p, .alert { text-wrap: pretty; }
 .split { display: flex; justify-content: space-between; align-items: end; gap: 18px; }
@@ -210,17 +210,15 @@ small, .muted-text { color: var(--muted); }
 .full { width: 100%; }
 
 /* ---------------- Login ---------------- */
-.login-page { position: relative; min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 430px); align-items: center; gap: clamp(34px, 6vw, 72px); padding: clamp(24px, 8vw, 112px); overflow: hidden; outline: none; }
+.login-page { position: relative; min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: minmax(360px, 430px); justify-content: center; align-items: center; padding: clamp(24px, 8vw, 112px); overflow: hidden; outline: none; }
 .login-page::before { content: ''; position: absolute; inset: auto auto -10% -8%; width: clamp(280px, 38vw, 520px); height: clamp(280px, 38vw, 520px); background: radial-gradient(circle, rgba(255,184,77,.22), transparent 62%); filter: blur(40px); pointer-events: none; z-index: 0; }
 .login-page::after { content: ''; position: absolute; inset: -8% -8% auto auto; width: clamp(240px, 30vw, 460px); height: clamp(240px, 30vw, 460px); background: radial-gradient(circle, rgba(94,224,198,.18), transparent 62%); filter: blur(40px); pointer-events: none; z-index: 0; }
 .login-page > * { position: relative; z-index: 1; }
 .login-card { border: 1px solid var(--line); border-radius: 34px; padding: clamp(24px, 3vw, 36px); background: rgba(255,255,255,.10); box-shadow: var(--shadow); display: grid; gap: 22px; backdrop-filter: blur(28px); }
-.login-card h2 { margin: 0; font-family: "Songti SC", "Noto Serif CJK SC", serif; font-size: 30px; line-height: 1.15; }
+.login-card h1 { margin: 0; font-family: "Songti SC", "Noto Serif CJK SC", serif; font-size: 30px; line-height: 1.15; }
 .login-card .tabs { display: grid; grid-template-columns: 1fr 1fr; padding: 4px; gap: 4px; background: rgba(0,0,0,.25); border: 1px solid var(--line); border-radius: 14px; }
 .login-card .tab { min-height: 44px; background: transparent; border: 0; color: var(--muted); border-radius: 11px; padding: 10px; font-weight: 700; transition: background var(--motion), color var(--motion); }
 .login-card .tab.active { background: linear-gradient(135deg, rgba(255,184,77,.22), rgba(94,224,198,.18)); color: var(--text); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
-.login-hero { display: grid; gap: 14px; max-width: 680px; }
-.login-hero h1 { font-size: clamp(36px, 5.6vw, 68px); }
 .login-fields { display: grid; gap: 18px; }
 
 /* ---------------- Alerts ---------------- */
@@ -450,7 +448,6 @@ small, .muted-text { color: var(--muted); }
 .transfer-progress-head small { color: var(--muted); font-variant-numeric: tabular-nums; }
 .transfer-progress { height: 12px; }
 .transfer-progress.indeterminate span { width: 42%; min-width: 120px; animation: transfer-pulse 1.5s ease-in-out infinite; }
-.transfer-note { color: var(--muted); line-height: 1.5; }
 .transfer-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-content: stretch; }
 .transfer-metrics div { min-width: 0; display: grid; gap: 5px; padding: 12px; border: 1px solid rgba(255,255,255,.09); border-radius: 16px; background: rgba(255,255,255,.045); }
 .transfer-metrics span { color: var(--muted); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
@@ -708,15 +705,10 @@ code { color: var(--accent); background: rgba(0,0,0,.22); border-radius: 8px; pa
   gap: 20px;
   flex-wrap: wrap;
 }
-.chat-channel-mark { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.chat-channel-mark strong { font-family: "Songti SC", "Noto Serif CJK SC", serif; font-size: 17px; }
 .chat-bulk-toolbar { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .chat-bulk-toolbar .ghost-btn { min-height: 44px; padding: 9px 12px; }
 .chat-selection-count { min-height: 32px; display: inline-flex; align-items: center; padding: 5px 9px; border-radius: 999px; color: var(--accent-2); background: rgba(94,224,198,.11); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .chat-bulk-error { flex: 0 0 auto; margin: 10px 12px 0; padding: 10px 13px; border: 1px solid rgba(255,107,122,.28); border-radius: 14px; color: #ffd5da; background: rgba(255,107,122,.11); font-size: 13px; line-height: 1.45; }
-.chat-live-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 999px; background: var(--success); box-shadow: 0 0 0 6px rgba(115,227,156,.10); }
-.chat-live-dot[data-state="interrupted"] { background: var(--danger); box-shadow: 0 0 0 6px rgba(255,107,122,.10); }
-.chat-live-dot[data-state="loading"] { background: var(--accent); box-shadow: 0 0 0 6px rgba(255,184,77,.10); }
 
 .chat-sync-warning,
 .chat-refresh-notice {
