@@ -218,10 +218,10 @@ def main():
                 if "[运行] 前后端已就绪" in (work / "interrupt.log").read_text(encoding="utf-8"):
                     break
                 if process.poll() is not None:
-                    raise AssertionError(("exited before runtime", process.returncode))
+                    raise AssertionError(("exited before runtime", process.returncode, (work / "interrupt.log").read_text(encoding="utf-8")))
                 time.sleep(0.1)
             else:
-                raise AssertionError("graceful fixture never became ready")
+                raise AssertionError(("graceful fixture never became ready", (work / "interrupt.log").read_text(encoding="utf-8")))
             if args.powershell:
                 subprocess.run([sys.executable, "-c", CONSOLE_INTERRUPT, str(process.pid)], env=graceful_env, check=True, timeout=5)
             else:
