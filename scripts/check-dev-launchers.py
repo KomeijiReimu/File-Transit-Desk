@@ -215,7 +215,7 @@ def main():
         try:
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:
-                if "[运行] 前后端已就绪" in (work / "interrupt.log").read_text(encoding="utf-8"):
+                if "Ctrl+C" in (work / "interrupt.log").read_text(encoding="utf-8"):
                     break
                 if process.poll() is not None:
                     raise AssertionError(("exited before runtime", process.returncode, (work / "interrupt.log").read_text(encoding="utf-8")))

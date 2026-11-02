@@ -95,7 +95,7 @@ exit $LASTEXITCODE
   if ($Name -eq 'backend') {
     $Spec.backendPidPath = Join-Path $RunDir 'backend.pid'
   }
-  $Process.StandardInput.WriteLine(($Spec | ConvertTo-Json -Compress))
+  $Process.StandardInput.WriteLine(($Spec | ConvertTo-Json -Compress -EscapeHandling EscapeNonAscii))
   $Process.StandardInput.Close()
   return $Owner
 }
