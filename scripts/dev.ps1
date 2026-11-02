@@ -35,8 +35,8 @@ if (-not (Test-Path -LiteralPath $BackendConfigPath -PathType Leaf)) {
   Write-Host '配置完成后，请使用本次相同的启动参数重新运行。'
   exit 1
 }
-$Go = (Get-Command go -CommandType Application -ErrorAction Stop).Source
-$Bun = (Get-Command bun -CommandType Application -ErrorAction Stop).Source
+$Go = (Get-Command go -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$Bun = (Get-Command bun -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $ArtifactRoot = if ($env:TMPDIR) { [IO.Path]::GetFullPath($env:TMPDIR, $RootDir) } else { Join-Path $RootDir '.opencode/dev' }
 $RunDir = Join-Path $ArtifactRoot ('file-trans-dev-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
@@ -103,8 +103,8 @@ exit $LASTEXITCODE
 function Save-ProcessLog {
   param($Owner)
   if (-not $Owner.Saved -and $Owner.Out) {
-    $Owner.Out.GetAwaiter().GetResult()
-    $Owner.Err.GetAwaiter().GetResult()
+    [void]$Owner.Out.GetAwaiter().GetResult()
+    [void]$Owner.Err.GetAwaiter().GetResult()
     $Owner.Stdout.Dispose()
     $Owner.Stderr.Dispose()
     $Owner.Saved = $true
