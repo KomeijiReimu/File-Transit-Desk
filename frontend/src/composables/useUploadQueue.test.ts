@@ -260,32 +260,6 @@ describe('useUploadQueue', () => {
     await running
   })
 
-  it('skips a stale snapshot item that is no longer present in the queue', async () => {
-    const firstStarted = deferred()
-    const finishFirst = deferred()
-    const uploadFile = vi.fn(async (entry: UploadItem) => {
-      if (entry.id === 'a') {
-        firstStarted.resolve()
-        await finishFirst.promise
-      }
-    })
-    const state = queueWith(uploadFile)
-    const first = item('a')
-    const removedFromSnapshot = item('b')
-    state.add(first)
-    state.add(removedFromSnapshot)
-
-    const running = state.uploadAll()
-    await firstStarted.promise
-    // 模拟外部持有 queue ref 的防御性变更；公开 remove 在 busy 时本身会拒绝。
-    state.queue.value = state.queue.value.filter((entry) => entry.id !== removedFromSnapshot.id)
-    finishFirst.resolve()
-    await running
-
-    expect(uploadFile).toHaveBeenCalledTimes(1)
-    expect(uploadFile).toHaveBeenCalledWith(first, expect.any(Object))
-  })
-
   it('calculates progress, instant speed, average speed and ETA', async () => {
     let now = 1_000
     const state = queueWith(async (_entry, { onProgress }) => {

@@ -60,7 +60,7 @@ async function mountView() {
   return wrapper
 }
 
-describe('FilesView responsive file actions', () => {
+describe('FilesView file actions', () => {
   beforeEach(() => {
     viewMocks.route.name = 'files'
     viewMocks.route.query = {}
@@ -87,7 +87,9 @@ describe('FilesView responsive file actions', () => {
     viewMocks.createDownloadLease.mockReset().mockResolvedValue({ url: '/t/download' })
   })
 
-  it('keeps a long file name and the ordinary-user download action inside the responsive table structure', async () => {
+  it.each([false, true])('downloads a listed file with administrator=%s and gates sharing by role', async (admin) => {
+    viewMocks.authState!.admin = admin
+    if (admin) viewMocks.dirs.mockResolvedValue([{ id: 'shared', name: 'Shared', type: 'file', canDownload: true, canUpload: false }])
     const longName = `${'季度归档与跨区域同步记录-'.repeat(10)}最终版本.tar.zst`
     viewMocks.listFiles.mockResolvedValue({
       entries: [{
@@ -107,72 +109,17 @@ describe('FilesView responsive file actions', () => {
 
     const wrapper = await mountView()
 
-    expect(wrapper.find('.files-table-scroll').exists()).toBe(true)
-    expect(wrapper.get('#files-list-table').classes()).toContain('files-table')
-    expect(wrapper.get('.file-name > span:last-child').text()).toBe(longName)
-    const actionCell = wrapper.get('td[data-label="操作"]')
-    expect(actionCell.classes()).toEqual(expect.arrayContaining(['actions', 'files-actions-cell']))
-    const actions = actionCell.findAll('.mini-btn')
-    expect(actions.map((action) => action.text())).toEqual(['下载'])
-    expect(actions[0].attributes('disabled')).toBeUndefined()
-    wrapper.unmount()
-  })
-
-  it('renders the administrator download and share controls together in the stable action cell', async () => {
-    viewMocks.authState!.admin = true
-    viewMocks.listFiles.mockResolvedValue({
-      entries: [{
-        name: 'release.iso',
-        path: 'release.iso',
-        type: 'file',
-        size: 4_096,
-        modifiedAt: '2026-07-21T10:00:00Z',
-        metadataKnown: true,
-        downloadable: true,
-      }],
-      canDownload: true,
-      canUpload: true,
-      totalKnown: true,
-      total: 1,
-    })
-
-    const wrapper = await mountView()
-    const actionCell = wrapper.get('td.files-actions-cell.actions')
-
-    expect(actionCell.findAll('.mini-btn').map((action) => action.text())).toEqual(['下载', '创建分享'])
-    expect(actionCell.get('button').attributes('disabled')).toBeUndefined()
-    wrapper.unmount()
-  })
-
-  it('keeps a single-file resource downloadable through the same responsive action layout', async () => {
-    viewMocks.dirs.mockResolvedValue([{
-      id: 'single-file',
-      name: 'single-file',
-      label: '单文件资源',
-      type: 'file',
-      canDownload: true,
-      canUpload: false,
-    }])
-    viewMocks.listFiles.mockResolvedValue({
-      entries: [{
-        name: 'single-file.bin',
-        path: 'single-file.bin',
-        type: 'file',
-        size: 2_048,
-        metadataKnown: true,
-        downloadable: true,
-      }],
-      canDownload: true,
-      canUpload: false,
-      totalKnown: true,
-      total: 1,
-    })
-
-    const wrapper = await mountView()
-
-    expect(wrapper.get('.dir-summary .pill').text()).toBe('单文件')
-    expect(wrapper.get('td.files-actions-cell').text()).toContain('下载')
-    expect(wrapper.get('td.files-actions-cell .mini-btn').attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).toContain(longName)
+    const share = wrapper.findAllComponents(RouterLinkStub).find((link) => link.props('to')?.name === 'tokens')
+    expect(Boolean(share)).toBe(admin)
+    if (admin) expect(share!.props('to')).toEqual({ name: 'tokens', query: { type: 'download', dirId: 'shared', path: longName } })
+    const download = wrapper.findAll('button').find((button) => button.text() === '下载')!
+    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {})
+    await download.trigger('click')
+    await flushPromises()
+    expect(viewMocks.createDownloadLease).toHaveBeenCalledWith('shared', longName)
+    expect(assign).toHaveBeenCalledWith(expect.stringContaining('/t/download'))
+    assign.mockRestore()
     wrapper.unmount()
   })
 })

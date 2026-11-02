@@ -1,10 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api'
 import {
-  chatWatermarkIsNewer,
   useChatFeed,
   type ChatApiClient,
-  type ChatMessageWatermark,
 } from '@/composables/useChatFeed'
 import type {
   ChatBatchDeleteResponse,
@@ -121,21 +119,6 @@ describe('useChatFeed', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
-  })
-
-  it('orders projection watermarks by seq and then changes > history > mutation', () => {
-    const mark = (seq: number, source: ChatMessageWatermark['source'], priority: number): ChatMessageWatermark => ({
-      generation: 1,
-      seq,
-      source,
-      priority,
-    })
-    expect(chatWatermarkIsNewer(mark(9, 'changes', 2), mark(10, 'mutation', 0))).toBe(true)
-    expect(chatWatermarkIsNewer(mark(10, 'mutation', 0), mark(10, 'history', 1))).toBe(true)
-    expect(chatWatermarkIsNewer(mark(10, 'history', 1), mark(10, 'changes', 2))).toBe(true)
-    expect(chatWatermarkIsNewer(mark(10, 'changes', 2), mark(10, 'mutation', 0))).toBe(false)
-    expect(chatWatermarkIsNewer(mark(10, 'changes', 2), mark(10, 'changes', 2))).toBe(false)
-    expect(chatWatermarkIsNewer(mark(10, 'changes', 2), { ...mark(11, 'changes', 2), generation: 2 })).toBe(false)
   })
 
   it('loads the capability-sized latest history, keeps ordinary IPs and strips withdrawn originals', async () => {

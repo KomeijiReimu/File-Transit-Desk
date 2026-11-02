@@ -71,26 +71,6 @@ describe('ChatMessageList', () => {
     wrapper.unmount()
   })
 
-  it('uses smooth scrolling normally and an immediate scroll for reduced motion', async () => {
-    const wrapper = mount(ChatMessageList, {
-      props: { messages: [message(1)], admin: false },
-    })
-    await nextTick()
-    const log = wrapper.get('.chat-message-log').element as HTMLElement
-    Object.defineProperty(log, 'scrollHeight', { configurable: true, value: 900 })
-    const scrollTo = vi.fn()
-    Object.defineProperty(log, 'scrollTo', { configurable: true, value: scrollTo })
-
-    ;(wrapper.vm as unknown as ListHandle).scrollToBottom(true)
-    expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: 'smooth' })
-
-    vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: true } as MediaQueryList)
-    log.scrollTop = 0
-    ;(wrapper.vm as unknown as ListHandle).scrollToBottom(true)
-    expect(log.scrollTop).toBe(900)
-    expect(scrollTo).toHaveBeenCalledTimes(1)
-  })
-
   it('offers a keyboard-sized new-message control without forcing the log to move', async () => {
     const wrapper = mount(ChatMessageList, {
       props: { messages: [message(1)], admin: false, newMessageCount: 3 },

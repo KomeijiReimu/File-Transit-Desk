@@ -14,12 +14,13 @@ const route = useRoute()
 const tokenParam = computed(() => String(route.params.token || ''))
 
 const info = ref<TokenInfo | null>(null)
+const confirmedTokenType = ref<TokenInfo['type']>()
 const loading = ref(true)
 const error = ref('')
 const downloading = ref(false)
 const batchNotice = ref('')
 
-const tokenType = computed(() => info.value?.type || info.value?.kind || 'download')
+const tokenType = computed(() => info.value?.type || info.value?.kind || confirmedTokenType.value)
 const isUpload = computed(() => tokenType.value === 'upload')
 const isDownload = computed(() => tokenType.value === 'download')
 
@@ -51,14 +52,15 @@ const reasonLabel = computed(() => {
 const headline = computed(() => {
   if (!info.value) return '正在准备分享…'
   if (!validFlag.value) return '分享已失效'
-  return isUpload.value ? '上传文件' : '下载文件'
+  return isUpload.value ? '发送文件' : (info.value.path?.split('/').filter(Boolean).pop() || info.value.dirName || '下载文件')
 })
 
 const usesLabel = computed(() => {
   if (!info.value) return ''
-  const used = info.value.uses ?? info.value.used ?? 0
+  const used = info.value.uses ?? info.value.used
   const max = info.value.maxUses
-  if (!max || max <= 0) return `已使用 ${used} 次 · 不限次数`
+  if (used === undefined || max === undefined) return ''
+  if (max <= 0) return `已使用 ${used} 次 · 不限次数`
   return `已使用 ${used} / ${max} 次`
 })
 const remainingUploadBytes = computed(() => {
@@ -79,6 +81,7 @@ async function loadInfo() {
   error.value = ''
   try {
     info.value = await api.publicTokenInfo(tokenParam.value)
+    confirmedTokenType.value = info.value.type || info.value.kind || confirmedTokenType.value
     uploadedBytesSinceInfo.value = 0
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '链接信息获取失败。'
@@ -145,17 +148,18 @@ const {
     )
     info.value = refreshed
   },
-  onBatchFinished: ({ stopped, succeeded, failed, queue }) => {
-    if (!stopped && succeeded > 0 && failed === 0 && !queue.some((item) => item.status === 'queued')) {
-      batchNotice.value = `上传完成，共 ${succeeded} 个文件。你可以继续追加文件，或直接关闭此页面。`
-    } else if (succeeded > 0 && failed > 0) {
-      batchNotice.value = `已上传 ${succeeded} 个文件，另有 ${failed} 个文件需要重试。`
+  shouldStopBatch: (_item, queue) => !validFlag.value && queue.some((item) => item.status === 'queued' || item.status === 'error'),
+  onBatchFinished: ({ stopped, succeeded, failed, pending }) => {
+    if (!stopped && succeeded > 0 && failed === 0 && pending === 0) {
+      batchNotice.value = `上传完成，共 ${succeeded} 个文件。`
+    } else if (succeeded > 0 && pending > 0) {
+      batchNotice.value = `已上传 ${succeeded} 个文件，另有 ${pending} 个文件未完成。`
     }
   },
 })
 
 function pickFiles() {
-  if (uploadBusy.value) return
+  if (!validFlag.value || uploadBusy.value) return
   fileInput.value?.click()
 }
 
@@ -245,7 +249,7 @@ function beforeUnload(event: BeforeUnloadEvent) {
 }
 
 async function uploadAll() {
-  if (uploadBusy.value) return
+  if (!validFlag.value || uploadBusy.value) return
   batchNotice.value = ''
   await runUploadAll()
 }
@@ -273,34 +277,17 @@ onUnmounted(() => {
       <StateBlock :loading="loading" :error="error" :retry-label="!info ? '重新加载' : ''" @retry="loadInfo" />
 
       <article v-if="info" class="share-card" :data-kind="tokenType">
-        <div class="share-card-glow" aria-hidden="true" />
-        <h1>{{ headline }}</h1>
-
-        <dl class="share-meta">
-          <div>
-            <dt>目录</dt>
-            <dd>{{ info.dirName || info.dir || info.dirId || '—' }}</dd>
-          </div>
-          <div>
-            <dt>路径</dt>
-            <dd><code>{{ info.path || '/' }}</code></dd>
-          </div>
-          <div>
-            <dt>到期时间</dt>
-            <dd>{{ formatDate(info.expiresAt) }}</dd>
-          </div>
-          <div>
-            <dt>使用情况</dt>
-            <dd>{{ usesLabel }}</dd>
-          </div>
-        </dl>
+        <div class="share-file-heading">
+          <span class="share-file-icon" :class="{ unavailable: !validFlag }"><AppIcon :name="!validFlag ? 'alert-triangle' : isUpload ? 'inbox' : 'file'" :size="28" /></span>
+          <h1>{{ headline }}</h1>
+        </div>
 
         <!-- Download mode -->
         <template v-if="isDownload">
           <div v-if="validFlag" class="share-actions">
             <button class="primary-btn big" type="button" :disabled="downloading" @click="startPublicDownload">
               <AppIcon name="download" :size="20" />
-              {{ downloading ? '准备下载…' : '立即下载' }}
+              {{ downloading ? '准备下载…' : '下载文件' }}
             </button>
           </div>
           <div v-else class="alert error" role="alert">{{ reasonLabel }}</div>
@@ -311,14 +298,14 @@ onUnmounted(() => {
           <template v-if="validFlag">
             <section
               class="dropzone"
-              :class="{ over: dragOver }"
+              :class="{ over: dragOver, 'has-files': queue.length > 0 }"
               aria-label="文件拖放区域"
               @dragover="onDragOver"
               @dragleave="dragOver = false"
               @drop="onDrop"
             >
               <div class="dropzone-symbol" aria-hidden="true"><span /></div>
-              <strong>把文件拖到这里</strong>
+              <strong>将文件拖到这里</strong>
               <button class="upload-btn" type="button" :disabled="uploadBusy" @click="pickFiles">选择文件</button>
               <input ref="fileInput" class="visually-hidden" type="file" multiple :disabled="uploadBusy" @change="onFileChange" />
             </section>
@@ -330,7 +317,22 @@ onUnmounted(() => {
               <div><span>文件类型</span><strong>{{ extensionPolicyLabel }}</strong></div>
             </div>
 
-            <div v-if="batchNotice" class="alert success" role="status" aria-live="polite">{{ batchNotice }}</div>
+          </template>
+          <div v-else class="alert error" role="alert">{{ reasonLabel }}</div>
+
+            <div v-if="batchNotice" class="alert" :class="queue.every((item) => item.status === 'success') ? 'success' : 'info'" role="status" aria-live="polite">{{ batchNotice }}</div>
+
+            <div v-if="queue.length" class="share-actions share-upload-actions">
+              <div class="upload-summary share-upload-summary">
+                <div>
+                  <strong>{{ uploading ? `上传中 ${overallProgress}%` : finishedCount ? `已完成 ${finishedCount} / ${queue.length}` : `${queue.length} 个文件` }}</strong>
+                  <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
+                </div>
+                <div class="upload-progress wide" role="progressbar" :aria-valuenow="overallProgress" aria-valuemin="0" aria-valuemax="100" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
+                <button v-if="validFlag" class="primary-btn" type="button" :disabled="!hasPendingUploads || uploadBusy" @click="uploadAll">{{ uploading ? '上传中…' : '开始上传' }}</button>
+                <button v-if="uploading" class="ghost-btn danger" type="button" @click="cancelCurrentUpload">取消当前上传</button>
+              </div>
+            </div>
 
             <ul v-if="queue.length" class="upload-queue">
               <li v-for="item in queue" :key="item.id" :data-status="item.status">
@@ -350,34 +352,28 @@ onUnmounted(() => {
                   </small>
                 </div>
                 <div class="q-actions">
-                  <button v-if="item.status === 'error'" class="mini-btn" type="button" :disabled="uploadBusy" @click="retryItem(item)">重试</button>
+                  <button v-if="validFlag && item.status === 'error'" class="mini-btn" type="button" :disabled="uploadBusy" @click="retryItem(item)">重试</button>
                   <button v-if="item.status === 'uploading'" class="mini-btn danger" type="button" @click="cancelUpload(item)">取消上传</button>
                   <button v-if="item.status !== 'uploading'" class="mini-btn danger" type="button" :disabled="uploadBusy" @click="removeItem(item.id)">移除</button>
                 </div>
               </li>
             </ul>
-
-            <div class="share-actions">
-              <div v-if="queue.length" class="upload-summary share-upload-summary">
-                <div>
-                  <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${queue.length}` }}</strong>
-                  <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
-                </div>
-                <div class="upload-progress wide" role="progressbar" :aria-valuenow="overallProgress" aria-valuemin="0" aria-valuemax="100" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
-              </div>
-              <button class="primary-btn big" type="button" :disabled="!hasPendingUploads || uploadBusy" @click="uploadAll">
-                {{ uploading ? '上传中…' : '开始上传' }}
-              </button>
-              <button v-if="uploading" class="ghost-btn danger" type="button" @click="cancelCurrentUpload">终止当前上传</button>
-              <button class="ghost-btn" type="button" :disabled="uploadBusy" @click="pickFiles">追加文件</button>
-            </div>
-          </template>
-          <div v-else class="alert error" role="alert">{{ reasonLabel }}</div>
         </template>
 
+        <div v-else-if="!validFlag" class="alert error" role="alert">{{ reasonLabel }}</div>
         <template v-else>
           <EmptyState title="未知链接类型" description="无法判断该分享的用途，请确认链接是否完整。" />
         </template>
+        <footer v-if="info.expiresAt || usesLabel || info.dirName || info.dir || info.dirId || info.path" class="share-footer">
+          <dl v-if="info.expiresAt || usesLabel" class="share-meta">
+            <div v-if="info.expiresAt"><dt>有效期至</dt><dd>{{ formatDate(info.expiresAt) }}</dd></div>
+            <div v-if="usesLabel"><dt>使用情况</dt><dd>{{ usesLabel }}</dd></div>
+          </dl>
+          <details v-if="info.dirName || info.dir || info.dirId || info.path" class="share-location">
+            <summary>{{ isUpload ? '查看保存位置' : '查看文件位置' }}</summary>
+            <dl class="share-meta"><div><dt>共享位置</dt><dd>{{ info.dirName || info.dir || info.dirId || '—' }}</dd></div><div><dt>路径</dt><dd><code>{{ info.path || '/' }}</code></dd></div></dl>
+          </details>
+        </footer>
       </article>
     </div>
   </main>

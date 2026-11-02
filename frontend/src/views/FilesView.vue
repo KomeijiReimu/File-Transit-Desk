@@ -37,7 +37,6 @@ const truncated = ref(false)
 const totalKnown = ref(false)
 const total = ref<number | null>(null)
 const scannedEntries = ref(0)
-const scanLimit = ref(0)
 const failedAppendRequest = ref<{ page: number; pageSize: number } | null>(null)
 const liveMessage = ref('')
 const listStateRef = ref<HTMLElement | null>(null)
@@ -50,16 +49,15 @@ const loadMoreButtonRef = ref<HTMLButtonElement | null>(null)
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === selectedDirId.value))
 const canUpload = computed(() => responseCanUpload.value ?? Boolean(selectedDir.value?.canUpload ?? selectedDir.value?.allowUpload))
 const canDownload = computed(() => responseCanDownload.value ?? (selectedDir.value ? selectedDir.value.canDownload !== false && selectedDir.value.allowDownload !== false : false))
-const selectedIsFileResource = computed(() => selectedDir.value?.type === 'file')
 const crumbs = computed(() => [{ name: selectedDir.value?.name || '目录', path: '' }, ...currentPath.value.split('/').filter(Boolean).map((part, index, arr) => ({ name: part, path: arr.slice(0, index + 1).join('/') }))])
 const listingSummary = computed(() => {
-  if (totalKnown.value && total.value !== null) return `共 ${total.value} 项 · 已显示 ${entries.value.length} 项`
-  return `总数未知 · 已显示 ${entries.value.length} 项`
+  if (totalKnown.value && total.value !== null) return entries.value.length === total.value ? `${total.value} 项` : `已显示 ${entries.value.length} / ${total.value} 项`
+  return `已显示 ${entries.value.length} 项`
 })
 const truncationMessage = computed(() => {
-  const scanned = scannedEntries.value || scanLimit.value
-  if (scanned > 0) return `服务端最多扫描了前 ${scanned} 个目录项；当前列表只包含其中可显示的结果，未扫描部分不计入。`
-  return '目录内容超过服务端扫描窗口；当前列表只包含已扫描范围内的结果，未扫描部分不计入。'
+  const scanned = scannedEntries.value
+  if (scanned > 0) return `当前列表仅覆盖已扫描的 ${scanned} 项，文件夹仍有未显示内容。`
+  return '当前列表未覆盖整个文件夹，仍有内容未显示。'
 })
 const showLoadMoreFooter = computed(() => Boolean(entries.value.length && (hasMore.value || loadingMore.value || appendError.value || page.value > 1)))
 
@@ -71,6 +69,7 @@ function tokenQuery(type: 'download' | 'upload', entry?: FileEntry) {
 }
 
 function hasEntryAction(entry: FileEntry) {
+  if (entryIsSafeDir(entry)) return true
   if (entryCanDownload(entry)) return true
   if (isAdmin.value && entryIsSafeDir(entry) && canUpload.value) return true
   return false
@@ -101,12 +100,12 @@ function entryVisualKind(entry: FileEntry) {
 }
 
 function entryUnavailableReason(entry: FileEntry) {
-  if (entry.metadataKnown === false) return '元数据不可用'
+  if (entry.metadataKnown === false) return '无法读取文件信息'
   if (entry.type === 'unknown' || entry.type === 'other') return '类型无法识别'
   if (entryIsDir(entry)) {
     if (entry.symlink) return '符号链接不可进入'
     if (entry.selectable === false) return '当前目录不可进入'
-    if (entryIsSafeDir(entry)) return '可从名称进入'
+    if (entryIsSafeDir(entry)) return ''
     return '目录不可用'
   }
   if (!canDownload.value) return '当前资源禁止下载'
@@ -121,7 +120,6 @@ function resetPagination() {
   totalKnown.value = false
   total.value = null
   scannedEntries.value = 0
-  scanLimit.value = 0
   effectivePageSize.value = defaultPageSize
   failedAppendRequest.value = null
   loadingMore.value = false
@@ -206,13 +204,12 @@ async function loadFiles(nextPage = 1, append = false, pageSizeOverride?: number
     totalKnown.value = result.totalKnown === true
     total.value = typeof result.total === 'number' ? result.total : null
     scannedEntries.value = result.scannedEntries ?? entries.value.length
-    scanLimit.value = result.scanLimit ?? 0
     failedAppendRequest.value = null
     responseCanUpload.value = typeof result.canUpload === 'boolean' ? result.canUpload : null
     responseCanDownload.value = typeof result.canDownload === 'boolean' ? result.canDownload : null
     if (append) {
       const addedCount = Math.max(0, entries.value.length - previousCount)
-      liveMessage.value = `已新增 ${addedCount} 项，当前共显示 ${entries.value.length} 项。${hasMore.value ? '' : '已全部加载。'}`
+      liveMessage.value = `已新增 ${addedCount} 项，当前共显示 ${entries.value.length} 项。${hasMore.value ? '' : truncated.value ? '扫描范围内的项目已显示，文件夹仍有未显示内容。' : '已全部加载。'}`
       if (appendTriggeredFromControls) focusTarget = hasMore.value ? 'load-more' : 'summary'
     } else if (shouldFocusSummary) {
       focusTarget = 'summary'
@@ -303,17 +300,13 @@ async function dismissActionError() {
   listSummaryRef.value?.focus()
 }
 
-function resourceDescription(dir: DirectoryInfo) {
-  return dir.description || dir.root || dir.id
-}
-
 function resourcePermissionLabel(dir: DirectoryInfo) {
   const upload = Boolean(dir.canUpload ?? dir.allowUpload)
   const download = dir.canDownload !== false && dir.allowDownload !== false
   if (upload && download) return '可上传 · 可下载'
   if (upload) return '可上传'
   if (download) return '可下载'
-  return '只读配置'
+  return '不可上传或下载'
 }
 
 async function startDownload(entry: FileEntry) {
@@ -382,7 +375,8 @@ onBeforeUnmount(() => {
 <template>
   <section ref="pageRef" class="page-stack files-page">
     <header class="page-header split">
-      <h1>文件浏览</h1>
+      <h1>文件</h1>
+      <RouterLink v-if="canUpload && selectedDir && !loading" class="primary-btn" :to="{ name: 'upload', query: { dirId: selectedDirId, path: currentPath } }">上传文件</RouterLink>
     </header>
 
     <div v-if="loading || listError" ref="listStateRef" class="list-state-anchor" :tabindex="listError ? -1 : undefined">
@@ -407,7 +401,6 @@ onBeforeUnmount(() => {
         <span class="resource-icon" aria-hidden="true"><span /></span>
         <span class="resource-copy">
           <strong>{{ dir.label || dir.name }}</strong>
-          <small v-if="resourceDescription(dir)">{{ resourceDescription(dir) }}</small>
           <small>{{ resourcePermissionLabel(dir) }}</small>
         </span>
       </button>
@@ -416,20 +409,13 @@ onBeforeUnmount(() => {
     <EmptyState v-if="!loading && dirs.length && !selectedDir" title="请选择共享位置" />
 
     <template v-if="selectedDir">
-      <div class="panel dir-summary" data-motion>
-        <div class="pill-row">
-          <span class="pill" :class="selectedIsFileResource ? 'ok' : ''">{{ selectedIsFileResource ? '单文件' : '目录' }}</span>
-        </div>
-      </div>
-
       <div class="toolbar panel" data-motion>
         <nav class="breadcrumbs" aria-label="面包屑">
-          <button v-for="crumb in crumbs" :key="crumb.path || 'root'" type="button" :disabled="loading" @click="navigateToPath(crumb.path)">
+          <button v-for="crumb in crumbs" :key="crumb.path || 'root'" type="button" :aria-current="crumb.path === currentPath ? 'location' : undefined" :title="crumb.name" :disabled="loading" @click="navigateToPath(crumb.path)">
             {{ crumb.name }}
           </button>
         </nav>
         <div class="toolbar-actions">
-          <RouterLink v-if="canUpload && !loading" class="ghost-btn" :to="{ name: 'upload', query: { dirId: selectedDirId, path: currentPath } }">上传到此处</RouterLink>
           <RouterLink v-if="isAdmin && canUpload && !loading" class="ghost-btn" :to="{ name: 'tokens', query: tokenQuery('upload') }">创建上传分享</RouterLink>
           <button class="ghost-btn" :disabled="loading || !currentPath" @click="navigateToPath(parentPath(currentPath))">返回上级</button>
         </div>
@@ -444,11 +430,11 @@ onBeforeUnmount(() => {
           <button class="ghost-btn" type="button" @click="dismissActionError">关闭提示</button>
         </div>
         <div v-if="truncated" class="alert info listing-notice" role="status" aria-live="polite">
-          {{ truncationMessage }}<template v-if="!hasMore"> 当前扫描范围已全部显示，但目录中可能仍有未扫描内容。</template>
+          {{ truncationMessage }}
         </div>
         <div v-if="entries.length" class="files-table-scroll">
           <table id="files-list-table" class="data-table files-table">
-            <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
+            <thead><tr><th scope="col">名称</th><th scope="col">大小</th><th scope="col">修改时间</th><th scope="col">操作</th></tr></thead>
             <tbody>
               <tr v-for="entry in entries" :key="entry.path || entry.name">
                 <td data-label="名称">
@@ -463,12 +449,13 @@ onBeforeUnmount(() => {
                 </td>
                 <td data-label="大小">{{ entry.metadataKnown === false ? '未知' : entryIsDir(entry) ? '目录' : formatBytes(entry.size ?? undefined) }}</td>
                 <td data-label="修改时间">{{ entry.metadataKnown === false ? '未知' : formatDate(entry.modifiedAt || entry.mtime) }}</td>
-                <td class="actions files-actions-cell" data-label="操作">
+                <td class="files-actions-cell" data-label="操作">
                   <div class="row-actions">
+                    <button v-if="entryIsSafeDir(entry)" class="mini-btn" type="button" :disabled="loading" :aria-label="`打开 ${entry.name}`" @click="openDir(entry)">打开</button>
                     <button v-if="entryCanDownload(entry)" class="mini-btn" type="button" :disabled="loading || Boolean(downloadingPath)" @click="startDownload(entry)">
                       {{ downloadingPath === (entry.path || joinPath(currentPath, entry.name)) ? '准备中…' : '下载' }}
                     </button>
-                    <RouterLink v-if="isAdmin && !loading && entryCanDownload(entry)" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('download', entry) }">创建分享</RouterLink>
+                    <RouterLink v-if="isAdmin && !loading && entryCanDownload(entry)" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('download', entry) }">分享</RouterLink>
                     <RouterLink v-if="isAdmin && !loading && entryIsSafeDir(entry) && canUpload" class="mini-btn" :to="{ name: 'tokens', query: tokenQuery('upload', entry) }">上传分享</RouterLink>
                     <span v-if="!hasEntryAction(entry)" class="muted-text">{{ entryUnavailableReason(entry) }}</span>
                   </div>
@@ -493,7 +480,7 @@ onBeforeUnmount(() => {
               aria-controls="files-list-table"
               :disabled="loading || loadingMore || !hasMore"
               @click="loadFiles(page + 1, true)"
-            >{{ loadingMore ? '加载中…' : hasMore ? '加载更多' : '已全部加载' }}</button>
+            >{{ loadingMore ? '加载中…' : hasMore ? '加载更多' : truncated ? '已显示扫描范围内的项目' : '已全部显示' }}</button>
           </div>
         </div>
       </div>

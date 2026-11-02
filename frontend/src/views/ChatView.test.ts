@@ -207,22 +207,6 @@ afterEach(() => {
 })
 
 describe('ChatView interaction', () => {
-  it('keeps chat status and controls without rendering explanatory microcopy', async () => {
-    const feed = createFeed([])
-    chatViewMocks.useChatFeed.mockReturnValue(feed)
-    const wrapper = mount(ChatView)
-    await flushPromises()
-
-    expect(wrapper.text()).not.toContain('仅限登录用户')
-    expect(wrapper.text()).not.toContain('约每 3 秒')
-    expect(wrapper.text()).not.toContain('仅当前已登录用户可进入')
-    expect(wrapper.find('.chat-page-header p').exists()).toBe(false)
-    expect(wrapper.find('.chat-stage-bar small').exists()).toBe(false)
-    expect(wrapper.find('.chat-projection-note span').exists()).toBe(false)
-    expect(wrapper.find('.empty-state p').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
   it('retains the exact draft and shows Retry-After feedback when sending fails', async () => {
     const feed = createFeed([message(1)])
     feed.send.mockRejectedValueOnce(new ApiError('rate limited', 429, undefined, 'chat_send_rate_limited', 3))

@@ -220,10 +220,18 @@ describe('request credentials and authentication handling', () => {
       api.tokens(),
       api.heartbeat(),
       api.logout(),
+      api.changePassword({ currentPassword: 'old', newPassword: 'new' }),
+      api.users(),
+      api.createUser({ username: 'alice', password: 'secret' }),
+      api.updateUser(1, { status: 'disabled' }),
+      api.resetUserPassword(1, 'replacement'),
+      api.deleteUser(1),
+      api.updateAccountPolicy({ registrationEnabled: true, registrationApprovalRequired: true, totpEnabled: true }),
+      api.resolveFilePickerAddress('C:\\Archive'),
     ]
     const results = await Promise.allSettled(requests)
 
-    expect(results).toHaveLength(6)
+    expect(results).toHaveLength(requests.length)
     results.forEach((result) => {
       expect(result.status).toBe('rejected')
       if (result.status === 'rejected') {
@@ -244,10 +252,13 @@ describe('request credentials and authentication handling', () => {
     authState.user = null
     authState.status = 'unknown'
     authState.authenticated = false
-    const fetchMock = vi.fn((url: string) => {
+    const fetchMock = vi.fn((url: string, _options?: RequestInit) => {
       if (url === '/api/auth/login') return Promise.resolve(jsonResponse({ authenticated: true, role: 'user', sessionBinding: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }))
       if (url === '/api/auth/admin-login') return Promise.resolve(jsonResponse({ authenticated: true, role: 'admin', sessionBinding: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }))
       if (url === '/api/auth/me') return Promise.resolve(jsonResponse({ authenticated: false }))
+      if (url === '/api/auth/options') return Promise.resolve(jsonResponse({ accountLoginEnabled: true, registrationEnabled: true, registrationApprovalRequired: true, totpEnabled: true }))
+      if (url === '/api/auth/register') return Promise.resolve(jsonResponse({ status: 'pending' }))
+      if (url === '/api/auth/account-login') return Promise.resolve(jsonResponse({ authenticated: true, role: 'user', userId: 7, username: 'alice', authMethod: 'account', sessionBinding: 'cccccccccccccccccccccccccccccccc' }))
       if (url === '/t/public/info') return Promise.resolve(jsonResponse({ valid: true }))
       throw new Error(`unexpected URL: ${url}`)
     })
@@ -256,8 +267,56 @@ describe('request credentials and authentication handling', () => {
     await expect(api.login('000000')).resolves.toMatchObject({ role: 'user' })
     await expect(api.adminLogin({ username: 'admin', password: 'secret' })).resolves.toMatchObject({ role: 'admin' })
     await expect(api.me()).resolves.toMatchObject({ authenticated: false })
+    await expect(api.authOptions()).resolves.toMatchObject({ accountLoginEnabled: true })
+    const epoch = authenticationEpoch()
+    await expect(api.register({ username: 'alice', password: 'secret', displayName: 'Alice' })).resolves.toEqual({ status: 'pending' })
+    expect(authenticationEpoch()).toBe(epoch)
+    expect(authState.authenticated).toBe(false)
+    await expect(api.accountLogin({ username: 'alice', password: 'secret' })).resolves.toMatchObject({ userId: 7, authMethod: 'account' })
     await expect(api.publicTokenInfo('public')).resolves.toMatchObject({ valid: true })
-    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(fetchMock).toHaveBeenCalledTimes(7)
+    for (const [url, options] of fetchMock.mock.calls) {
+      expect(new Headers(options?.headers).has('X-Session-Binding')).toBe(false)
+      if (url.startsWith('/api/auth/')) expect(options?.credentials).toBe('include')
+    }
+    expect(fetchMock.mock.calls.find(([url]) => url === '/api/auth/register')?.[1]?.body).toBe(JSON.stringify({ username: 'alice', password: 'secret', displayName: 'Alice' }))
+  })
+
+  it('never recovers or expires the existing session for public account authentication failures', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ code: 'session_idle_recoverable' }, 401))
+    vi.stubGlobal('fetch', fetchMock)
+    const epoch = authenticationEpoch()
+    for (const operation of [api.authOptions(), api.register({ username: 'alice', password: 'bad' }), api.accountLogin({ username: 'alice', password: 'bad' })]) {
+      await expect(operation).rejects.toMatchObject({ status: 401 })
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(authenticationEpoch()).toBe(epoch)
+    expect(authState.authenticated).toBe(true)
+    expect(routerMocks.replace).not.toHaveBeenCalled()
+  })
+
+  it('wires account administration and picker resolution with the current protected binding', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    const policy = { registrationEnabled: false, registrationApprovalRequired: true, totpEnabled: false }
+    const requests: Array<[() => Promise<unknown>, string, string, unknown?]> = [
+      [() => api.users({ query: 'a b', status: 'pending', page: 2, pageSize: 25 }), '/api/admin/users?query=a+b&status=pending&page=2&pageSize=25', 'GET'],
+      [() => api.createUser({ username: 'alice', password: 'secret', status: 'active' }), '/api/admin/users', 'POST', { username: 'alice', password: 'secret', status: 'active' }],
+      [() => api.updateUser(7, { displayName: 'Alice', status: 'disabled' }), '/api/admin/users/7', 'PUT', { displayName: 'Alice', status: 'disabled' }],
+      [() => api.resetUserPassword(7, 'replacement'), '/api/admin/users/7/reset-password', 'POST', { password: 'replacement' }],
+      [() => api.deleteUser(7), '/api/admin/users/7', 'DELETE'],
+      [() => api.changePassword({ currentPassword: 'old', newPassword: 'new' }), '/api/auth/change-password', 'POST', { currentPassword: 'old', newPassword: 'new' }],
+      [() => api.updateAccountPolicy(policy), '/api/config/accounts', 'PUT', policy],
+      [() => api.resolveFilePickerAddress('\\\\Server\\Share\\MiXeD'), '/api/config/file-picker/resolve', 'POST', { path: '\\\\Server\\Share\\MiXeD' }],
+    ]
+    for (const [operation, url, method, body] of requests) {
+      await operation()
+      const [actualURL, options] = fetchMock.mock.lastCall!
+      expect(actualURL).toBe(url)
+      expect(options.method || 'GET').toBe(method)
+      expect(options.body).toBe(body === undefined ? undefined : JSON.stringify(body))
+      expect(new Headers(options.headers).get('X-Session-Binding')).toBe(DEFAULT_SESSION_BINDING)
+    }
   })
 
   it('allows a later operation after binding restoration without resuming the rejected old promise', async () => {

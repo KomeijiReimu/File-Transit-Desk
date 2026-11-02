@@ -27,7 +27,7 @@ afterEach(() => {
 })
 
 describe('ChatMessage', () => {
-  it('shows an ordinary withdrawn tombstone with its IP but without the original or admin-only fields', () => {
+  it('hides withdrawn originals and administrator controls from ordinary users', async () => {
     const entry = {
       ...message({
         status: 'withdrawn',
@@ -44,11 +44,13 @@ describe('ChatMessage', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('该消息已被撤回')
     expect(wrapper.text()).not.toContain('普通用户绝不能看到的原文')
     expect(wrapper.text()).toContain('198.51.100.8')
     expect(wrapper.text()).not.toContain('hidden-author-key')
     expect(wrapper.text()).not.toContain('hidden-admin-key')
+    await wrapper.setProps({ message: message() })
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false)
+    expect(wrapper.find('.chat-action-button.danger').exists()).toBe(false)
   })
 
   it('shows the admin-only withdrawn original and IP as literal plain text', () => {
@@ -65,7 +67,6 @@ describe('ChatMessage', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('用户已撤回 · 原文仅管理员可见')
     expect(wrapper.text()).toContain('<img src=x onerror="window.__xss = true">')
     expect(wrapper.text()).toContain('203.0.113.4')
     expect(wrapper.find('img').exists()).toBe(false)
@@ -85,21 +86,9 @@ describe('ChatMessage', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('该消息已由管理员删除')
     expect(wrapper.text()).not.toContain('即使错误传入也不能显示')
     expect(wrapper.text()).toContain('192.0.2.55')
     expect(wrapper.find('button').exists()).toBe(false)
-  })
-
-  it('shows IP metadata on an ordinary active message without administrator controls', () => {
-    const wrapper = mount(ChatMessageCard, {
-      props: { admin: false, message: message({ sourceIP: '203.0.113.9' }) },
-    })
-
-    expect(wrapper.text()).toContain('203.0.113.9')
-    expect(wrapper.text()).toContain('普通消息')
-    expect(wrapper.find('.chat-action-button.danger').exists()).toBe(false)
-    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false)
   })
 
   it('renders an administrator selection control only for non-deleted messages', async () => {
@@ -139,8 +128,6 @@ describe('ChatMessage', () => {
     const wrapper = mount(ChatMessageCard, { props: { admin: false, message: entry } })
     const button = wrapper.get('.chat-action-button')
 
-    expect(button.text()).toBe('撤回')
-    expect(button.attributes('aria-label')).toBe('撤回消息')
     expect(intervalSpy).not.toHaveBeenCalled()
     expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2_000)
     await button.trigger('click')

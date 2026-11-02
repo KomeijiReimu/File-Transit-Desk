@@ -121,7 +121,6 @@ onBeforeUnmount(clearExpiryTimer)
       <header class="chat-message-meta">
         <span class="chat-author">{{ message.isMine ? '你' : message.authorTag }}</span>
         <span v-if="message.role === 'admin'" class="chat-role-badge">管理员</span>
-        <span class="chat-source-ip">IP {{ message.sourceIP }}</span>
         <time :datetime="message.createdAt" :title="formatFull(message.createdAt)">{{ formatShort(message.createdAt) }}</time>
       </header>
 
@@ -147,6 +146,7 @@ onBeforeUnmount(clearExpiryTimer)
 
       <p v-else class="chat-message-body">{{ message.body }}</p>
 
+      <details v-if="message.sourceIP" class="message-details"><summary>来源</summary><span class="chat-source-ip">{{ message.sourceIP }}</span></details>
       <footer v-if="showWithdraw || canDelete" class="chat-message-footer">
         <div class="chat-message-actions">
           <button

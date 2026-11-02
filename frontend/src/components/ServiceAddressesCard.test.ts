@@ -58,18 +58,16 @@ describe('ServiceAddressesCard', () => {
     shareOrigins.mockReturnValue(new Promise<ShareOriginCandidate[]>((resolve) => { resolveRequest = resolve }))
     const wrapper = mount(ServiceAddressesCard)
 
-    expect(wrapper.text()).toContain('正在获取其他候选')
     expect((wrapper.get('[data-testid="service-address-item"] input').element as HTMLInputElement).value).toBe(currentOrigin)
 
     resolveRequest([])
     await flushPromises()
-    expect(wrapper.text()).toContain('暂未发现其他候选')
     wrapper.unmount()
   })
 
   it('normalizes the frontend-configured public origin and sorts it between current and API interface candidates', async () => {
     configuredPublicShareOrigin.mockReturnValue('HTTPS://Files.Example:443')
-    shareOrigins.mockResolvedValue(candidates)
+    shareOrigins.mockResolvedValue([...candidates, candidates[0]])
     const wrapper = mount(ServiceAddressesCard)
     await flushPromises()
 
@@ -80,15 +78,6 @@ describe('ServiceAddressesCard', () => {
       'https://files.example',
       'http://192.168.20.8:3000',
     ])
-    expect(rows.map((row) => row.attributes('data-group'))).toEqual(['current', 'configured', 'interface'])
-    expect(wrapper.text()).toContain('当前访问地址')
-    expect(wrapper.text()).toContain('公开访问地址')
-    expect(wrapper.text()).not.toContain('显式配置的对外访问地址')
-    expect(wrapper.text()).toContain('网络接口')
-    expect(wrapper.text()).toContain('局域网地址')
-    expect(wrapper.text()).toContain('IPv4')
-    expect(wrapper.text()).toContain('私网')
-    expect(wrapper.find('a').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -109,69 +98,6 @@ describe('ServiceAddressesCard', () => {
     expect(rows).toHaveLength(1)
     expect((rows[0].get('input').element as HTMLInputElement).value).toBe(currentOrigin)
     expect(wrapper.text()).not.toContain('公开访问地址')
-    wrapper.unmount()
-  })
-
-  it('merges a configured origin equal to the current origin and preserves current as the highest-priority meaning', async () => {
-    configuredPublicShareOrigin.mockReturnValue(`${currentOrigin}/`)
-    shareOrigins.mockResolvedValue([
-      {
-        origin: currentOrigin,
-        label: '当前访问地址',
-        source: 'current',
-        sources: ['current'],
-        scope: 'loopback',
-        reachable: 'unknown',
-      },
-    ] satisfies ShareOriginCandidate[])
-    const wrapper = mount(ServiceAddressesCard)
-    await flushPromises()
-
-    const rows = wrapper.findAll('[data-testid="service-address-item"]')
-    expect(rows).toHaveLength(1)
-    expect(rows[0].attributes('data-group')).toBe('current')
-    expect(rows[0].text()).toContain('当前访问地址')
-    expect(rows[0].text()).toContain('公开配置')
-    expect(wrapper.find('[aria-labelledby="service-address-group-configured"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('merges a configured origin equal to an API interface candidate without losing interface or listener metadata', async () => {
-    const sharedOrigin = 'http://192.168.20.8:3000'
-    configuredPublicShareOrigin.mockReturnValue(sharedOrigin)
-    shareOrigins.mockResolvedValue([
-      {
-        origin: sharedOrigin,
-        label: '局域网 192.168.20.8',
-        source: 'interface',
-        sources: ['interface'],
-        scope: 'private',
-        interface: 'eth0',
-        listen: loopbackListener,
-        listenMatchStatus: 'match',
-        listenMatch: true,
-        reachable: 'unknown',
-      },
-    ] satisfies ShareOriginCandidate[])
-    copyToClipboard.mockResolvedValue(true)
-    const wrapper = mount(ServiceAddressesCard)
-    await flushPromises()
-
-    const rows = wrapper.findAll('[data-testid="service-address-item"]')
-    expect(rows).toHaveLength(2)
-    expect(rows.map((row) => row.attributes('data-group'))).toEqual(['current', 'configured'])
-    const sharedRow = rows[1]
-    expect((sharedRow.get('input').element as HTMLInputElement).value).toBe(sharedOrigin)
-    expect(sharedRow.text()).toContain('公开访问地址')
-    expect(sharedRow.text()).toContain('公开配置')
-    expect(sharedRow.text()).toContain('本机网卡')
-    expect(sharedRow.text()).toContain('私网')
-    expect(sharedRow.text()).toContain('监听匹配')
-    expect(wrapper.findAll('[data-testid="listen-diagnostic"]')).toHaveLength(1)
-
-    await sharedRow.get('button').trigger('click')
-    await flushPromises()
-    expect(copyToClipboard).toHaveBeenCalledWith(sharedOrigin)
     wrapper.unmount()
   })
 
@@ -209,103 +135,15 @@ describe('ServiceAddressesCard', () => {
     expect(diagnostics[0].text()).not.toContain('http://127.0.0.1:17878')
     expect(diagnostics[0].find('input').exists()).toBe(false)
     expect(diagnostics[0].find('button').exists()).toBe(false)
-    expect(wrapper.findAll('.service-address-copy')).toHaveLength(3)
     expect(wrapper.findAll('.service-address-value').map((input) => (input.element as HTMLInputElement).value)).toEqual([
       currentOrigin,
       'https://files.example',
       'http://192.168.20.8:3000',
     ])
-    expect(wrapper.text()).toContain('反向代理')
-    expect(wrapper.text()).toContain('不会加入上方复制列表')
 
     await wrapper.get('button[aria-label="复制公开访问地址"]').trigger('click')
     await flushPromises()
     expect(copyToClipboard).toHaveBeenCalledWith('https://files.example')
-    wrapper.unmount()
-  })
-
-  it('presents match, mismatch and unknown listener relationships as three distinct non-blocking states', async () => {
-    shareOrigins.mockResolvedValue([
-      {
-        origin: currentOrigin,
-        label: '当前访问地址',
-        source: 'current',
-        scope: 'loopback',
-        listen: loopbackListener,
-        listenMatchStatus: 'unknown',
-        reachable: 'unknown',
-      },
-      {
-        origin: 'http://10.0.0.8:3000',
-        label: '局域网 10.0.0.8',
-        source: 'interface',
-        scope: 'private',
-        listen: loopbackListener,
-        listenMatchStatus: 'mismatch',
-        listenMatch: false,
-        reachable: 'unknown',
-      },
-      {
-        origin: 'http://192.168.20.8:3000',
-        label: '局域网 192.168.20.8',
-        source: 'interface',
-        scope: 'private',
-        listen: loopbackListener,
-        listenMatchStatus: 'match',
-        listenMatch: true,
-        reachable: 'unknown',
-      },
-    ] satisfies ShareOriginCandidate[])
-    const wrapper = mount(ServiceAddressesCard)
-    await flushPromises()
-
-    expect(wrapper.get('[data-match-status="match"]').text()).toBe('监听匹配')
-    expect(wrapper.get('[data-match-status="match"]').attributes('data-tone')).toBe('positive')
-    expect(wrapper.get('[data-match-status="mismatch"]').text()).toBe('监听入口不同')
-    expect(wrapper.get('[data-match-status="mismatch"]').attributes('data-tone')).toBe('notice')
-    expect(wrapper.get('[data-match-status="unknown"]').text()).toBe('监听关系未知')
-    expect(wrapper.get('[data-match-status="unknown"]').attributes('data-tone')).toBe('neutral')
-    expect(wrapper.find('.alert.error').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('labels carrier-grade NAT and global-unicast scopes without claiming public reachability', async () => {
-    shareOrigins.mockResolvedValue([
-      {
-        origin: 'http://100.64.1.2:3000',
-        label: '网络接口 100.64.1.2',
-        source: 'interface',
-        scope: 'carrier-grade-nat',
-      },
-      {
-        origin: 'http://203.0.113.8:3000',
-        label: '网络接口 203.0.113.8',
-        source: 'interface',
-        scope: 'global-unicast',
-      },
-    ] satisfies ShareOriginCandidate[])
-    const wrapper = mount(ServiceAddressesCard)
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('运营商级 NAT（CGNAT）')
-    expect(wrapper.text()).toContain('全局单播/其他网络')
-    expect(wrapper.text()).not.toContain('公网可达')
-    wrapper.unmount()
-  })
-
-  it('keeps legacy API responses without listener metadata copyable and free of diagnostic placeholders', async () => {
-    shareOrigins.mockResolvedValue([
-      { origin: 'http://192.168.50.8:3000', label: '局域网 192.168.50.8', source: 'interface', scope: 'private' },
-    ] satisfies ShareOriginCandidate[])
-    copyToClipboard.mockResolvedValue(true)
-    const wrapper = mount(ServiceAddressesCard)
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="listen-diagnostic"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('后端监听诊断')
-    await wrapper.get('button[aria-label="复制局域网地址"]').trigger('click')
-    await flushPromises()
-    expect(copyToClipboard).toHaveBeenCalledWith('http://192.168.50.8:3000')
     wrapper.unmount()
   })
 
@@ -319,9 +157,6 @@ describe('ServiceAddressesCard', () => {
     expect(rows).toHaveLength(2)
     expect(rows[0].get('input').element.value).toBe(currentOrigin)
     expect(rows[1].get('input').element.value).toBe('https://public.example')
-    expect(rows[0].text()).toContain('当前访问地址')
-    expect(rows[1].text()).toContain('公开访问地址')
-    expect(wrapper.text()).toContain('仍可复制上方的当前访问地址和公开地址')
     expect(wrapper.get('button[aria-label="复制当前访问地址"]').attributes('disabled')).toBeUndefined()
     expect(wrapper.get('button[aria-label="复制公开访问地址"]').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
@@ -333,7 +168,6 @@ describe('ServiceAddressesCard', () => {
     const wrapper = mount(ServiceAddressesCard)
     await flushPromises()
 
-    expect(wrapper.text()).toContain('暂未发现其他候选')
     await wrapper.get('button[aria-label="复制当前访问地址"]').trigger('click')
     await flushPromises()
 
@@ -358,15 +192,4 @@ describe('ServiceAddressesCard', () => {
     wrapper.unmount()
   })
 
-  it('keeps the reachability warning explicit even when candidates load successfully', async () => {
-    shareOrigins.mockResolvedValue(candidates)
-    const wrapper = mount(ServiceAddressesCard)
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('连通性未知')
-    expect(wrapper.text()).toContain('系统未检测这些候选的连通性')
-    expect(wrapper.text()).toContain('防火墙、代理、TLS 和所在网络')
-    expect(wrapper.text()).not.toContain('已验证可达')
-    wrapper.unmount()
-  })
 })

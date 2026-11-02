@@ -149,7 +149,6 @@ describe('UploadView upload identity lifecycle', () => {
     expect(apiMocks.uploadByLease).not.toHaveBeenCalled()
     expect(items.map((item) => item.attributes('data-status'))).toEqual(['error', 'queued'])
     expect(items[1].text()).toContain('待上传')
-    expect(wrapper.text()).toContain('登录身份已变化，上传队列已停止')
     expect(authExpiredCalls(dispatch)).toHaveLength(0)
 
     apiMocks.createUploadLease.mockClear()
@@ -172,7 +171,6 @@ describe('UploadView upload identity lifecycle', () => {
     expect(apiMocks.createUploadLease).not.toHaveBeenCalled()
     expect(apiMocks.uploadByLease).not.toHaveBeenCalled()
     expect(wrapper.get('.upload-queue li').attributes('data-status')).toBe('queued')
-    expect(wrapper.text()).toContain('当前登录身份不可用，上传未开始')
     wrapper.unmount()
   })
 
@@ -217,7 +215,6 @@ describe('UploadView upload identity lifecycle', () => {
     await uploadStarted.promise
     window.dispatchEvent(new CustomEvent('ft:upload-session-expired'))
     await wrapper.vm.$nextTick()
-    expect(wrapper.text()).toContain('已授权的当前上传会继续')
 
     finishUpload.resolve({ ok: true })
     await flushPromises()

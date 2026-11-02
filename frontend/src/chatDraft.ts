@@ -46,7 +46,7 @@ export function measureChatDraft(value: string, capabilities: ChatCapabilities |
   if (unsafeControl) errors.push('消息包含不安全的控制字符。')
   if (characterExceeded) errors.push(`字符数超过上限 ${capabilities?.maxMessageChars}。`)
   if (bodyBytesExceeded) errors.push(`正文大小超过上限 ${capabilities?.maxMessageBytes} 字节。`)
-  if (requestBytesExceeded) errors.push(`JSON 请求大小超过上限 ${capabilities?.maxRequestBytes} 字节。`)
+  if (requestBytesExceeded) errors.push(`消息发送大小超过上限 ${capabilities?.maxRequestBytes} 字节，请缩短内容。`)
   return {
     body,
     characters,

@@ -36,14 +36,13 @@ const cancelDialogMessage = computed(() => pendingCancel.value?.type === 'upload
   : '终止后，正在下载的数据会立即中断，接收方可能需要重新开始下载。')
 
 function progressOf(item: TransferRecord) {
-  const total = item.totalBytes || 0
-  if (!total) return 0
-  return Math.min(100, Math.round(((item.transferredBytes || 0) / total) * 100))
+  if (item.bestEffort || item.totalBytes === undefined || item.totalBytes <= 0 || item.transferredBytes === undefined) return undefined
+  return Math.min(100, Math.round((item.transferredBytes / item.totalBytes) * 100))
 }
 
 function progressLabel(item: TransferRecord) {
-  if (!item.totalBytes) return item.bestEffort ? '传输状态观测中' : '总量未知'
-  return `${formatBytes(item.transferredBytes)} / ${formatBytes(item.totalBytes)} · ${progressOf(item)}%`
+  if (progressOf(item) === undefined) return '进度不可用'
+  return `${formatBytes(item.transferredBytes)} / ${formatBytes(item.totalBytes)}`
 }
 
 function fileTitle(item: TransferRecord) {
@@ -68,12 +67,14 @@ function statusLabel(item: TransferRecord) {
   if (item.status === 'canceling') return '正在取消'
   if (item.status === 'completed') return '刚完成'
   if (item.type === 'upload') return '上传中'
-  if (item.bestEffort) return '下载通道运行中'
+  if (item.bestEffort) return '下载中'
   return '下载中'
 }
 
 function speedOf(item: TransferRecord) {
-  return formatSpeed(item.currentSpeedBps || item.averageSpeedBps)
+  if (item.bestEffort || item.transferredBytes === undefined) return '暂不可用'
+  const speed = item.currentSpeedBps ?? item.averageSpeedBps
+  return speed === undefined ? '暂不可用' : formatSpeed(speed)
 }
 
 function sourceOf(item: TransferRecord) {
@@ -172,27 +173,21 @@ onUnmounted(() => {
       <button class="ghost-btn" type="button" :disabled="loading" @click="load()">刷新</button>
     </header>
 
-    <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? error : ''" retry-label="重新连接" @retry="load()" />
+    <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? error : ''" retry-label="重试" @retry="load()" />
     <div v-if="dataStale" class="alert info stale-alert" role="status">
-      <span>监控连接暂时中断，当前显示的是旧数据。{{ refreshStatus }}</span>
+      <span>刷新失败，当前显示的是 {{ lastSuccessfulAt?.toLocaleTimeString() }} 获取的数据。</span>
       <button class="ghost-btn" type="button" :disabled="loading" @click="load()">立即重试</button>
     </div>
 
-    <div v-if="!loading && (lastSuccessfulAt || !error)" class="grid two transfer-summary-grid" data-motion>
-      <div class="panel insight-card compact">
-        <span class="big-number">{{ uploads.length }}</span>
-        <strong>上传中</strong>
-      </div>
-      <div class="panel insight-card compact">
-        <span class="big-number">{{ downloads.length }}</span>
-        <strong>下载中</strong>
-      </div>
+    <div v-if="!loading && (lastSuccessfulAt || !error)" class="transfer-overview" data-motion>
+      <span><strong>{{ uploads.length }}</strong>项上传</span>
+      <span><strong>{{ downloads.length }}</strong>项下载</span>
     </div>
 
     <div v-if="!loading && (lastSuccessfulAt || !error)" class="panel table-panel transfer-panel" data-motion>
       <div class="panel-head">
-        <h2>活跃传输</h2>
-        <span class="pill muted">{{ dataStale ? `数据可能已过期 · ${refreshStatus}` : refreshStatus }}</span>
+        <h2>传输任务</h2>
+        <span v-if="!dataStale" class="pill muted">{{ refreshStatus }}</span>
       </div>
       <div v-if="transfers.length" class="transfer-list">
         <article v-for="item in transfers" :key="item.id" class="transfer-card" :data-kind="item.type === 'upload' ? 'upload' : 'download'">
@@ -208,7 +203,7 @@ onUnmounted(() => {
               <button v-if="item.cancelable" class="mini-btn danger transfer-cancel" type="button" :disabled="Boolean(canceling)" @click="requestCancel(item)">
                 {{ canceling === item.id ? '取消中…' : '取消传输' }}
               </button>
-              <span v-else class="transfer-passive-status">仅观测</span>
+              <span v-else class="transfer-passive-status">无法在此取消</span>
             </header>
 
             <div class="transfer-path" :title="resourceTitle(item)">
@@ -218,11 +213,11 @@ onUnmounted(() => {
 
             <div class="transfer-progress-zone">
               <div class="transfer-progress-head">
-                <strong>{{ item.totalBytes ? `${progressOf(item)}%` : '观测中' }}</strong>
-                <small>{{ progressLabel(item) }}</small>
+                <strong>{{ progressOf(item) !== undefined ? `${progressOf(item)}%` : '进度不可用' }}</strong>
+                <small v-if="progressOf(item) !== undefined">{{ progressLabel(item) }}</small>
               </div>
               <div
-                v-if="item.totalBytes"
+                v-if="progressOf(item) !== undefined"
                 class="upload-progress transfer-progress"
                 role="progressbar"
                 :aria-valuenow="progressOf(item)"
@@ -232,7 +227,7 @@ onUnmounted(() => {
               >
                 <span :style="{ width: `${progressOf(item)}%` }" />
               </div>
-              <div v-else class="upload-progress transfer-progress indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-label="`${fileTitle(item)} 正在观测传输状态`">
+              <div v-else class="upload-progress transfer-progress indeterminate" role="progressbar" :aria-label="`${fileTitle(item)}：进度不可用`">
                 <span />
               </div>
             </div>
@@ -250,7 +245,7 @@ onUnmounted(() => {
             <div>
               <span>来源 IP</span>
               <strong>{{ sourceOf(item) }}</strong>
-              <small>{{ item.source || '—' }}</small>
+              <details v-if="item.source" class="transfer-source"><summary>连接信息</summary><code>{{ item.source }}</code></details>
             </div>
             <div>
               <span>开始时间</span>
@@ -259,7 +254,7 @@ onUnmounted(() => {
           </div>
         </article>
       </div>
-      <EmptyState v-else title="没有活跃传输" />
+      <EmptyState v-else title="当前没有传输任务" />
     </div>
 
     <ConfirmDialog

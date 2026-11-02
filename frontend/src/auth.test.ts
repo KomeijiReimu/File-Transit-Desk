@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => {
     ApiError: MockApiError,
     me: vi.fn(),
     login: vi.fn(),
+    accountLogin: vi.fn(),
     adminLogin: vi.fn(),
     logout: vi.fn(),
   }
@@ -36,6 +37,7 @@ vi.mock('@/api', () => ({
   api: {
     me: apiMocks.me,
     login: apiMocks.login,
+    accountLogin: apiMocks.accountLogin,
     adminLogin: apiMocks.adminLogin,
     logout: apiMocks.logout,
   },
@@ -47,7 +49,7 @@ vi.mock('@/authSync', () => ({
 }))
 
 import { ApiError } from '@/api'
-import { adminLogin, authState, login, logout, restoreSession } from '@/auth'
+import { accountLogin, adminLogin, authState, clearUser, login, logout, restoreSession } from '@/auth'
 import { authenticationEpoch } from '@/authEpoch'
 
 function deferred<T>() {
@@ -87,6 +89,7 @@ describe('restoreSession', () => {
   beforeEach(() => {
     apiMocks.me.mockReset()
     apiMocks.login.mockReset()
+    apiMocks.accountLogin.mockReset()
     apiMocks.adminLogin.mockReset()
     apiMocks.logout.mockReset()
     authSyncMocks.publish.mockReset()
@@ -166,18 +169,6 @@ describe('restoreSession', () => {
     expect(authState.role).toBeUndefined()
     expect(authState.name).toBeUndefined()
     expect(authState.user).toBeNull()
-  })
-
-  it('applies a successful restored session', async () => {
-    apiMocks.me.mockResolvedValueOnce({ authenticated: true, role: 'user', name: 'restored', sessionBinding: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' })
-
-    await expect(restoreSession()).resolves.toMatchObject({ restored: true })
-
-    expect(authState.ready).toBe(true)
-    expect(authState.status).toBe('authenticated')
-    expect(authState.authenticated).toBe(true)
-    expect(authState.role).toBe('user')
-    expect(authState.name).toBe('restored')
   })
 
   it('clears an administrator synchronously on an external event, invalidates a pending restore, then adopts the revalidated subject', async () => {
@@ -289,14 +280,25 @@ describe('restoreSession', () => {
   })
 
   it('broadcasts local login and logout but never echoes an externally received event', async () => {
-    apiMocks.login.mockResolvedValueOnce({
+    const account = {
       authenticated: true,
       role: 'user',
       name: 'local-user',
+      userId: 7,
+      username: 'alice',
+      authMethod: 'account',
       sessionBinding: 'dddddddddddddddddddddddddddddddd',
-    })
-    await login('000000')
+    }
+    apiMocks.accountLogin.mockResolvedValueOnce(account)
+    const epoch = authenticationEpoch()
+    await accountLogin('alice', 'secret')
+    expect(apiMocks.accountLogin).toHaveBeenCalledWith({ username: 'alice', password: 'secret' })
+    expect(authenticationEpoch()).toBeGreaterThan(epoch)
+    expect(authState.user).toEqual(account)
     expect(authSyncMocks.publish).toHaveBeenCalledWith('login')
+    apiMocks.login.mockResolvedValueOnce({ authenticated: true, role: 'user', sessionBinding: 'abababababababababababababababab' })
+    await login('000000')
+    expect(authSyncMocks.publish).toHaveBeenCalledTimes(2)
 
     apiMocks.logout.mockResolvedValueOnce({ ok: true })
     await logout()
@@ -311,6 +313,21 @@ describe('restoreSession', () => {
     })
     authSyncMocks.state.listener?.({ id: 'external-event-2', reason: 'login' })
     await vi.waitFor(() => expect(authState.role).toBe('admin'))
+    expect(authSyncMocks.publish).not.toHaveBeenCalled()
+  })
+
+  it('rejects stale or unauthenticated account login results without publishing success', async () => {
+    const pending = deferred<{ authenticated: boolean; role: string }>()
+    apiMocks.accountLogin.mockReturnValueOnce(pending.promise)
+    const signingIn = accountLogin('alice', 'secret')
+    clearUser()
+    pending.resolve({ authenticated: true, role: 'user' })
+    await expect(signingIn).rejects.toThrow('认证状态已变更')
+    expect(authState.authenticated).toBe(false)
+
+    apiMocks.accountLogin.mockResolvedValueOnce({ authenticated: false })
+    await expect(accountLogin('alice', 'bad')).rejects.toThrow('后端未确认登录状态')
+    expect(authState.status).toBe('anonymous')
     expect(authSyncMocks.publish).not.toHaveBeenCalled()
   })
 

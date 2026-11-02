@@ -23,9 +23,6 @@ describe('ChatComposer', () => {
       props: { modelValue: '  hello  ', capabilities: capabilities() },
     })
     const textarea = wrapper.get('textarea')
-    const shortcutHint = wrapper.get('.chat-compose-guidance > p')
-
-    expect(shortcutHint.classes()).toContain('visually-hidden')
 
     await textarea.trigger('keydown', { key: 'Enter', shiftKey: true })
     expect(wrapper.emitted('send')).toBeUndefined()
@@ -49,7 +46,7 @@ describe('ChatComposer', () => {
     expect(wrapper.emitted('send')).toEqual([['输入中']])
   })
 
-  it('disables sending and explains each server-provided limit without disabling draft editing', async () => {
+  it('blocks an oversized draft without disabling editing', async () => {
     const wrapper = mount(ChatComposer, {
       props: {
         modelValue: '😀😀',
@@ -59,9 +56,8 @@ describe('ChatComposer', () => {
 
     expect(wrapper.get('textarea').attributes('disabled')).toBeUndefined()
     expect(wrapper.get('.chat-send-button').attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('字符数超过上限 1')
-    expect(wrapper.text()).toContain('正文大小超过上限 7 字节')
-    expect(wrapper.text()).toContain('JSON 请求大小超过上限 18 字节')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('send')).toBeUndefined()
   })
 
   it('keeps the draft editable but blocks send when capabilities fail, and exposes retry', async () => {
@@ -91,7 +87,6 @@ describe('ChatComposer', () => {
     })
 
     expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('仍然保留')
-    expect(wrapper.text()).toContain('发送消息过于频繁')
     await wrapper.get('form').trigger('submit')
     expect(wrapper.emitted('send')).toBeUndefined()
   })

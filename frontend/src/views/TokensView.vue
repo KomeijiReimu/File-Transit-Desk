@@ -13,6 +13,7 @@ const tokens = ref<TokenInfo[]>([])
 const dirs = ref<DirectoryInfo[]>([])
 const shareOrigins = ref<ShareOriginCandidate[]>([])
 const route = useRoute()
+const createOpen = ref(Boolean(route.query.dirId || route.query.type))
 const loading = ref(true)
 const saving = ref(false)
 const loadError = ref('')
@@ -39,18 +40,17 @@ let appliedInitialQuery = false
 const form = reactive({ type: 'download' as 'download' | 'upload', dirId: '', path: '', ttlMinutes: 60, maxUses: 1 })
 const fieldErrors = reactive({ dirId: '', path: '', ttlMinutes: '', maxUses: '' })
 const typeOptions = [
-  { label: '下载令牌', value: 'download' },
-  { label: '上传令牌', value: 'upload' },
+  { label: '下载文件', value: 'download' },
+  { label: '接收上传', value: 'upload' },
 ]
 const selectedDir = computed(() => dirs.value.find((dir) => dir.id === form.dirId))
 const selectedDirIsFile = computed(() => selectedDir.value?.type === 'file')
-const pathPlaceholder = computed(() => selectedDirIsFile.value ? '单文件资源无需填写路径' : form.type === 'download' ? '必填，填写已存在文件路径，例如 sub/file.zip' : '可选，填写接收目录，例如 inbox/，留空为根目录')
-const pathHelp = computed(() => selectedDirIsFile.value ? '该资源已经绑定到一个具体文件，创建下载令牌时无需再填写相对路径。' : form.type === 'download' ? '下载令牌必须指向已存在的具体文件。' : '上传令牌会把文件保存到此目录，留空则保存到目录根路径。')
+const pathPlaceholder = computed(() => selectedDirIsFile.value ? '已选择文件' : form.type === 'download' ? '例如 report.pdf 或 documents/report.pdf' : '留空则保存到共享位置')
+const pathHelp = computed(() => selectedDirIsFile.value ? '' : form.type === 'download' ? '填写此共享位置下的文件路径。' : '填写接收文件的子文件夹路径。')
 const usableDirs = computed(() => dirs.value.filter((dir) => form.type === 'download' ? dir.canDownload !== false && dir.allowDownload !== false : dir.type !== 'file' && Boolean(dir.canUpload || dir.allowUpload)))
 const dirOptions = computed(() => usableDirs.value.map((dir) => ({
   label: dir.label || dir.name,
   value: dir.id,
-  hint: dir.description || dir.root || dir.id,
 })))
 
 function tokenType(token: TokenInfo) {
@@ -131,11 +131,10 @@ function deleteLabel(token: TokenInfo) {
   return canRevoke(token) ? '删除并失效' : '删除记录'
 }
 
-const deleteDialogTitle = computed(() => pendingDelete.value && canRevoke(pendingDelete.value) ? '删除并立即失效？' : '删除这条令牌记录？')
-// 弹窗文案根据当前令牌是否仍可用动态切换，避免“删除记录”和“失效链接”混为一谈。
+const deleteDialogTitle = computed(() => pendingDelete.value && canRevoke(pendingDelete.value) ? '删除并立即失效？' : '删除此分享记录？')
 const deleteDialogMessage = computed(() => pendingDelete.value && canRevoke(pendingDelete.value)
-  ? '这个令牌当前仍可用。删除后会立即失效，并清理它已经兑换但尚未过期的下载票据。'
-  : '这条令牌已经不可用。删除后只会从管理列表中移除历史记录。')
+  ? '删除后，此分享链接及其已生成的下载链接将立即失效，并移除这条记录。'
+  : '此分享链接已不可用。删除后将移除记录，并使其已生成的下载链接失效。')
 const deleteDialogDetail = computed(() => pendingDelete.value ? `${tokenType(pendingDelete.value) === 'upload' ? '上传' : '下载'} · ${pendingDelete.value.dirName || pendingDelete.value.dirId || pendingDelete.value.dir || '未知目录'} · ${pendingDelete.value.path || '/'}` : '')
 
 function applyRouteQuery(force = false) {
@@ -174,7 +173,7 @@ async function load() {
 }
 
 async function validateForm() {
-  fieldErrors.dirId = form.dirId ? '' : '请选择一个可用目录。'
+  fieldErrors.dirId = usableDirs.value.some((dir) => dir.id === form.dirId) ? '' : '请选择一个可用的共享位置。'
   fieldErrors.path = form.type === 'download' && !selectedDirIsFile.value && !form.path.trim() ? '下载链接必须填写具体文件路径。' : ''
   fieldErrors.ttlMinutes = Number.isFinite(form.ttlMinutes) && form.ttlMinutes > 0 ? '' : '有效期必须大于 0 分钟。'
   fieldErrors.maxUses = Number.isFinite(form.maxUses) && form.maxUses > 0 ? '' : '最大次数必须大于 0。'
@@ -187,6 +186,7 @@ async function validateForm() {
 }
 
 async function createToken() {
+  if (!usableDirs.value.length) return
   error.value = ''
   createdLink.value = ''
   createdPath.value = ''
@@ -292,7 +292,8 @@ onMounted(load)
 <template>
   <section class="page-stack">
     <header class="page-header">
-      <h1>令牌管理</h1>
+      <h1>分享链接<span class="count-badge">{{ tokens.length }}</span></h1>
+      <button class="primary-btn" type="button" @click="createOpen = !createOpen">{{ createOpen ? '收起表单' : '创建分享' }}</button>
     </header>
 
     <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? loadError : ''" retry-label="重新加载" @retry="load" />
@@ -303,19 +304,24 @@ onMounted(load)
     <div v-if="error" class="alert error" role="alert">{{ error }}</div>
     <p class="visually-hidden" aria-live="polite">{{ copyAnnouncement }}</p>
 
-    <div v-if="(!loading && !loadError) || dirs.length || tokens.length" class="grid two">
+    <div v-if="createOpen && ((!loading && !loadError) || dirs.length || tokens.length)">
       <form class="panel form-grid" @submit.prevent="createToken">
-        <h2>创建一次性链接</h2>
+        <h2>创建分享</h2>
         <label>类型
-          <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择令牌类型" />
+          <GlassSelect v-model="form.type" :options="typeOptions" aria-label="分享用途" />
         </label>
-        <label>目录
-          <GlassSelect ref="dirSelectRef" v-model="form.dirId" :options="dirOptions" aria-label="选择目录" placeholder="选择目录" :invalid="Boolean(fieldErrors.dirId)" described-by="token-dir-error" />
+        <div v-if="!usableDirs.length" class="alert info state-error" role="status">
+          <span>{{ form.type === 'download' ? '没有允许下载的共享位置。' : '没有允许上传的共享位置。' }}</span>
+          <RouterLink class="ghost-btn" to="/config">前往设置</RouterLink>
+        </div>
+        <template v-else>
+        <label>共享位置
+          <GlassSelect ref="dirSelectRef" v-model="form.dirId" :options="dirOptions" aria-label="选择共享位置" placeholder="选择共享位置" :invalid="Boolean(fieldErrors.dirId)" described-by="token-dir-error" />
           <small v-if="fieldErrors.dirId" id="token-dir-error" class="field-error">{{ fieldErrors.dirId }}</small>
         </label>
         <label>路径
           <input ref="pathInputRef" v-model.trim="form.path" :disabled="selectedDirIsFile" :placeholder="pathPlaceholder" :aria-invalid="Boolean(fieldErrors.path)" aria-describedby="token-path-help token-path-error" />
-          <small id="token-path-help">{{ pathHelp }}</small>
+          <small v-if="pathHelp" id="token-path-help">{{ pathHelp }}</small>
           <small v-if="fieldErrors.path" id="token-path-error" class="field-error">{{ fieldErrors.path }}</small>
         </label>
         <div class="inline-fields">
@@ -323,15 +329,23 @@ onMounted(load)
             <input ref="ttlInputRef" v-model.number="form.ttlMinutes" min="1" type="number" :aria-invalid="Boolean(fieldErrors.ttlMinutes)" aria-describedby="token-ttl-error" />
             <small v-if="fieldErrors.ttlMinutes" id="token-ttl-error" class="field-error">{{ fieldErrors.ttlMinutes }}</small>
           </label>
-          <label>最大次数
+          <label>可使用次数
             <input ref="maxUsesInputRef" v-model.number="form.maxUses" min="1" type="number" :aria-invalid="Boolean(fieldErrors.maxUses)" aria-describedby="token-uses-error" />
             <small v-if="fieldErrors.maxUses" id="token-uses-error" class="field-error">{{ fieldErrors.maxUses }}</small>
           </label>
         </div>
         <button class="primary-btn" type="submit" :disabled="saving || !usableDirs.length">{{ saving ? '创建中…' : '生成链接' }}</button>
+        </template>
 
         <div v-if="createdLink" class="created-link">
-          <span class="muted-text">只显示一次，请立即复制：</span>
+          <strong>分享已创建</strong>
+          <small>链接只在此次创建后显示，请及时复制保存。</small>
+          <div class="share-link-row">
+            <span>分享链接</span>
+            <input class="share-link-input" :value="createdLink" readonly aria-label="分享链接" @focus="selectReadonlyText" />
+            <button class="mini-btn" type="button" @click="copyCreated(createdLink, 'link-ok')">{{ copyState === 'link-ok' ? '已复制' : '复制链接' }}</button>
+          </div>
+          <details><summary class="muted-text">其他地址与令牌</summary>
           <div class="share-link-list">
             <div class="share-link-row">
               <span>分享路径</span>
@@ -355,37 +369,34 @@ onMounted(load)
               </button>
             </div>
           </div>
+          </details>
           <div class="created-actions">
             <span v-if="copyState === 'err'" class="copy-error">复制失败，请手动选中文本。</span>
             <a class="ghost-btn" :href="createdLink" target="_blank" rel="noopener">在新窗口打开</a>
           </div>
         </div>
       </form>
-
-      <div class="panel insight-card compact">
-        <span class="big-number">{{ tokens.length }}</span>
-        <strong>当前令牌</strong>
-      </div>
     </div>
 
     <div v-if="(!loading && !loadError) || tokens.length" class="table-card">
-      <table v-if="tokens.length" class="data-table">
-        <thead><tr><th>类型</th><th>目录 / 路径</th><th>使用</th><th>到期</th><th>状态</th><th>操作</th></tr></thead>
+      <div v-if="tokens.length" class="table-scroll">
+      <table class="data-table tokens-table">
+        <thead><tr><th scope="col">类型</th><th scope="col">文件位置</th><th scope="col">使用</th><th scope="col">到期</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
         <tbody>
           <tr v-for="token in tokens" :key="token.id">
             <td data-label="类型"><span class="pill">{{ tokenType(token) === 'upload' ? '上传' : '下载' }}</span></td>
-            <td data-label="目录 / 路径">{{ token.dirName || token.dirId || token.dir || '—' }}<br /><small>{{ token.path || '/' }}</small></td>
-            <td data-label="使用">{{ token.uses ?? token.used ?? 0 }} / {{ token.maxUses ?? '不限' }}</td>
+            <td data-label="文件位置">{{ token.dirName || token.dirId || token.dir || '—' }}<br /><small>{{ token.path || '/' }}</small></td>
+            <td data-label="使用">{{ token.uses ?? token.used ?? 0 }}{{ token.maxUses && token.maxUses > 0 ? ` / ${token.maxUses}` : ' 次 · 不限' }}</td>
             <td data-label="到期">{{ formatDate(token.expiresAt) }}</td>
             <td data-label="状态">
               <span class="pill" :class="token.revoked ? 'danger' : (token.valid === false ? 'muted' : 'ok')">
                 {{ tokenStatusLabel(token) }}
               </span>
             </td>
-            <td data-label="操作" class="actions">
+            <td data-label="操作">
               <div class="row-actions">
-                <button class="mini-btn" type="button" :disabled="!canCopyRow(token)" :title="canCopyRow(token) ? '复制分享链接' : '明文链接只在创建时显示一次'" @click="copyRow(token)">
-                  {{ rowCopyId === token.id ? '✓ 已复制' : canCopyRow(token) ? '复制链接' : '仅创建时可复制' }}
+                <button v-if="canCopyRow(token)" class="mini-btn" type="button" @click="copyRow(token)">
+                  {{ rowCopyId === token.id ? '已复制' : '复制链接' }}
                 </button>
                 <button class="mini-btn" :disabled="!canRevoke(token)" :title="canRevoke(token) ? '立即让链接失效' : '该令牌已经不可用，无需再次撤销'" @click="requestRevoke(token)">撤销</button>
                 <button class="mini-btn danger" :title="canRevoke(token) ? '删除记录并让仍可用的令牌失效' : '删除历史记录'" @click="requestRemove(token)">{{ deleteLabel(token) }}</button>
@@ -394,13 +405,14 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
-      <EmptyState v-else-if="!loading && (!loadError || lastSuccessfulAt)" title="还没有令牌" />
+      </div>
+      <EmptyState v-else-if="!loading && (!loadError || lastSuccessfulAt)" title="还没有分享链接" />
     </div>
 
     <ConfirmDialog
       :open="Boolean(pendingRevoke)"
-      title="撤销这个令牌？"
-      message="撤销后分享链接会立即失效，已经兑换但尚未过期的下载票据也会被清理。此操作不能恢复。"
+      title="撤销此分享链接？"
+      message="此分享及其已生成的下载链接将立即失效。此操作无法撤销。"
       :detail="pendingRevoke ? `${tokenType(pendingRevoke) === 'upload' ? '上传' : '下载'} · ${pendingRevoke.dirName || pendingRevoke.dirId || pendingRevoke.dir || '未知目录'} · ${pendingRevoke.path || '/'}` : ''"
       :error="revokeError"
       confirm-label="确认撤销"

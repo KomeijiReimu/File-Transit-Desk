@@ -61,8 +61,10 @@ describe('AuditView server-side filtering', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('标签 login_success')
-    expect(wrapper.text()).toContain('第 2 / 3 页，共 120 条')
     expect(auditLogPage).toHaveBeenCalledWith(expect.objectContaining({ page: 1, status: 'all', keyword: '' }), expect.any(AbortSignal))
+    await wrapper.findAll('button').find((button) => button.text() === '下一页')!.trigger('click')
+    await flushPromises()
+    expect(auditLogPage).toHaveBeenLastCalledWith(expect.objectContaining({ page: 3 }), expect.any(AbortSignal))
     wrapper.unmount()
   })
 

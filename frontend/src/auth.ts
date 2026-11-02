@@ -238,6 +238,19 @@ export async function login(totp: string) {
   publishAuthSync('login')
 }
 
+export async function accountLogin(username: string, password: string) {
+  const loginEpoch = advanceAuthenticationEpoch()
+  invalidateSessionRecovery()
+  const user = await api.accountLogin({ username, password })
+  if (authenticationEpoch() !== loginEpoch) throw new Error('认证状态已变更，请重试。')
+  if (user.authenticated === false) {
+    clearUser()
+    throw new Error('后端未确认登录状态。')
+  }
+  applyUser(user, username)
+  publishAuthSync('login')
+}
+
 export async function adminLogin(username: string, password: string) {
   const loginEpoch = advanceAuthenticationEpoch()
   invalidateSessionRecovery()

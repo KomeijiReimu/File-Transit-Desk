@@ -5,6 +5,9 @@ export interface UserInfo {
   authenticated: boolean
   // Opaque in-memory subject binding for replay prevention; never persist it.
   sessionBinding?: string
+  userId?: number
+  username?: string
+  authMethod?: 'account' | 'totp' | 'admin' | 'legacy'
   name?: string
   role?: UserRole
   expiresAt?: string
@@ -14,6 +17,68 @@ export interface UserInfo {
 export interface AdminLoginPayload {
   username: string
   password: string
+}
+
+export interface AccountLoginPayload {
+  username: string
+  password: string
+}
+
+export interface AccountPolicy {
+  registrationEnabled: boolean
+  registrationApprovalRequired: boolean
+  totpEnabled: boolean
+}
+
+export interface AuthOptions extends AccountPolicy {
+  accountLoginEnabled: boolean
+}
+
+export interface RegisterPayload extends AccountLoginPayload {
+  displayName?: string
+}
+
+export interface RegisterResponse {
+  status: 'pending' | 'active'
+}
+
+export interface ChangePasswordPayload {
+  currentPassword: string
+  newPassword: string
+}
+
+export type AccountUserStatus = 'pending' | 'active' | 'disabled' | 'deleted'
+
+export interface AccountUser {
+  id: number
+  username: string
+  displayName: string
+  status: AccountUserStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AccountUsersFilter {
+  query?: string
+  status?: AccountUserStatus
+  page?: number
+  pageSize?: number
+}
+
+export interface AccountUsersResponse {
+  users: AccountUser[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface CreateUserPayload extends RegisterPayload {
+  status?: 'active' | 'pending'
+}
+
+export interface UpdateUserPayload {
+  displayName?: string
+  status?: 'active' | 'disabled' | 'pending'
 }
 
 // 目录字段兼容新旧后端命名：canUpload/canDownload 与 allowUpload/allowDownload 均可渲染。
@@ -32,6 +97,7 @@ export interface DirectoryInfo {
 }
 
 export interface SafeConfig {
+  accounts: AccountPolicy
   resources: DirectoryInfo[]
   storage: {
     uploadMaxMB: number
@@ -73,6 +139,11 @@ export interface FilePickerRoot {
   path?: string
   allowSelectFiles: boolean
   allowSelectDirs: boolean
+}
+
+export interface FilePickerResolveResponse {
+  root: FilePickerRoot
+  path: string
 }
 
 export interface FilePickerItem {

@@ -88,7 +88,7 @@ defineExpose({ focus })
         class="chat-textarea"
         :value="modelValue"
         rows="1"
-        placeholder="输入纯文本消息…"
+        placeholder="输入消息…"
         :disabled="sending || props.disabled"
         :aria-invalid="metrics.errors.length > 0 && !metrics.empty"
         :aria-describedby="describedBy"
@@ -101,13 +101,11 @@ defineExpose({ focus })
 
     <div class="chat-compose-footer">
       <div class="chat-compose-guidance">
-        <p :id="hintId" class="visually-hidden">Enter 发送，Shift 加 Enter 换行。</p>
-        <div v-if="capabilities" class="chat-metrics" aria-label="消息大小">
+        <p :id="hintId" class="muted-text" style="font-size: 11px">Enter 发送，Shift + Enter 换行</p>
+        <div v-if="capabilities && metrics.characters > capabilities.maxMessageChars * 0.8" class="chat-metrics" aria-label="消息字数">
           <span :data-over="metrics.characterExceeded">{{ metrics.characters }} / {{ capabilities.maxMessageChars }} 字符</span>
-          <span :data-over="metrics.bodyBytesExceeded">{{ metrics.bodyBytes }} / {{ capabilities.maxMessageBytes }} 正文字节</span>
-          <span :data-over="metrics.requestBytesExceeded">{{ metrics.requestBytes }} / {{ capabilities.maxRequestBytes }} 请求字节</span>
         </div>
-        <p v-else-if="capabilitiesLoading" class="chat-limit-state" role="status">正在读取服务器发送限制…</p>
+        <p v-else-if="capabilitiesLoading" class="chat-limit-state" role="status">正在连接…</p>
         <p v-if="metrics.errors.length && !metrics.empty" :id="validationId" class="field-error" role="alert">{{ metrics.errors.join(' ') }}</p>
         <p v-if="error" :id="errorId" class="field-error" role="alert">{{ error }}</p>
       </div>

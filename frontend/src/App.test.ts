@@ -105,55 +105,23 @@ describe('application chat navigation', () => {
 
   afterEach(() => vi.useRealTimers())
 
-  it('shows 在线交流 to an ordinary authenticated user', () => {
+  it('limits administrator navigation to the administrator role', async () => {
     const wrapper = mount(App, { global })
-    expect(wrapper.text()).toContain('在线交流')
-    expect(wrapper.text()).not.toContain('令牌管理')
-  })
-
-  it('shows the same chat destination to an administrator', () => {
+    expect(wrapper.findAllComponents(global.stubs.RouterLink).map((link) => link.props('to'))).toContain('/chat')
+    expect(wrapper.findAllComponents(global.stubs.RouterLink).map((link) => link.props('to'))).not.toContain('/tokens')
     setAuthenticated('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'admin')
-    const wrapper = mount(App, { global })
-    expect(wrapper.text()).toContain('在线交流')
-    expect(wrapper.text()).toContain('令牌管理')
+    await nextTick()
+    expect(wrapper.findAllComponents(global.stubs.RouterLink).map((link) => link.props('to'))).toContain('/tokens')
   })
 
-  it('uses an explicit menu control and toggles the compact navigation with a class', async () => {
+  it('closes an expanded navigation menu after routing', async () => {
     const wrapper = mount(App, { global })
-    const toggle = wrapper.get('.mobile-nav-toggle')
-    const navigation = wrapper.get('#main-navigation')
-
-    expect(toggle.text()).toBe('展开菜单')
-    expect(toggle.attributes('aria-label')).toBe('展开菜单')
-    expect(toggle.attributes('aria-controls')).toBe('main-navigation')
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-    expect(navigation.classes()).not.toContain('is-open')
-
-    await toggle.trigger('click')
-    expect(toggle.text()).toBe('收起菜单')
-    expect(toggle.attributes('aria-label')).toBe('收起菜单')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    expect(navigation.classes()).toContain('is-open')
-  })
-
-  it('keeps the desktop navigation in the document and closes an expanded menu after routing', async () => {
-    const wrapper = mount(App, { global })
-    const navigation = wrapper.get('nav[aria-label="主导航"]')
-    expect(navigation.text()).toContain('文件浏览')
-    expect(navigation.text()).toContain('文件上传')
-    expect(wrapper.find('.brand small').exists()).toBe(false)
-    expect(wrapper.find('.sidebar-card .meta small').exists()).toBe(false)
-    expect(wrapper.get('.sidebar-role-label.visually-hidden').text()).toBe('受信用户会话')
-    expect(wrapper.get('.mobile-nav-toggle').attributes('aria-controls')).toBe(navigation.attributes('id'))
-
     await wrapper.get('.mobile-nav-toggle').trigger('click')
-    expect(navigation.classes()).toContain('is-open')
+    expect(wrapper.get('.mobile-nav-toggle').attributes('aria-expanded')).toBe('true')
     appMocks.route.fullPath = '/upload'
     appMocks.route.name = 'upload'
     await nextTick()
 
-    expect(navigation.classes()).not.toContain('is-open')
-    expect(wrapper.get('.mobile-nav-toggle').text()).toBe('展开菜单')
     expect(wrapper.get('.mobile-nav-toggle').attributes('aria-expanded')).toBe('false')
   })
 
@@ -162,7 +130,7 @@ describe('application chat navigation', () => {
     appMocks.route.fullPath = name === 'share' ? '/share/token' : '/login'
     clearProtectedSubject()
     const wrapper = mount(App, { global })
-    expect(wrapper.text()).not.toContain('在线交流')
+    expect(wrapper.findAllComponents(global.stubs.RouterLink)).toHaveLength(0)
     expect(wrapper.find('[data-router-view]').exists()).toBe(true)
   })
 

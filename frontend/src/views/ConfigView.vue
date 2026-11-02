@@ -27,6 +27,12 @@ const pendingUploadPolicy = ref<UploadPolicyPayload | null>(null)
 const deleteError = ref('')
 const policyError = ref('')
 const pickerOpen = ref(false)
+const resourceFormOpen = ref(false)
+const accountSaving = ref(false)
+const accountError = ref('')
+const accountPolicy = reactive({ registrationEnabled: false, registrationApprovalRequired: true, totpEnabled: false })
+const accountBaseline = ref(JSON.stringify(accountPolicy))
+const accountDirty = computed(() => JSON.stringify(accountPolicy) !== accountBaseline.value)
 const resourceFormRef = ref<HTMLFormElement | null>(null)
 const idInputRef = ref<HTMLInputElement | null>(null)
 const nameInputRef = ref<HTMLInputElement | null>(null)
@@ -63,7 +69,7 @@ const formBaseline = ref(formSignature.value)
 const policyBaseline = ref(policySignature.value)
 const formDirty = computed(() => formSignature.value !== formBaseline.value)
 const policyDirty = computed(() => policySignature.value !== policyBaseline.value)
-const hasUnsavedChanges = computed(() => formDirty.value || policyDirty.value)
+const hasUnsavedChanges = computed(() => formDirty.value || policyDirty.value || accountDirty.value)
 const discardDialogOpen = computed(() => Boolean(pendingEdit.value) || Boolean(pendingDiscardAction.value))
 const typeOptions = [
   { label: '目录', value: 'directory' },
@@ -79,6 +85,7 @@ function resourceTypeLabel(resource: DirectoryInfo | ResourcePayload) {
 }
 
 function resetForm() {
+  resourceFormOpen.value = false
   editingId.value = null
   Object.assign(form, { id: '', name: '', type: 'directory', path: '', allowDownload: true, allowUpload: false })
   Object.assign(fieldErrors, { id: '', name: '', path: '', permissions: '' })
@@ -92,6 +99,7 @@ function syncUploadPolicy() {
 }
 
 function applyEditResource(resource: DirectoryInfo) {
+  resourceFormOpen.value = true
   editingId.value = resource.id
   Object.assign(form, {
     id: resource.id,
@@ -139,13 +147,17 @@ function requestReload() {
   pendingDiscardAction.value = 'reload'
 }
 
-async function load() {
+async function load(preserveEdits = false) {
   loading.value = true
   loadError.value = ''
   error.value = ''
   try {
     configData.value = await api.safeConfig()
-    syncUploadPolicy()
+    if (!preserveEdits || !policyDirty.value) syncUploadPolicy()
+    if (!preserveEdits || !accountDirty.value) {
+      Object.assign(accountPolicy, configData.value.accounts)
+      accountBaseline.value = JSON.stringify(accountPolicy)
+    }
     lastSuccessfulAt.value = new Date()
     dataStale.value = false
   } catch (err) {
@@ -199,7 +211,7 @@ async function saveUploadPolicy(payload: UploadPolicyPayload) {
       configData.value.storage.blockedExtensions = saved.blockedExtensions
     }
     syncUploadPolicy()
-    success.value = '上传扩展名策略已更新，并已写入配置文件。'
+    success.value = '上传限制已保存。'
   } catch (err) {
     policyError.value = err instanceof ApiError ? err.message : '上传扩展名策略保存失败。'
   } finally {
@@ -225,7 +237,7 @@ function submitUploadPolicy() {
     policyError.value = `${overlap} 不能同时出现在允许和阻断列表。`
     return
   }
-  if (!payload.blockedExtensions.length) {
+  if ((configData.value?.storage.blockedExtensions.length ?? 0) > 0 && !payload.blockedExtensions.length) {
     pendingUploadPolicy.value = payload
     return
   }
@@ -258,9 +270,9 @@ async function submitResource() {
   try {
     if (editingId.value) await api.updateResource(editingId.value, payload)
     else await api.createResource(payload)
-    success.value = editingId.value ? '共享资源已更新，并已写入配置文件。' : '共享资源已添加，并已写入配置文件。'
+    success.value = editingId.value ? '共享位置已更新。' : '共享位置已添加。'
     resetForm()
-    await load()
+    await load(true)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '保存共享资源失败。'
   } finally {
@@ -305,12 +317,30 @@ async function confirmDelete() {
   try {
     await api.deleteResource(resource.id)
     pendingDelete.value = null
-    success.value = '共享资源已删除，并已写入配置文件。'
-    await load()
+    success.value = '共享位置已删除。'
+    await load(true)
   } catch (err) {
     deleteError.value = err instanceof ApiError ? err.message : '删除共享资源失败。'
   } finally {
     saving.value = false
+  }
+}
+
+async function saveAccountPolicy() {
+  if (accountSaving.value || !configData.value?.configWritable) return
+  accountSaving.value = true
+  accountError.value = ''
+  success.value = ''
+  try {
+    const saved = await api.updateAccountPolicy({ ...accountPolicy })
+    configData.value.accounts = saved
+    Object.assign(accountPolicy, saved)
+    accountBaseline.value = JSON.stringify(accountPolicy)
+    success.value = '登录与注册设置已保存。'
+  } catch (err) {
+    accountError.value = err instanceof ApiError ? err.message : '保存失败，请重试。'
+  } finally {
+    accountSaving.value = false
   }
 }
 
@@ -343,11 +373,12 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 <template>
   <section class="page-stack config-page">
     <header class="page-header split">
-      <h1>配置管理</h1>
-      <button class="ghost-btn" type="button" @click="requestReload">刷新配置</button>
+      <h1>设置</h1>
+      <div class="header-actions">
+        <button class="ghost-btn" type="button" :disabled="loading || saving || policySaving || accountSaving" @click="requestReload">刷新</button>
+        <button v-if="!resourceFormOpen && configData" class="primary-btn" type="button" @click="resourceFormOpen = true; nextTick(() => nameInputRef?.focus())">添加共享位置</button>
+      </div>
     </header>
-
-    <ServiceAddressesCard />
 
     <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? loadError : ''" retry-label="重新加载" @retry="load" />
     <div v-if="dataStale" class="alert info stale-alert" role="status">
@@ -356,21 +387,21 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
     </div>
     <div v-if="error" class="alert error" role="alert">{{ error }}</div>
     <div v-if="success" class="alert success" role="status" aria-live="polite">{{ success }}</div>
-    <div v-if="configData && !configData.configWritable" class="alert error" role="alert">当前服务未记录配置文件路径，暂不能在线写回配置。</div>
+    <div v-if="configData && !configData.configWritable" class="alert error" role="alert">当前配置无法在线保存。请检查配置文件；若仍使用旧版配置，请先完成迁移。</div>
 
-    <div v-if="configData" class="grid two">
+    <div v-if="configData && resourceFormOpen">
       <form ref="resourceFormRef" class="panel form-grid resource-form" @submit.prevent="submitResource">
         <div class="form-title-row">
-          <h2>{{ editing ? '编辑共享资源' : '新增共享资源' }}</h2>
-          <button v-if="editing" class="mini-btn" type="button" @click="requestResetForm">取消编辑</button>
+          <h2>{{ editing ? '编辑共享位置' : '添加共享位置' }}</h2>
+          <button class="ghost-btn" type="button" @click="requestResetForm">取消</button>
         </div>
         <label>类型
           <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择资源类型" />
         </label>
         <div class="inline-fields">
-          <label>资源 ID
+          <label>标识
             <input ref="idInputRef" v-model.trim="form.id" :disabled="editing" placeholder="例如 photos 或 manual" :aria-invalid="Boolean(fieldErrors.id)" aria-describedby="resource-id-help resource-id-error" />
-            <small id="resource-id-help">只能包含字母、数字、短横线和下划线。</small>
+            <small id="resource-id-help">字母、数字、短横线或下划线</small>
             <small v-if="fieldErrors.id" id="resource-id-error" class="field-error">{{ fieldErrors.id }}</small>
           </label>
           <label>显示名称
@@ -378,12 +409,12 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
             <small v-if="fieldErrors.name" id="resource-name-error" class="field-error">{{ fieldErrors.name }}</small>
           </label>
         </div>
-        <label>服务端路径
+        <label>服务器路径
           <div class="path-picker-line">
             <input ref="pathInputRef" v-model.trim="form.path" :placeholder="form.type === 'file' ? '/data/manual.pdf' : '/data/photos'" :aria-invalid="Boolean(fieldErrors.path)" aria-describedby="resource-path-help resource-path-error" />
             <button class="ghost-btn" type="button" @click="pickerOpen = true">浏览</button>
           </div>
-          <small id="resource-path-help">{{ form.type === 'file' ? '必须是已存在且可读取的具体文件。' : '必须是已存在目录；允许上传时还会校验写入权限。' }}</small>
+          <small id="resource-path-help">{{ form.type === 'file' ? '选择服务器上已有的文件。' : '选择服务器上已有的文件夹。' }}</small>
           <small v-if="fieldErrors.path" id="resource-path-error" class="field-error">{{ fieldErrors.path }}</small>
         </label>
         <fieldset ref="permissionGroupRef" class="permission-fieldset" tabindex="-1" :aria-invalid="Boolean(fieldErrors.permissions)" aria-describedby="resource-permission-error">
@@ -395,17 +426,13 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           <small v-if="fieldErrors.permissions" id="resource-permission-error" class="field-error">{{ fieldErrors.permissions }}</small>
         </fieldset>
         <button class="primary-btn" type="submit" :disabled="saving || !configData?.configWritable">
-          {{ saving ? '保存中…' : editing ? '保存修改' : '添加资源' }}
+          {{ saving ? '保存中…' : editing ? '保存修改' : '添加' }}
         </button>
       </form>
-
-      <div class="panel insight-card compact config-insight">
-        <span class="big-number">{{ resources.length }}</span>
-        <strong>共享资源</strong>
-      </div>
     </div>
 
-    <section v-if="configData" class="cards-grid" aria-label="共享资源列表">
+    <div v-if="configData" class="section-heading"><h2>共享位置<span class="count-badge">{{ resources.length }}</span></h2></div>
+    <section v-if="configData" class="cards-grid" aria-label="共享位置列表">
       <article v-for="resource in resources" :key="resource.id" class="config-card resource-card">
         <div class="config-icon" :data-type="resourceType(resource)" aria-hidden="true">
           <AppIcon :name="resourceType(resource) === 'file' ? 'file-cog' : 'folder-cog'" :size="28" />
@@ -420,8 +447,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           </div>
           <code>{{ resource.root || resource.id }}</code>
           <div class="pill-row">
-            <span class="pill" :class="resource.allowDownload !== false && resource.canDownload !== false ? 'ok' : 'muted'">下载</span>
-            <span class="pill" :class="resource.allowUpload || resource.canUpload ? 'ok' : 'muted'">上传</span>
+            <span class="pill" :class="resource.allowDownload !== false && resource.canDownload !== false ? 'ok' : 'muted'">{{ resource.allowDownload !== false && resource.canDownload !== false ? '可下载' : '禁止下载' }}</span>
+            <span class="pill" :class="resource.allowUpload || resource.canUpload ? 'ok' : 'muted'">{{ resource.allowUpload || resource.canUpload ? '可上传' : '禁止上传' }}</span>
           </div>
           <div class="row-actions">
             <button class="mini-btn" type="button" @click="requestEditResource(resource)">编辑</button>
@@ -430,10 +457,10 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         </div>
       </article>
     </section>
-    <EmptyState v-if="configData && !loading && !loadError && !resources.length" title="没有共享资源" />
+    <EmptyState v-if="configData && !loading && !loadError && !resources.length" title="还没有共享位置" />
 
-    <section v-if="configData" class="panel policy-panel">
-      <h2>运行策略概览</h2>
+    <details v-if="configData" class="panel disclosure">
+      <summary>传输与分享限制</summary>
       <div class="policy-grid">
         <div><span>单次请求</span><strong>{{ storage?.uploadMaxMB }} MB</strong></div>
         <div><span>单文件</span><strong>{{ storage?.uploadMaxFileMB }} MB</strong></div>
@@ -443,29 +470,43 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         <div><span>下载票据</span><strong>{{ Math.round((downloads?.leaseTTLSeconds || 0) / 60) }} 分钟</strong></div>
         <div><span>内容哈希阈值</span><strong>{{ downloads?.contentHashMaxMB }} MB</strong></div>
       </div>
-    </section>
+    </details>
 
     <section v-if="configData" class="panel policy-panel upload-policy-editor">
       <div class="form-title-row">
         <div>
-          <h2>上传扩展名策略</h2>
-          <p class="muted-text">白名单留空表示不限制；黑名单优先。</p>
+          <h2>上传文件类型</h2>
+          <p v-if="uploadPolicy.allowedText.trim() || uploadPolicy.blockedText.trim()" class="muted-text">允许列表留空时，除禁止类型外均可上传。</p>
         </div>
-        <button class="mini-btn" type="button" @click="uploadPolicy.allowedText = ''; uploadPolicy.blockedText = ''">清空策略</button>
+        <button class="mini-btn" type="button" @click="uploadPolicy.allowedText = ''; uploadPolicy.blockedText = ''">清空</button>
       </div>
       <div v-if="policyError" class="alert error" role="alert">{{ policyError }}</div>
+      <p v-if="!uploadPolicy.allowedText.trim() && !uploadPolicy.blockedText.trim()" class="alert info" role="status">两项均为空，保存后将不限制上传文件类型。</p>
       <div class="inline-fields">
-        <label>允许扩展名白名单
+        <label>允许的扩展名
           <textarea v-model="uploadPolicy.allowedText" rows="5" placeholder="例如：&#10;.pdf&#10;.zip&#10;.jpg" />
         </label>
-        <label>阻断扩展名黑名单
+        <label>禁止的扩展名
           <textarea v-model="uploadPolicy.blockedText" rows="5" placeholder="例如：&#10;.exe&#10;.sh&#10;.ps1" />
         </label>
       </div>
       <button class="primary-btn" type="button" :disabled="policySaving || !configData.configWritable" @click="submitUploadPolicy">
-        {{ policySaving ? '保存中…' : '保存上传策略' }}
+        {{ policySaving ? '保存中…' : '保存上传限制' }}
       </button>
     </section>
+
+    <form v-if="configData" class="panel policy-panel" @submit.prevent="saveAccountPolicy">
+      <h2>登录与注册</h2>
+      <div class="settings-switches">
+        <label class="switch-line">开放账号注册<input v-model="accountPolicy.registrationEnabled" type="checkbox" :disabled="accountSaving || !configData.configWritable" /></label>
+        <label class="switch-line">新注册账号需要管理员批准<input v-model="accountPolicy.registrationApprovalRequired" type="checkbox" :disabled="accountSaving || !configData.configWritable" /></label>
+        <label class="switch-line">允许使用动态验证码登录<input v-model="accountPolicy.totpEnabled" type="checkbox" :disabled="accountSaving || !configData.configWritable" /></label>
+      </div>
+      <div v-if="accountError" class="alert error" role="alert">{{ accountError }}</div>
+      <button class="primary-btn" type="submit" :disabled="accountSaving || !accountDirty || !configData.configWritable">{{ accountSaving ? '保存中…' : '保存登录设置' }}</button>
+    </form>
+
+    <details class="panel disclosure"><summary>服务访问地址</summary><ServiceAddressesCard /></details>
 
     <ServerFilePicker v-model:open="pickerOpen" :mode="form.type === 'file' ? 'file' : 'directory'" @confirm="handlePick" />
 
@@ -482,20 +523,20 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 
     <ConfirmDialog
       :open="Boolean(pendingDelete)"
-      title="删除共享资源？"
-      message="删除后会写回配置文件，新请求将不再看到这个资源。已有令牌不会被删除，但会因为找不到资源而无法继续使用。"
+      title="删除此共享位置？"
+      message="文件不会被删除，但此位置将不再共享，相关分享链接也将无法使用。"
       :detail="pendingDelete ? `${pendingDelete.name} · ${pendingDelete.root || pendingDelete.id}` : ''"
       :error="deleteError"
       :loading="saving"
-      confirm-label="删除资源"
+      confirm-label="删除共享位置"
       @confirm="confirmDelete"
       @cancel="pendingDelete = null"
     />
 
     <ConfirmDialog
       :open="Boolean(pendingUploadPolicy)"
-      title="确认清空阻断黑名单？"
-      message="如果白名单也为空，之后的新上传不会按扩展名限制。"
+      title="清空禁止上传的文件类型？"
+      :message="pendingUploadPolicy?.allowedExtensions.length ? '清空后，将仅按允许列表限制文件类型。' : '允许列表也为空，保存后上传文件将不受类型限制。'"
       :loading="policySaving"
       confirm-label="确认保存"
       @confirm="pendingUploadPolicy && saveUploadPolicy(pendingUploadPolicy)"

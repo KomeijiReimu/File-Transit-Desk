@@ -20,10 +20,10 @@ type DisplayCandidate = ShareOriginCandidate & {
 }
 
 const groupDefinitions: Array<{ key: AddressGroupKey; title: string }> = [
-  { key: 'current', title: '当前入口' },
+  { key: 'current', title: '当前地址' },
   { key: 'configured', title: '公开地址' },
-  { key: 'interface', title: '网络接口' },
-  { key: 'other', title: '其他候选' },
+  { key: 'interface', title: '本机地址' },
+  { key: 'other', title: '其他地址' },
 ]
 
 const candidates = ref<ShareOriginCandidate[]>([])
@@ -292,21 +292,19 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="panel service-address-card" aria-labelledby="service-addresses-title">
-    <span class="service-address-aurora" aria-hidden="true" />
-
+  <section class="service-address-card" aria-labelledby="service-addresses-title">
     <header class="service-address-header">
       <div class="service-address-title-wrap">
         <span class="service-address-icon" aria-hidden="true">
           <AppIcon name="link" :size="26" />
         </span>
         <div>
-          <h2 id="service-addresses-title">服务访问地址</h2>
+          <h2 id="service-addresses-title">访问地址</h2>
         </div>
       </div>
       <div class="service-address-summary" role="status" aria-live="polite">
         <span v-if="loading" class="service-address-loader" aria-hidden="true" />
-        <span>{{ loading ? '正在获取其他候选' : `${displayCandidates.length} 个候选地址` }}</span>
+        <span>{{ loading ? '加载中…' : `${displayCandidates.length} 个地址` }}</span>
       </div>
     </header>
 
@@ -335,14 +333,14 @@ onBeforeUnmount(() => {
           >
             <div class="service-address-item-head">
               <strong>{{ candidateTitle(candidate) }}</strong>
-              <div class="service-address-tags" :aria-label="`${candidateTitle(candidate)}的地址信息`">
+              <details class="service-address-details"><summary>详情</summary><div class="service-address-tags" :aria-label="`${candidateTitle(candidate)}的地址信息`">
                 <span
                   v-for="tag in candidateTags(candidate)"
                   :key="`${tag.label}:${tag.matchStatus || ''}`"
                   :data-tone="tag.tone"
                   :data-match-status="tag.matchStatus"
                 >{{ tag.label }}</span>
-              </div>
+              </div></details>
             </div>
             <div class="service-address-action">
               <input
@@ -370,18 +368,16 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="loadError" class="service-address-inline-state" role="status">
-      <span>{{ currentOrigin ? (hasConfiguredCandidate ? '未能获取网络接口候选，仍可复制上方的当前访问地址和公开地址。' : '未能获取其他候选地址，仍可复制上方的当前访问地址。') : '候选地址加载失败，请稍后重试。' }}</span>
+      <span>{{ currentOrigin ? (hasConfiguredCandidate ? '其他地址加载失败，仍可使用当前地址和公开地址。' : '其他地址加载失败，仍可使用当前地址。') : '地址加载失败，请重试。' }}</span>
       <button class="ghost-btn" type="button" :disabled="loading" @click="load">重新获取</button>
     </div>
     <p v-else-if="showEmptyNotice" class="service-address-empty" role="status">
-      暂未发现其他候选，当前访问地址仍可复制使用。
+      没有其他地址。
     </p>
 
-    <section v-if="listenDiagnostics.length" class="service-listener-diagnostics" aria-labelledby="service-listener-title">
-      <header class="service-listener-head">
-        <h3 id="service-listener-title">服务进程监听</h3>
-      </header>
-      <p class="service-listener-description">这里显示后端进程实际监听的端点。使用反向代理时，它可能只是内部监听端口，并不是浏览器访问地址，因此不会加入上方复制列表。</p>
+    <details v-if="listenDiagnostics.length" class="service-listener-diagnostics">
+      <summary>服务器监听信息</summary>
+      <p class="service-listener-description">监听地址可能仅供服务器内部使用，不一定能从浏览器访问。</p>
       <div class="service-listener-list">
         <article v-for="listen in listenDiagnostics" :key="`${listen.network}:${listen.address}`" class="service-listener-item" data-testid="listen-diagnostic">
           <div class="service-listener-address">
@@ -396,501 +392,15 @@ onBeforeUnmount(() => {
           </div>
         </article>
       </div>
-    </section>
+    </details>
 
     <footer class="service-address-caution">
       <span class="service-address-caution-icon" aria-hidden="true">
         <AppIcon name="alert-triangle" :size="20" />
       </span>
       <div>
-        <strong>连通性未知</strong>
-        <p>系统未检测这些候选的连通性；实际可用性取决于防火墙、代理、TLS 和所在网络。</p>
+        <p>这些地址尚未测试，请确认接收方能够访问后再分享。</p>
       </div>
     </footer>
   </section>
 </template>
-
-<style scoped>
-.service-address-card {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-  padding: var(--space-card);
-  display: grid;
-  gap: 18px;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, .095), rgba(255, 255, 255, .042)),
-    var(--panel);
-}
-
-.service-address-aurora {
-  position: absolute;
-  z-index: -1;
-  top: -150px;
-  right: -100px;
-  width: 360px;
-  height: 300px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(94, 224, 198, .17), rgba(180, 140, 255, .08) 45%, transparent 70%);
-  filter: blur(12px);
-  pointer-events: none;
-}
-
-.service-address-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-}
-
-.service-address-title-wrap {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
-  gap: 16px;
-  align-items: center;
-}
-
-.service-address-icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(94, 224, 198, .28);
-  border-radius: 19px;
-  color: #071316;
-  background: linear-gradient(135deg, var(--accent-2), #62a9ff);
-  box-shadow: 0 14px 34px rgba(39, 152, 157, .2), inset 0 1px 0 rgba(255, 255, 255, .32);
-}
-
-.service-address-title-wrap h2 {
-  margin: 0;
-  font-family: "Songti SC", "Noto Serif CJK SC", serif;
-  font-size: clamp(24px, 3vw, 34px);
-  line-height: 1.12;
-  text-wrap: balance;
-}
-
-.service-address-summary {
-  min-height: 44px;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 13px;
-  border: 1px solid rgba(255, 255, 255, .11);
-  border-radius: 999px;
-  color: var(--accent-2);
-  background: rgba(4, 8, 17, .28);
-  font-size: 13px;
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.service-address-loader {
-  width: 15px;
-  height: 15px;
-  flex: 0 0 auto;
-  border: 2px solid rgba(94, 224, 198, .22);
-  border-top-color: var(--accent-2);
-  border-radius: 50%;
-  animation: service-address-spin .8s linear infinite;
-}
-
-@keyframes service-address-spin {
-  to { transform: rotate(360deg); }
-}
-
-.service-address-groups {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
-  gap: 12px;
-}
-
-.service-address-group {
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid rgba(255, 255, 255, .1);
-  border-radius: 22px;
-  background: rgba(3, 6, 14, .22);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035);
-}
-
-.service-address-group[data-group="current"] {
-  grid-column: 1 / -1;
-  border-color: rgba(255, 184, 77, .24);
-  background:
-    linear-gradient(125deg, rgba(255, 184, 77, .09), rgba(94, 224, 198, .055)),
-    rgba(3, 6, 14, .24);
-}
-
-.service-address-group-head {
-  min-height: 36px;
-  padding: 3px 6px 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.service-address-group-head h3 {
-  margin: 0;
-  font: 700 15px/1.35 "Songti SC", "Noto Serif CJK SC", serif;
-}
-
-.service-address-group-head > span {
-  min-width: 26px;
-  min-height: 26px;
-  display: grid;
-  place-items: center;
-  padding: 3px 8px;
-  border-radius: 999px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, .07);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.service-address-list {
-  display: grid;
-  gap: 8px;
-}
-
-.service-address-item {
-  min-width: 0;
-  padding: 14px;
-  display: grid;
-  gap: 11px;
-  border: 1px solid rgba(255, 255, 255, .1);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, .045);
-  box-shadow: 0 9px 28px rgba(0, 0, 0, .12), inset 0 1px 0 rgba(255, 255, 255, .04);
-  transition: border-color var(--motion), background var(--motion), box-shadow var(--motion);
-}
-
-.service-address-item:focus-within {
-  border-color: rgba(255, 184, 77, .36);
-  background: rgba(255, 255, 255, .06);
-  box-shadow: 0 9px 28px rgba(0, 0, 0, .16), inset 0 1px 0 rgba(255, 255, 255, .055);
-}
-
-.service-address-item-head {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.service-address-item-head strong {
-  min-width: 0;
-  line-height: 1.4;
-}
-
-.service-address-tags {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.service-address-tags span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 25px;
-  padding: 4px 8px;
-  border: 1px solid rgba(255, 255, 255, .07);
-  border-radius: 999px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, .055);
-  font-size: 11px;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.service-address-item[data-group="current"] .service-address-tags span:first-child {
-  color: var(--accent);
-  border-color: rgba(255, 184, 77, .2);
-  background: rgba(255, 184, 77, .11);
-}
-
-.service-address-tags span[data-tone="positive"] {
-  color: var(--accent-2);
-  border-color: rgba(94, 224, 198, .2);
-  background: rgba(94, 224, 198, .1);
-}
-
-.service-address-tags span[data-tone="notice"] {
-  color: #f8dfb8;
-  border-color: rgba(255, 184, 77, .2);
-  background: rgba(255, 184, 77, .09);
-}
-
-.service-address-tags span[data-tone="neutral"] {
-  color: var(--muted);
-  border-color: rgba(255, 255, 255, .09);
-  background: rgba(255, 255, 255, .045);
-}
-
-.service-address-action {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.service-address-value {
-  min-width: 0;
-  height: 44px;
-  padding: 0 12px;
-  border-color: rgba(255, 255, 255, .1);
-  border-radius: 12px;
-  color: var(--accent-2);
-  background: rgba(0, 0, 0, .28);
-  font: 500 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  font-variant-numeric: tabular-nums;
-}
-
-.service-address-value:focus {
-  border-color: rgba(94, 224, 198, .5);
-  box-shadow: 0 0 0 3px rgba(94, 224, 198, .12);
-}
-
-.service-address-copy {
-  min-width: 92px;
-  min-height: 44px;
-  white-space: nowrap;
-}
-
-.service-address-copy-error {
-  grid-column: 1 / -1;
-  margin: 0;
-  color: #ffb9c1;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.service-address-inline-state,
-.service-address-empty {
-  margin: 0;
-  border: 1px solid rgba(255, 184, 77, .22);
-  border-radius: var(--radius-md);
-  color: #f8dfb8;
-  background: rgba(255, 184, 77, .08);
-  line-height: 1.55;
-}
-
-.service-address-inline-state {
-  min-height: 56px;
-  padding: 7px 8px 7px 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.service-address-inline-state .ghost-btn {
-  min-height: 44px;
-  flex: 0 0 auto;
-}
-
-.service-address-empty {
-  padding: 13px 15px;
-}
-
-.service-listener-diagnostics {
-  padding: 16px;
-  display: grid;
-  gap: 11px;
-  border: 1px dashed rgba(255, 255, 255, .14);
-  border-radius: 20px;
-  background: rgba(3, 6, 14, .16);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
-}
-
-.service-listener-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.service-listener-head h3 {
-  margin: 0;
-  font: 700 17px/1.35 "Songti SC", "Noto Serif CJK SC", serif;
-}
-
-.service-listener-description {
-  max-width: 820px;
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.6;
-  text-wrap: pretty;
-}
-
-.service-listener-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-  gap: 8px;
-}
-
-.service-listener-item {
-  min-width: 0;
-  padding: 11px 12px;
-  display: grid;
-  gap: 9px;
-  border: 1px solid rgba(255, 255, 255, .08);
-  border-radius: 13px;
-  background: rgba(255, 255, 255, .032);
-}
-
-.service-listener-address {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
-}
-
-.service-listener-address > span {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.service-listener-address code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  padding: 0;
-  color: var(--text);
-  background: transparent;
-  font-size: 13px;
-}
-
-.service-listener-tags {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.service-listener-tags span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, .05);
-  font-size: 11px;
-  line-height: 1;
-}
-
-.service-address-caution {
-  padding-top: 15px;
-  display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
-  gap: 11px;
-  align-items: start;
-  border-top: 1px solid rgba(255, 255, 255, .09);
-}
-
-.service-address-caution-icon {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border-radius: 12px;
-  color: var(--accent);
-  background: rgba(255, 184, 77, .1);
-}
-
-.service-address-caution strong {
-  color: #f8dfb8;
-  font-size: 13px;
-}
-
-.service-address-caution p {
-  margin: 3px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
-  text-wrap: pretty;
-}
-
-@media (max-width: 720px) {
-  .service-address-header {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .service-address-summary {
-    align-self: flex-start;
-  }
-
-  .service-address-groups {
-    grid-template-columns: 1fr;
-  }
-
-  .service-address-group[data-group="current"] {
-    grid-column: auto;
-  }
-}
-
-@media (max-width: 520px) {
-  .service-address-card {
-    gap: 15px;
-  }
-
-  .service-address-title-wrap {
-    grid-template-columns: 48px minmax(0, 1fr);
-    gap: 12px;
-  }
-
-  .service-address-icon {
-    width: 48px;
-    height: 48px;
-    border-radius: 17px;
-  }
-
-  .service-address-item-head,
-  .service-address-inline-state {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .service-address-tags {
-    justify-content: flex-start;
-  }
-
-  .service-listener-head {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .service-listener-head > span {
-    align-self: flex-start;
-  }
-
-  .service-listener-address {
-    grid-template-columns: 1fr;
-    gap: 5px;
-  }
-
-  .service-address-action {
-    grid-template-columns: 1fr;
-  }
-
-  .service-address-copy,
-  .service-address-inline-state .ghost-btn {
-    width: 100%;
-  }
-
-  .service-address-copy-error {
-    grid-column: auto;
-  }
-}
-</style>

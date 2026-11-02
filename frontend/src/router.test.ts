@@ -17,6 +17,7 @@ const routerApiMocks = vi.hoisted(() => {
     me: vi.fn(),
     login: vi.fn(),
     adminLogin: vi.fn(),
+    authOptions: vi.fn(),
     logout: vi.fn(),
   }
 })
@@ -27,6 +28,7 @@ vi.mock('@/api', () => ({
     me: routerApiMocks.me,
     login: routerApiMocks.login,
     adminLogin: routerApiMocks.adminLogin,
+    authOptions: routerApiMocks.authOptions,
     logout: routerApiMocks.logout,
   },
 }))
@@ -87,6 +89,7 @@ describe('router authentication guard', () => {
 
   beforeEach(async () => {
     routerApiMocks.me.mockReset()
+    routerApiMocks.authOptions.mockReset().mockResolvedValue({ accountLoginEnabled: true, registrationEnabled: true, registrationApprovalRequired: true, totpEnabled: true })
     resetSessionActivity()
     resetColdStart()
     await router.replace('/share/router-test-reset')
@@ -135,11 +138,19 @@ describe('router authentication guard', () => {
     expect(Boolean(recentSessionActivity())).toBe(expected)
   })
 
-  it('registers chat as a protected destination for both user roles', () => {
-    const route = router.getRoutes().find((entry) => entry.name === 'chat')
-    expect(route?.path).toBe('/chat')
-    expect(route?.meta.public).not.toBe(true)
-    expect(route?.meta.adminOnly).not.toBe(true)
+  it('requires a session for account and reserves users for administrators', async () => {
+    const [account, users] = ['/account', '/users'].map((path) => {
+      const { name, meta, fullPath, query } = router.resolve(path)
+      return target({ name: name ?? undefined, meta, fullPath, query })
+    })
+    authState.status = 'anonymous'
+    authState.ready = true
+    await expect(authNavigationGuard(account)).resolves.toEqual({ name: 'login', query: { redirect: '/account' } })
+    setAuthenticated('user')
+    await expect(authNavigationGuard(account)).resolves.toBe(true)
+    await expect(authNavigationGuard(users)).resolves.toEqual({ name: 'files' })
+    setAuthenticated('admin')
+    await expect(authNavigationGuard(users)).resolves.toBe(true)
   })
 
   it('keeps a protected route fail-closed while external logout revalidates, then redirects anonymous to login', async () => {

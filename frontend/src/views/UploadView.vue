@@ -73,14 +73,19 @@ const {
     if (!queue.some((entry) => entry.status === 'queued' || entry.status === 'error')) return false
     if (uploadSubjectChanged.value) return true
     if (!uploadSessionExpired.value) return false
-    error.value = '登录状态已过期，当前已授权文件处理完成；队列中未授权文件需要重新登录后继续。'
     return true
   },
   onBatchFinished: ({ queue }) => {
-    if (!queue.some((item) => item.status === 'error') && queue.some((item) => item.status === 'success')) notice.value = '上传完成。'
+    const allSucceeded = queue.length > 0 && queue.every((item) => item.status === 'success')
+    notice.value = ''
     if (uploadSessionExpired.value && !uploadSubjectChanged.value) {
+      error.value = ''
+      sessionNotice.value = allSucceeded
+        ? '上传完成。登录状态已过期，请重新登录后查看文件。'
+        : '本轮上传已停止，请重新登录后继续上传未完成的文件。'
       window.dispatchEvent(new Event('ft:auth-expired'))
-      notice.value = '上传完成。登录状态已过期，请重新登录后查看文件。'
+    } else if (allSucceeded && !uploadSubjectChanged.value) {
+      notice.value = '上传完成。'
     }
   },
 })
@@ -227,13 +232,13 @@ function uploadErrorMessage(err: unknown) {
 function markUploadSubjectChanged(missingIdentity: boolean) {
   uploadSubjectChanged.value = true
   uploadSessionExpired.value = false
+  error.value = ''
+  notice.value = ''
   if (missingIdentity) {
-    sessionNotice.value = '当前登录身份不可用，上传未开始。请重新登录后重试。'
-    error.value = '当前登录身份不可用，未申请任何文件上传授权。'
+    sessionNotice.value = '当前登录状态不可用，上传未开始。请重新登录后重试。'
     return
   }
-  sessionNotice.value = '登录身份已变化，上传队列已停止；未获授权的文件不会继续。请在新身份下重新选择或重试。'
-  error.value = '登录身份已变化，队列中其余文件未继续上传。'
+  sessionNotice.value = '登录账号已变化，剩余文件不会继续上传；已获授权的当前上传可以完成。请使用当前账号重新选择或重试未完成文件。'
 }
 
 function resetUploadBatchNotices() {
@@ -284,7 +289,9 @@ function beforeUnload(event: BeforeUnloadEvent) {
 function handleUploadSessionExpired() {
   if ((!uploading.value && !uploadBatchActive.value) || uploadSubjectChanged.value) return
   uploadSessionExpired.value = true
-  sessionNotice.value = '登录状态已过期，已授权的当前上传会继续；上传完成后请重新登录查看文件。'
+  error.value = ''
+  notice.value = ''
+  sessionNotice.value = '登录状态已过期，已获授权的当前上传可以完成，其余文件将停止。请重新登录后继续。'
 }
 
 onMounted(loadDirs)
@@ -302,10 +309,9 @@ onUnmounted(() => {
 <template>
   <section class="page-stack">
     <header class="page-header split">
-      <h1>文件上传</h1>
+      <h1>上传</h1>
       <div class="header-actions">
-        <RouterLink class="ghost-btn" :to="filesRoute">查看此目录文件</RouterLink>
-        <GlassSelect :model-value="selectedDirId" class="page-select" :options="dirOptions" aria-label="选择上传目录" placeholder="选择目录" @update:model-value="requestDirectoryChange" />
+        <RouterLink class="ghost-btn" :to="filesRoute">查看文件</RouterLink>
       </div>
     </header>
 
@@ -317,14 +323,13 @@ onUnmounted(() => {
 
     <template v-else-if="selectedDir">
       <div class="panel upload-target-card">
-        <div>
-          <strong>{{ selectedDir.label || selectedDir.name }}</strong>
-          <p>{{ selectedDir.description || selectedDir.root || selectedDir.id }}</p>
-        </div>
+        <label>保存位置
+          <GlassSelect :model-value="selectedDirId" :options="dirOptions" aria-label="选择保存位置" placeholder="选择共享位置" :disabled="uploadBusy" @update:model-value="requestDirectoryChange" />
+          <small v-if="selectedDir.description">{{ selectedDir.description }}</small>
+        </label>
         <div class="upload-path-field">
-          <label for="upload-target-path"><span>上传路径</span></label>
-          <input id="upload-target-path" ref="targetPathInput" v-model="targetPath" placeholder="空为目录根路径，或填写 subdir" :disabled="uploadBusy || uploadQueue.length > 0" />
-          <small v-if="uploadQueue.length">队列已绑定到当前目标。若需修改路径，请先确认清空队列。</small>
+          <label for="upload-target-path"><span>子文件夹（选填）</span></label>
+          <input id="upload-target-path" ref="targetPathInput" v-model="targetPath" placeholder="留空则保存到当前共享位置" :disabled="uploadBusy || uploadQueue.length > 0" />
           <button v-if="uploadQueue.length && !uploading" class="mini-btn" type="button" :disabled="uploadBusy" @click="requestPathUnlock">更改上传路径</button>
         </div>
       </div>
@@ -332,21 +337,31 @@ onUnmounted(() => {
       <div class="panel upload-panel">
         <section
           class="dropzone compact"
-          :class="{ over: dragOver }"
+          :class="{ over: dragOver, 'has-files': uploadQueue.length > 0 }"
           aria-label="文件拖放区域"
           @dragover.prevent="dragOver = !uploadBusy"
           @dragleave="dragOver = false"
           @drop="onDrop"
         >
           <div class="dropzone-symbol" aria-hidden="true"><span /></div>
-          <strong>拖拽文件到此上传</strong>
+          <strong>将文件拖到这里</strong>
           <button class="upload-btn" type="button" :disabled="uploadBusy || !canUpload" @click="chooseFiles">选择文件</button>
           <input ref="fileInput" class="visually-hidden" type="file" multiple :disabled="uploadBusy || !canUpload" @change="onFileChange" />
         </section>
 
         <div v-if="limits" class="upload-limit-note">
-          单文件上限 {{ formatBytes(limits.uploadMaxFileBytes) }}；单次请求上限 {{ formatBytes(limits.uploadMaxBytes) }}。
-          请不要关闭页面，关闭或断网会中断上传。
+          每个文件最多 {{ formatBytes(limits.uploadMaxFileBytes) }}，每次上传最多 {{ formatBytes(limits.uploadMaxBytes) }}。
+          <span v-if="uploading">上传期间请勿关闭页面。</span>
+        </div>
+
+        <div v-if="uploadQueue.length" class="upload-summary">
+          <div>
+            <strong>{{ uploading ? `上传中 ${overallProgress}%` : finishedCount ? `已完成 ${finishedCount} / ${uploadQueue.length}` : `${uploadQueue.length} 个文件` }}</strong>
+            <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
+          </div>
+          <div class="upload-progress wide" role="progressbar" :aria-valuenow="overallProgress" aria-valuemin="0" aria-valuemax="100" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
+          <button class="primary-btn" type="button" :disabled="!hasPendingUploads || uploadBusy || !canUpload" @click="uploadAll">{{ uploading ? '上传中…' : '开始上传' }}</button>
+          <button v-if="uploading" class="ghost-btn danger" type="button" @click="cancelCurrentUpload">取消当前上传</button>
         </div>
 
         <ul v-if="uploadQueue.length" class="upload-queue">
@@ -368,18 +383,6 @@ onUnmounted(() => {
             </div>
           </li>
         </ul>
-
-        <div v-if="uploadQueue.length" class="upload-summary">
-          <div>
-            <strong>{{ uploading ? `整体进度 ${overallProgress}%` : `已完成 ${finishedCount} / ${uploadQueue.length}` }}</strong>
-            <small>{{ formatBytes(finishedBytes) }} / {{ formatBytes(totalBytes) }}<template v-if="uploading"> · {{ formatSpeed(currentSpeed) }}</template></small>
-          </div>
-          <div class="upload-progress wide" role="progressbar" :aria-valuenow="overallProgress" aria-valuemin="0" aria-valuemax="100" aria-label="整体上传进度"><span :style="{ width: `${overallProgress}%` }" /></div>
-          <button class="primary-btn" type="button" :disabled="!hasPendingUploads || uploadBusy || !canUpload" @click="uploadAll">
-            {{ uploading ? '上传中…' : '开始上传' }}
-          </button>
-          <button v-if="uploading" class="ghost-btn danger" type="button" @click="cancelCurrentUpload">终止当前上传</button>
-        </div>
       </div>
     </template>
 

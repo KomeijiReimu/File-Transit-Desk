@@ -9,7 +9,13 @@ import { recoverIdleSession, runSessionHeartbeat, sessionRecoveryAttempt } from 
 import { recentSessionActivity } from '@/sessionActivity'
 import { buildTransferUrl } from '@/utils'
 import type {
+  AccountLoginPayload,
+  AccountPolicy,
+  AccountUser,
+  AccountUsersFilter,
+  AccountUsersResponse,
   AdminLoginPayload,
+  AuthOptions,
   AuditLog,
   AuditLogPage,
   ChatBatchDeleteResponse,
@@ -18,17 +24,22 @@ import type {
   ChatClearResponse,
   ChatHistoryResponse,
   ChatMutationResponse,
+  ChangePasswordPayload,
   CreateTokenPayload,
   CreateTokenResponse,
+  CreateUserPayload,
   DirectoryInfo,
   DownloadLeaseResponse,
   FilePickerListResponse,
+  FilePickerResolveResponse,
   FilePickerRoot,
   FilePickerSelection,
   ListFilesResponse,
   PublicUploadLeaseRequest,
   PublicUploadLeaseResponse,
   ResourcePayload,
+  RegisterPayload,
+  RegisterResponse,
   SafeConfig,
   ShareOriginCandidate,
   TokenInfo,
@@ -36,6 +47,7 @@ import type {
   UploadLeaseRequest,
   UploadLeaseResponse,
   UploadPolicyPayload,
+  UpdateUserPayload,
   UploadLimits,
   UserInfo,
 } from '@/types'
@@ -98,7 +110,24 @@ function parseRetryAfter(headers: HeaderReader) {
 export function parseErrorPayload(status: number, headers: HeaderReader, body?: unknown, text = '') {
   const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : undefined
   const plainText = typeof body === 'string' ? safeServerMessage(body) : body == null ? safeServerMessage(text) : ''
-  const message = safeServerMessage(record?.message) || safeServerMessage(record?.error) || plainText || `请求失败（${status}）`
+  const serverMessage = safeServerMessage(record?.message) || safeServerMessage(record?.error) || plainText
+  const defaults: Record<string, string> = {
+    'Bad Request': '请求内容有误，请检查后重试。',
+    Unauthorized: '请先登录。',
+    Forbidden: '没有权限执行此操作。',
+    'Not Found': '请求的内容不存在。',
+    'Method Not Allowed': '不支持此操作。',
+    'Request Timeout': '请求超时，请重试。',
+    Conflict: '当前状态已变化，请刷新后重试。',
+    'Request Entity Too Large': '上传内容超过服务允许的大小。',
+    'Requested Range Not Satisfiable': '请求的下载范围无效，请重新获取下载链接。',
+    'Too Many Requests': '操作过于频繁，请稍后重试。',
+    'Internal Server Error': '服务处理失败，请稍后重试。',
+    'Bad Gateway': '服务暂时不可用，请稍后重试。',
+    'Service Unavailable': '服务暂时不可用，请稍后重试。',
+    'Gateway Timeout': '服务响应超时，请稍后重试。',
+  }
+  const message = Object.prototype.hasOwnProperty.call(defaults, serverMessage) ? defaults[serverMessage]! : serverMessage || `请求失败（${status}）`
   const code = safeServerMessage(record?.code) || undefined
   return {
     message,
@@ -135,11 +164,11 @@ function responseSessionBinding(error: ApiError) {
 }
 
 function sessionSubjectChangedError(details?: unknown) {
-  return new ApiError('会话主体已变化，旧请求未执行。', 409, details, 'session_subject_changed')
+  return new ApiError('登录身份已变化，本次操作未执行。', 409, details, 'session_subject_changed')
 }
 
 function sessionBindingRequiredError() {
-  return new ApiError('当前会话尚未完成身份绑定，请等待重新确认。', 409, { bindingRequired: true }, 'session_binding_required')
+  return new ApiError('正在确认登录状态，请稍后重试。', 409, { bindingRequired: true }, 'session_binding_required')
 }
 
 function signalSessionSubjectChange(requestEpoch: number, requestBinding: string | undefined) {
@@ -176,7 +205,7 @@ async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T>
   const capabilityPath = /^(?:\/t\/|\/api\/files\/(?:download|upload(?:-raw)?)-by-lease(?:[/?]|$))/.test(url)
   const bearerAuth = /^Bearer\s+/i.test(headers.get('Authorization') || '')
   const capabilityAuth = capabilityPath || bearerAuth || fetchOptions.credentials === 'omit'
-  const identityBootstrapPath = /^\/api\/auth\/(?:login|admin-login|me)(?:[/?]|$)/.test(url)
+  const identityBootstrapPath = /^\/api\/auth\/(?:options|register|account-login|login|admin-login|me)(?:[/?]|$)/.test(url)
   const localSessionBinding = currentSessionBinding()?.trim() || undefined
   const requestBinding = expectedSessionBinding?.trim() || localSessionBinding
   const requestBindingTracksLocalSubject = localSessionBinding !== undefined && requestBinding === localSessionBinding
@@ -499,6 +528,23 @@ export interface AuditFilter {
 }
 
 export const api = {
+  authOptions: () => request<AuthOptions>('/api/auth/options', { suppressAuthRedirect: true, sessionRecovery: false }),
+  register: (payload: RegisterPayload) =>
+    request<RegisterResponse>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      suppressAuthRedirect: true,
+      sessionRecovery: false,
+    }),
+  accountLogin: (payload: AccountLoginPayload) =>
+    request<UserInfo>('/api/auth/account-login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      suppressAuthRedirect: true,
+      sessionRecovery: false,
+    }),
+  changePassword: (payload: ChangePasswordPayload) =>
+    request<{ ok: boolean }>('/api/auth/change-password', { method: 'POST', body: JSON.stringify(payload) }),
   login: (totp: string) =>
     request<UserInfo>('/api/auth/login', {
       method: 'POST',
@@ -590,9 +636,23 @@ export const api = {
   activeTransfers: () => request<{ transfers: TransferRecord[] }>('/api/transfers/active'),
   cancelTransfer: (id: string) => request<{ ok: boolean }>(`/api/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   safeConfig: () => request<SafeConfig>('/api/config'),
+  users: (filter: AccountUsersFilter = {}, signal?: AbortSignal) =>
+    request<AccountUsersResponse>(`/api/admin/users${query({ query: filter.query, status: filter.status, page: filter.page, pageSize: filter.pageSize })}`, { signal }),
+  createUser: (payload: CreateUserPayload) =>
+    request<AccountUser>('/api/admin/users', { method: 'POST', body: JSON.stringify(payload) }),
+  updateUser: (id: number, payload: UpdateUserPayload) =>
+    request<AccountUser>(`/api/admin/users/${encodeURIComponent(String(id))}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  resetUserPassword: (id: number, password: string) =>
+    request<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(String(id))}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
+  deleteUser: (id: number) =>
+    request<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
+  updateAccountPolicy: (payload: AccountPolicy) =>
+    request<AccountPolicy>('/api/config/accounts', { method: 'PUT', body: JSON.stringify(payload) }),
   updateUploadPolicy: (payload: UploadPolicyPayload) =>
     request<UploadPolicyPayload>('/api/config/upload-policy', { method: 'PUT', body: JSON.stringify(payload) }),
   filePickerRoots: () => request<FilePickerRoot[]>('/api/config/file-picker/roots'),
+  resolveFilePickerAddress: (path: string) =>
+    request<FilePickerResolveResponse>('/api/config/file-picker/resolve', { method: 'POST', body: JSON.stringify({ path }) }),
   filePickerList: (rootId: string, path = '', page = 1, pageSize = 100, sort = 'name', order = 'asc') =>
     request<FilePickerListResponse>(`/api/config/file-picker/list${query({ rootId, path, page, pageSize, sort, order })}`),
   validateFilePickerSelection: (rootId: string, path: string, expectedType: 'file' | 'directory') =>

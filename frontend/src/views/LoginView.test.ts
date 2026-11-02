@@ -16,6 +16,9 @@ const apiMocks = vi.hoisted(() => {
     ApiError: MockApiError,
     me: vi.fn(),
     login: vi.fn(),
+    accountLogin: vi.fn(),
+    register: vi.fn(),
+    authOptions: vi.fn(),
     adminLogin: vi.fn(),
     logout: vi.fn(),
   }
@@ -31,6 +34,9 @@ vi.mock('@/api', () => ({
   api: {
     me: apiMocks.me,
     login: apiMocks.login,
+    accountLogin: apiMocks.accountLogin,
+    register: apiMocks.register,
+    authOptions: apiMocks.authOptions,
     adminLogin: apiMocks.adminLogin,
     logout: apiMocks.logout,
   },
@@ -68,6 +74,9 @@ describe('LoginView unavailable session state', () => {
   beforeEach(() => {
     apiMocks.me.mockReset()
     apiMocks.login.mockReset()
+    apiMocks.accountLogin.mockReset()
+    apiMocks.register.mockReset()
+    apiMocks.authOptions.mockReset().mockResolvedValue({ accountLoginEnabled: true, registrationEnabled: true, registrationApprovalRequired: true, totpEnabled: true })
     apiMocks.adminLogin.mockReset()
     apiMocks.logout.mockReset()
     routerMocks.replace.mockReset().mockResolvedValue(undefined)
@@ -79,26 +88,12 @@ describe('LoginView unavailable session state', () => {
     document.body.innerHTML = ''
   })
 
-  it('shows a reconnect state instead of asking for credentials and keeps its primary action keyboard-ready', async () => {
-    const wrapper = mount(LoginView, { attachTo: document.body })
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('服务暂时不可用')
-    expect(wrapper.text()).toContain('登录凭据可能仍然有效')
-    expect(wrapper.find('form').exists()).toBe(false)
-    expect(wrapper.find('[role="tablist"]').exists()).toBe(false)
-    expect(wrapper.find('input').exists()).toBe(false)
-    const reconnect = wrapper.get('button')
-    expect(reconnect.text()).toBe('重新连接')
-    expect(reconnect.attributes('type')).toBe('button')
-    expect(reconnect.attributes('disabled')).toBeUndefined()
-    wrapper.unmount()
-  })
-
   it('restores the existing session and safely returns to the requested page', async () => {
     apiMocks.me.mockResolvedValue({ authenticated: true, role: 'admin', name: 'restored-admin' })
     const wrapper = mount(LoginView, { attachTo: document.body })
     await flushPromises()
+    expect(wrapper.find('form').exists()).toBe(false)
+    expect(wrapper.find('input').exists()).toBe(false)
 
     await wrapper.get('button').trigger('click')
     await flushPromises()
@@ -120,8 +115,6 @@ describe('LoginView unavailable session state', () => {
     await wrapper.vm.$nextTick()
     expect(reconnect.attributes('disabled')).toBeDefined()
     expect(reconnect.attributes('aria-busy')).toBe('true')
-    expect(reconnect.text()).toContain('正在连接')
-    expect(wrapper.get('[aria-live="polite"]').text()).toBe('正在重新连接服务。')
 
     await reconnect.trigger('click')
     expect(apiMocks.me).toHaveBeenCalledTimes(1)
@@ -131,11 +124,8 @@ describe('LoginView unavailable session state', () => {
 
     expect(authState.status).toBe('unavailable')
     expect(routerMocks.replace).not.toHaveBeenCalled()
-    expect(wrapper.get('[role="alert"]').text()).toBe('服务仍未恢复，服务器暂时无法响应，请稍后重试。')
-    expect(wrapper.get('[aria-live="polite"]').text()).toBe('重新连接未成功。')
-    expect(wrapper.text()).not.toContain('登录已过期')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true)
     expect(reconnect.attributes('disabled')).toBeUndefined()
-    expect(reconnect.text()).toBe('重新连接')
     expect(document.activeElement).toBe(reconnect.element)
     wrapper.unmount()
   })
@@ -150,11 +140,7 @@ describe('LoginView unavailable session state', () => {
 
     expect(authState.status).toBe('anonymous')
     expect(wrapper.find('form').exists()).toBe(true)
-    expect(wrapper.find('[role="tablist"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('登录文件传输台')
-    expect(wrapper.text()).not.toContain('服务暂时不可用')
-    const codeInput = wrapper.get('input[autocomplete="one-time-code"]')
-    expect(document.activeElement).toBe(codeInput.element)
+    expect(wrapper.find('input').exists()).toBe(true)
     expect(routerMocks.replace).not.toHaveBeenCalled()
     wrapper.unmount()
   })

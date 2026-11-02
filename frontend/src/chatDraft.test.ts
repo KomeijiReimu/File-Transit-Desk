@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { containsUnsafeChatControl, measureChatDraft, prepareChatBody } from '@/chatDraft'
+import { containsUnsafeChatControl, measureChatDraft } from '@/chatDraft'
 import type { ChatCapabilities } from '@/types'
 
 const encoder = new TextEncoder()
@@ -27,6 +27,7 @@ describe('chat draft measurement', () => {
     expect(result.bodyBytes).toBe(5)
     expect(result.requestBytes).toBe(encoder.encode(JSON.stringify({ body: '😀a' })).byteLength)
     expect(result.sendable).toBe(true)
+    expect(measureChatDraft(' \n\t ', capabilities())).toMatchObject({ empty: true, sendable: false })
   })
 
   it('enforces character, decoded UTF-8 and raw JSON request limits independently', () => {
@@ -62,11 +63,6 @@ describe('chat draft measurement', () => {
     expect(containsUnsafeChatControl('x\u0000y')).toBe(true)
     expect(containsUnsafeChatControl('x\u202ey')).toBe(true)
     expect(containsUnsafeChatControl('x\ufeffy')).toBe(true)
-    expect(measureChatDraft('x\u202ey', capabilities()).errors).toContain('消息包含不安全的控制字符。')
-  })
-
-  it('treats whitespace-only drafts as empty', () => {
-    expect(prepareChatBody(' \n\t ')).toBe('')
-    expect(measureChatDraft(' \n\t ', capabilities())).toMatchObject({ empty: true, sendable: false })
+    expect(measureChatDraft('x\u202ey', capabilities()).sendable).toBe(false)
   })
 })

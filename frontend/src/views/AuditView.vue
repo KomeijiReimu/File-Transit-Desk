@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ApiError, api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import GlassSelect from '@/components/GlassSelect.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import type { AuditLog } from '@/types'
@@ -20,7 +21,7 @@ const keyword = ref('')
 const status = ref('all')
 const statusOptions = [
   { label: '全部记录', value: 'all' },
-  { label: '正常行为', value: 'ok' },
+  { label: '成功', value: 'ok' },
   { label: '失败 / 拒绝', value: 'failed' },
 ]
 const hasFilters = computed(() => Boolean(keyword.value.trim()) || status.value !== 'all')
@@ -158,32 +159,24 @@ function logTone(log: AuditLog) {
 }
 
 function statusText(log: AuditLog) {
-  return logOutcome(log) === 'failed' ? '需关注' : '完成'
+  return logOutcome(log) === 'failed' ? '失败 / 拒绝' : '成功'
 }
 </script>
 
 <template>
   <section class="page-stack audit-page">
     <header class="page-header split">
-      <h1>访问记录</h1>
+      <h1>访问记录<span v-if="displaysCurrentFilter && lastSuccessfulAt" class="count-badge">{{ total }}</span></h1>
       <button class="ghost-btn" :disabled="loading" @click="refresh">刷新</button>
     </header>
 
     <div class="panel filter-bar">
-      <label>筛选全部记录<input v-model="keyword" maxlength="200" placeholder="按动作代码、IP 或详情筛选" /></label>
+      <label>搜索记录<input v-model="keyword" maxlength="200" placeholder="IP、操作代码或详情" /></label>
       <label>状态
         <GlassSelect v-model="status" :options="statusOptions" aria-label="筛选访问记录状态" />
       </label>
       <button class="ghost-btn" type="button" :disabled="loading && !hasFilters" @click="clearFilters">清空筛选</button>
-      <p class="filter-scope-note">中文动作名称不参与关键词匹配。</p>
-    </div>
-
-    <div v-if="displaysCurrentFilter && total > 0" class="panel pagination-bar">
-      <span>第 {{ page }} / {{ totalPages || 1 }} 页，共 {{ total }} 条</span>
-      <div class="row-actions">
-        <button class="mini-btn" type="button" :disabled="loading || dataStale || page <= 1" @click="goPage(page - 1)">上一页</button>
-        <button class="mini-btn" type="button" :disabled="loading || dataStale || page >= totalPages" @click="goPage(page + 1)">下一页</button>
-      </div>
+      <p v-if="keyword" class="filter-scope-note">搜索范围：IP、操作代码和详情，不包含中文操作名称。</p>
     </div>
 
     <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? error : ''" retry-label="重新加载" @retry="refresh" />
@@ -191,20 +184,30 @@ function statusText(log: AuditLog) {
       <span>刷新失败，当前显示的是 {{ lastSuccessfulAt?.toLocaleTimeString() }} 获取的旧数据。</span>
       <button class="ghost-btn" type="button" :disabled="loading" @click="refresh">立即重试</button>
     </div>
-    <div class="timeline" v-if="displaysCurrentFilter && logs.length" :aria-busy="loading">
-      <article v-for="(log, index) in logs" :key="log.id || index" class="timeline-item" :data-status="logTone(log)">
-        <span class="timeline-dot" aria-hidden="true" />
-        <div>
-          <strong>{{ log.actionLabel || log.action }}</strong>
-          <p>{{ log.detail || [log.dirId, log.path].filter(Boolean).join(' / ') || '无附加信息' }}</p>
-          <div class="audit-meta">
-            <span>{{ formatDate(log.createdAt || log.time) }}</span>
-            <span>{{ log.ip || '未知 IP' }}</span>
-            <span>{{ statusText(log) }}</span>
-          </div>
+    <section v-if="displaysCurrentFilter && logs.length" class="table-card audit-records" :aria-busy="loading" aria-label="访问记录列表">
+      <div class="audit-column-head" aria-hidden="true"><span>操作</span><span>结果</span><span>来源 IP</span><span>时间</span></div>
+      <ol class="audit-list">
+        <li v-for="(log, index) in logs" :key="log.id || index" class="audit-record" :data-status="logTone(log)">
+          <details class="audit-event">
+            <summary><span class="audit-dot" aria-hidden="true" /><strong>{{ log.actionLabel || log.action }}</strong><AppIcon name="chevron-down" :size="14" /></summary>
+            <div class="audit-detail">
+              <p v-if="log.detail || log.dirId || log.path">{{ log.detail || [log.dirId, log.path].filter(Boolean).join(' / ') }}</p>
+              <code>{{ log.action }}</code>
+            </div>
+          </details>
+          <span class="audit-result" :class="{ 'is-error': logOutcome(log) === 'failed' }">{{ statusText(log) }}</span>
+          <span class="audit-source">{{ log.ip || '—' }}</span>
+          <time class="audit-time" :datetime="log.createdAt || log.time">{{ formatDate(log.createdAt || log.time) }}</time>
+        </li>
+      </ol>
+      <footer v-if="totalPages > 1" class="pagination-bar">
+        <span>第 {{ page }} / {{ totalPages }} 页</span>
+        <div class="row-actions">
+          <button class="mini-btn" type="button" :disabled="loading || dataStale || page <= 1" @click="goPage(page - 1)">上一页</button>
+          <button class="mini-btn" type="button" :disabled="loading || dataStale || page >= totalPages" @click="goPage(page + 1)">下一页</button>
         </div>
-      </article>
-    </div>
+      </footer>
+    </section>
     <EmptyState
       v-else-if="displaysCurrentFilter && !loading && !dataStale && (!error || lastSuccessfulAt)"
       :title="hasFilters ? '没有匹配记录' : '暂无访问记录'"

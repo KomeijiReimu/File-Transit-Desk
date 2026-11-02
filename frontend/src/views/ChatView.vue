@@ -91,10 +91,10 @@ const connectionIcon = computed(() => feed.connectionState.value === 'interrupte
 const dialogTitle = computed(() => pendingAction.value?.kind === 'delete' ? '删除这条消息？' : '撤回这条消息？')
 const dialogMessage = computed(() => pendingAction.value?.kind === 'delete'
   ? '删除后，所有人只会看到管理员删除提示，正文将不再显示。'
-  : '撤回后，其他用户只会看到一条撤回提示。')
+  : '撤回后，普通用户只会看到撤回提示，管理员仍可查看原文。')
 const dialogDetail = computed(() => pendingAction.value?.kind === 'delete'
   ? '管理员可以删除正常消息或已经撤回的消息，此操作不可恢复。'
-  : '撤回仅在服务器给出的时间窗口内有效。')
+  : '')
 const destructiveBusy = computed(() => actionLoading.value || bulkLoading.value)
 const bulkDialogTitle = computed(() => pendingBulkAction.value === 'clear' ? '清空全部消息？' : '删除所选消息？')
 const bulkDialogMessage = computed(() => pendingBulkAction.value === 'clear'
@@ -311,14 +311,36 @@ async function retrySync() {
   }
 }
 
-onMounted(() => void feed.start())
-onBeforeUnmount(feed.dispose)
+const availableHeight = ref<number>()
+function fitConversation() {
+  if (!pageRef.value) return
+  const viewport = window.visualViewport
+  const visibleBottom = (viewport?.height ?? window.innerHeight) + (viewport?.offsetTop ?? 0)
+  const top = pageRef.value.getBoundingClientRect().top
+  const content = pageRef.value.parentElement
+  const bottomPadding = content ? Number.parseFloat(window.getComputedStyle(content).paddingBottom) || 0 : 16
+  availableHeight.value = Math.max(120, visibleBottom - top - bottomPadding)
+}
+
+onMounted(() => {
+  void feed.start()
+  fitConversation()
+  window.addEventListener('resize', fitConversation)
+  window.visualViewport?.addEventListener('resize', fitConversation)
+  window.visualViewport?.addEventListener('scroll', fitConversation)
+})
+onBeforeUnmount(() => {
+  feed.dispose()
+  window.removeEventListener('resize', fitConversation)
+  window.visualViewport?.removeEventListener('resize', fitConversation)
+  window.visualViewport?.removeEventListener('scroll', fitConversation)
+})
 </script>
 
 <template>
-  <section ref="pageRef" class="page-stack chat-page">
+  <section ref="pageRef" class="page-stack chat-page" :style="availableHeight ? { height: `${availableHeight}px` } : undefined">
     <header class="page-header chat-page-header" data-motion>
-      <h1 id="chat-page-title">在线交流</h1>
+      <h1 id="chat-page-title">交流</h1>
       <div class="chat-header-status" :data-state="feed.connectionState.value" role="status" aria-live="polite">
         <span class="chat-status-icon" aria-hidden="true"><AppIcon :name="connectionIcon" :size="21" /></span>
         <strong>{{ connectionLabel }}</strong>
