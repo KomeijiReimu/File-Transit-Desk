@@ -1,6 +1,7 @@
 # 运行数据和本地配置
 backend/config.yaml
 backend/config.yaml.bak
+backend/config.yaml.pre-migration.bak
 backend/config/
 backend/data/
 backend/uploads/
@@ -42,3 +43,13 @@ __pycache__/
 .slim/deepwork/
 .cortexkit
 .agent-context/
+
+# 本地 agent 索引与用量数据
+.codegraph/
+.tokpulse/
+.tokpulse-writer-locks/
+.tokpulse-migrate-*/
+.opencode/oc-tps/
+/.ignore
+backend/settings.yaml
+backend/settings.yaml.bak

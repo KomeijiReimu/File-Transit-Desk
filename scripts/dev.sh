@@ -1,158 +1,181 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Each launched job owns a process group, including Bun/Go descendants. Never kill by name/port.
+set -m
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_CONFIG="${BACKEND_CONFIG:-backend/config.yaml}"
 BACKEND_PORT="${BACKEND_PORT:-17878}"
-# 使用 127.0.0.1 避免部分系统把 localhost 解析到 IPv6 ::1，导致前端代理连不上只监听 IPv4 的后端。
 BACKEND_ORIGIN="${BACKEND_ORIGIN:-http://127.0.0.1:${BACKEND_PORT}}"
 FRONTEND_HOST="${FRONTEND_HOST:-0.0.0.0}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 FRONTEND_PUBLIC_SHARE_ORIGIN="${FRONTEND_PUBLIC_SHARE_ORIGIN:-${VITE_PUBLIC_SHARE_ORIGIN:-}}"
 FRONTEND_TRANSFER_ORIGIN="${FRONTEND_TRANSFER_ORIGIN:-${VITE_TRANSFER_ORIGIN:-}}"
-
-if [[ "${BACKEND_CONFIG}" = /* ]]; then
-  BACKEND_CONFIG_PATH="${BACKEND_CONFIG}"
+INSTALL_TIMEOUT_SECONDS="${INSTALL_TIMEOUT_SECONDS:-300}"
+BUILD_TIMEOUT_SECONDS="${BUILD_TIMEOUT_SECONDS:-180}"
+BACKEND_READY_TIMEOUT_SECONDS="${BACKEND_READY_TIMEOUT_SECONDS:-30}"
+FRONTEND_READY_TIMEOUT_SECONDS="${FRONTEND_READY_TIMEOUT_SECONDS:-30}"
+for value in "$INSTALL_TIMEOUT_SECONDS" "$BUILD_TIMEOUT_SECONDS" "$BACKEND_READY_TIMEOUT_SECONDS" "$FRONTEND_READY_TIMEOUT_SECONDS"; do
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo '启动阶段超时必须为正整数（秒）。' >&2
+    exit 2
+  fi
+done
+if [[ "$BACKEND_CONFIG" = /* ]]; then
+  BACKEND_CONFIG_PATH="$BACKEND_CONFIG"
 else
-  BACKEND_CONFIG_PATH="${ROOT_DIR}/${BACKEND_CONFIG}"
+  BACKEND_CONFIG_PATH="$ROOT_DIR/$BACKEND_CONFIG"
 fi
-
-if ! command -v go >/dev/null 2>&1; then
-  echo "未找到 go，请先安装 Go。" >&2
-  exit 1
-fi
-
-if ! command -v bun >/dev/null 2>&1; then
-  echo "未找到 bun，请先安装 Bun。" >&2
-  exit 1
-fi
-
-if [[ ! -f "${BACKEND_CONFIG_PATH}" ]]; then
-  mkdir -p "$(dirname "${BACKEND_CONFIG_PATH}")"
-  cp "${ROOT_DIR}/backend/config.example.yaml" "${BACKEND_CONFIG_PATH}"
-  cat >&2 <<MSG
-已复制 backend/config.example.yaml 到 ${BACKEND_CONFIG}。
-请先编辑配置文件，至少替换：
-  - auth.totp_secret
-  - auth.admin.username
-  - auth.admin.password_hash
-  - storage.dirs
-
-配置完成后再次运行：./scripts/dev.sh
-MSG
-  exit 1
-fi
-
-if [[ ! -d "${ROOT_DIR}/frontend/node_modules" ]]; then
-  echo "首次运行：安装前端依赖..."
-  (cd "${ROOT_DIR}/frontend" && bun install)
-fi
-
-BACKEND_STDOUT_LOG="$(mktemp "${TMPDIR:-/tmp}/file-trans-backend-stdout.XXXXXX.log")"
-BACKEND_STDERR_LOG="$(mktemp "${TMPDIR:-/tmp}/file-trans-backend-stderr.XXXXXX.log")"
-
-show_log_tail() {
-  local path="$1"
-  local title="$2"
-  if [[ -s "${path}" ]]; then
-    echo "" >&2
-    echo "${title}" >&2
-    while IFS= read -r line; do
-      echo "  ${line}" >&2
-    done < <(tail -n 80 "${path}")
+SETTINGS_PATH="$(dirname "$BACKEND_CONFIG_PATH")/settings.yaml"
+if [[ ! -f "$BACKEND_CONFIG_PATH" ]]; then
+  mkdir -p "$(dirname "$BACKEND_CONFIG_PATH")"
+  cp "$ROOT_DIR/backend/config.example.yaml" "$BACKEND_CONFIG_PATH"
+  chmod 600 "$BACKEND_CONFIG_PATH"
+  if [[ ! -e "$SETTINGS_PATH" ]]; then
+    cp "$ROOT_DIR/backend/settings.example.yaml" "$SETTINGS_PATH"
+    chmod 600 "$SETTINGS_PATH"
   fi
-}
-
-show_backend_failure() {
-  local message="$1"
-  local code="${2:-}"
-  echo "" >&2
-  echo "${message}" >&2
-  if [[ -n "${code}" ]]; then
-    echo "退出码：${code}" >&2
+  printf '已生成管理员配置：%s\n服务设置（保留已有文件）：%s\n' "$BACKEND_CONFIG_PATH" "$SETTINGS_PATH" >&2
+  printf '请设置 admin.username/password_hash，并检查 settings.yaml。生成密码块：\n  python3 %q --format bootstrap\n' "$ROOT_DIR/scripts/hash-admin-password.py" >&2
+  echo '配置完成后，请使用本次相同的启动参数重新运行。' >&2
+  exit 1
+fi
+for command in go bun curl; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf '未找到 %s，请先安装。\n' "$command" >&2
+    exit 1
   fi
-  show_log_tail "${BACKEND_STDERR_LOG}" "后端错误日志："
-  show_log_tail "${BACKEND_STDOUT_LOG}" "后端输出日志："
-  cat >&2 <<MSG
+done
 
-常见处理方式：
-  1. 如果提示 YAML 格式错误，请检查 backend/config.yaml 对应行附近的缩进。
-  2. file_picker 应与 storage 同级；不要把 roots/max_page_size/deny_names 缩进到 storage.shares 下面。
-  3. 如果提示端口监听失败，请确认 ${BACKEND_ORIGIN} 没有被其他进程占用，或用 BACKEND_PORT 修改端口。
-  4. 如果提示数据库无法打开，请确认 backend/data 目录可写。
-日志文件：
-  stdout: ${BACKEND_STDOUT_LOG}
-  stderr: ${BACKEND_STDERR_LOG}
-MSG
-}
-
+# Do not inherit the system /tmp default. Retain diagnostics/build output for inspection.
+ARTIFACT_ROOT="${TMPDIR:-$ROOT_DIR/.opencode/dev}"
+mkdir -p "$ARTIFACT_ROOT"
+ARTIFACT_ROOT="$(cd "$ARTIFACT_ROOT" && pwd)"
+RUN_DIR="$(mktemp -d "$ARTIFACT_ROOT/file-trans-dev.XXXXXX")"
+export TMPDIR="$RUN_DIR"
+echo "诊断及构建目录：$RUN_DIR"
+GROUPS_STARTED=()
+RUNTIME_READY=false
 cleanup() {
-  local code=$?
-  if [[ -n "${BACKEND_PID:-}" ]]; then
-    kill "${BACKEND_PID}" >/dev/null 2>&1 || true
+  local code=$? pid backend_code=0
+  trap - EXIT
+  trap '' INT TERM
+  if "$RUNTIME_READY" && [[ -n "${BACKEND_PID:-}" ]]; then
+    echo '[停止] 等待当前传输完成后退出，无固定等待上限。' >&2
+    # Signal only the server, not its descendants, until its own drain completes.
+    kill -TERM "$BACKEND_PID" 2>/dev/null || true
+    wait "$BACKEND_PID" 2>/dev/null || backend_code=$?
+    if (( code == 0 && backend_code != 0 )); then code=$backend_code; fi
   fi
-  if [[ -n "${FRONTEND_PID:-}" ]]; then
-    kill "${FRONTEND_PID}" >/dev/null 2>&1 || true
-  fi
-  wait >/dev/null 2>&1 || true
-  exit "${code}"
+  for pid in "${GROUPS_STARTED[@]}"; do
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  done
+  # Startup failures, frontend and leftovers after backend drain remain bounded.
+  if [[ ${#GROUPS_STARTED[@]} -gt 0 ]]; then sleep 1; fi
+  for pid in "${GROUPS_STARTED[@]}"; do
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  exit "$code"
 }
-trap cleanup INT TERM EXIT
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-wait_for_backend() {
-  local origin="${BACKEND_ORIGIN#http://}"
-  origin="${origin#https://}"
-  local host="${origin%%[:/]*}"
-  local rest="${origin#${host}}"
-  local port="${rest#:}"
-  port="${port%%/*}"
-  if [[ -z "${host}" || -z "${port}" || "${port}" = "${rest}" ]]; then
-    sleep 2
-    return
-  fi
-  echo "等待后端就绪：${BACKEND_ORIGIN}/api/health"
-  for _ in {1..60}; do
-    if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
-      local code=0
-      wait "${BACKEND_PID}" || code=$?
-      show_backend_failure "后端启动失败。" "${code}"
-      exit "${code}"
+run_phase() {
+  local label="$1" timeout="$2" directory="$3" pid code=0 started=$SECONDS
+  shift 3
+  echo "[$label] 开始（最长 ${timeout}s）"
+  (cd "$directory" && exec "$@") >"$RUN_DIR/$label.log" 2>&1 &
+  pid=$!
+  GROUPS_STARTED+=("$pid")
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( SECONDS - started >= timeout )); then
+      echo "[$label] 超时；日志：$RUN_DIR/$label.log" >&2
+      tail -n 80 "$RUN_DIR/$label.log" >&2
+      exit 124
     fi
-    # 通过 bash 内置 TCP 发送真实健康检查请求，避免端口被旧进程占用时误判为本项目后端就绪。
-    if (exec 3<>"/dev/tcp/${host}/${port}" && printf 'GET /api/health HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "${host}" >&3 && IFS= read -r -t 1 line <&3 && [[ "${line}" == *" 200 "* ]]) >/dev/null 2>&1; then
-      exec 3>&- 3<&- || true
+    sleep 0.2
+  done
+  wait "$pid" || code=$?
+  # Also reap descendants of a tool that exits before its children.
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  unset 'GROUPS_STARTED[${#GROUPS_STARTED[@]}-1]'
+  if (( code != 0 )); then
+    echo "[$label] 失败，退出码：$code；日志：$RUN_DIR/$label.log" >&2
+    tail -n 80 "$RUN_DIR/$label.log" >&2
+    exit "$code"
+  fi
+  echo "[$label] 完成"
+}
+
+check_services() {
+  local pid code
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -z "$pid" ]] && continue
+    if ! kill -0 "$pid" 2>/dev/null; then
+      code=0
+      wait "$pid" || code=$?
+      echo "[运行] 服务意外退出（进程 $pid），原退出码：$code；诊断目录：$RUN_DIR" >&2
+      tail -n 80 "$RUN_DIR/backend.log" >&2
+      if [[ -f "$RUN_DIR/frontend.log" ]]; then tail -n 80 "$RUN_DIR/frontend.log" >&2; fi
+      if (( code == 0 )); then code=1; fi
+      exit "$code"
+    fi
+  done
+}
+
+wait_ready() {
+  local label="$1" url="$2" timeout="$3" started=$SECONDS
+  echo "[$label 就绪] 等待 $url（最长 ${timeout}s）"
+  while (( SECONDS - started < timeout )); do
+    check_services
+    if curl --noproxy '*' --silent --fail --connect-timeout 1 --max-time 1 "$url" -o /dev/null; then
+      check_services
+      echo "[$label 就绪] 完成"
       return
     fi
-    sleep 0.5
+    sleep 0.2
   done
-  show_backend_failure "后端未在预期时间内就绪。" ""
-  exit 1
+  echo "[$label 就绪] 超时；诊断目录：$RUN_DIR" >&2
+  exit 124
 }
 
-echo "启动后端：${BACKEND_CONFIG}"
-echo "前端代理目标：${BACKEND_ORIGIN}"
-(
-  cd "${ROOT_DIR}/backend"
-  go run ./cmd/server -config "${BACKEND_CONFIG_PATH}" -dev -dev-frontend-port "${FRONTEND_PORT}"
-) >"${BACKEND_STDOUT_LOG}" 2>"${BACKEND_STDERR_LOG}" &
-BACKEND_PID=$!
-wait_for_backend
-
-echo "启动前端：http://localhost:${FRONTEND_PORT}"
-(
-  cd "${ROOT_DIR}/frontend"
-  BACKEND_ORIGIN="${BACKEND_ORIGIN}" VITE_BACKEND_ORIGIN="${BACKEND_ORIGIN}" \
-    VITE_PUBLIC_SHARE_ORIGIN="${FRONTEND_PUBLIC_SHARE_ORIGIN}" \
-    VITE_TRANSFER_ORIGIN="${FRONTEND_TRANSFER_ORIGIN}" \
-    VITE_FRONTEND_PORT="${FRONTEND_PORT}" \
-    VITE_TRANSFER_PORT="${BACKEND_PORT}" \
-    bun run dev -- --host "${FRONTEND_HOST}" --port "${FRONTEND_PORT}"
-) &
-FRONTEND_PID=$!
-
-wait -n "${BACKEND_PID}" "${FRONTEND_PID}" || code=$?
-code="${code:-0}"
-if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
-  show_backend_failure "后端进程已退出。" "${code}"
+if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
+  run_phase install "$INSTALL_TIMEOUT_SECONDS" "$ROOT_DIR/frontend" bun install
+else
+  echo '[install] 已有 node_modules，跳过安装'
 fi
-exit "${code}"
+run_phase build "$BUILD_TIMEOUT_SECONDS" "$ROOT_DIR/backend" go build -o "$RUN_DIR/server" ./cmd/server
+
+# Refuse an already-serving endpoint; never stop an unrelated service.
+for url in "$BACKEND_ORIGIN/api/health" "http://127.0.0.1:$FRONTEND_PORT/"; do
+  if curl --noproxy '*' --silent --connect-timeout 1 --max-time 1 "$url" -o /dev/null; then
+    echo "[启动] 地址已被占用：$url；请修改端口或自行停止旧服务。" >&2
+    exit 1
+  fi
+done
+echo "[后端启动] 配置：$BACKEND_CONFIG_PATH；代理目标：$BACKEND_ORIGIN"
+(cd "$ROOT_DIR/backend" && exec "$RUN_DIR/server" -config "$BACKEND_CONFIG_PATH" -dev -dev-frontend-port "$FRONTEND_PORT") >"$RUN_DIR/backend.log" 2>&1 &
+BACKEND_PID=$!
+GROUPS_STARTED+=("$BACKEND_PID")
+wait_ready 后端 "$BACKEND_ORIGIN/api/health" "$BACKEND_READY_TIMEOUT_SECONDS"
+
+echo "[前端启动] http://localhost:$FRONTEND_PORT"
+(
+  cd "$ROOT_DIR/frontend"
+  export BACKEND_ORIGIN VITE_BACKEND_ORIGIN="$BACKEND_ORIGIN"
+  export VITE_PUBLIC_SHARE_ORIGIN="$FRONTEND_PUBLIC_SHARE_ORIGIN" VITE_TRANSFER_ORIGIN="$FRONTEND_TRANSFER_ORIGIN"
+  export VITE_FRONTEND_PORT="$FRONTEND_PORT" VITE_TRANSFER_PORT="$BACKEND_PORT"
+  exec bun run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" --strictPort
+) >"$RUN_DIR/frontend.log" 2>&1 &
+FRONTEND_PID=$!
+GROUPS_STARTED+=("$FRONTEND_PID")
+wait_ready 前端 "http://127.0.0.1:$FRONTEND_PORT/" "$FRONTEND_READY_TIMEOUT_SECONDS"
+RUNTIME_READY=true
+echo '[运行] 前后端已就绪。按一次 Ctrl+C 开始停止，等待当前传输完成。'
+while true; do
+  check_services
+  sleep 0.2
+done

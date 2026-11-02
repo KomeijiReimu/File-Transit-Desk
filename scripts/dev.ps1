@@ -1,199 +1,221 @@
+#requires -Version 7.0
 param(
   [string]$BackendConfig = $(if ($env:BACKEND_CONFIG) { $env:BACKEND_CONFIG } else { 'backend/config.yaml' }),
   [int]$BackendPort = $(if ($env:BACKEND_PORT) { [int]$env:BACKEND_PORT } else { 17878 }),
-  [string]$BackendOrigin = $(if ($env:BACKEND_ORIGIN) { $env:BACKEND_ORIGIN } else { '' }),
+  [string]$BackendOrigin = $env:BACKEND_ORIGIN,
   [string]$FrontendHost = $(if ($env:FRONTEND_HOST) { $env:FRONTEND_HOST } else { '0.0.0.0' }),
   [int]$FrontendPort = $(if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 5173 }),
-  [string]$FrontendPublicShareOrigin = $(if ($env:FRONTEND_PUBLIC_SHARE_ORIGIN) { $env:FRONTEND_PUBLIC_SHARE_ORIGIN } elseif ($env:VITE_PUBLIC_SHARE_ORIGIN) { $env:VITE_PUBLIC_SHARE_ORIGIN } else { '' }),
-  [string]$FrontendTransferOrigin = $(if ($env:FRONTEND_TRANSFER_ORIGIN) { $env:FRONTEND_TRANSFER_ORIGIN } elseif ($env:VITE_TRANSFER_ORIGIN) { $env:VITE_TRANSFER_ORIGIN } else { '' })
+  [string]$FrontendPublicShareOrigin = $(if ($env:FRONTEND_PUBLIC_SHARE_ORIGIN) { $env:FRONTEND_PUBLIC_SHARE_ORIGIN } else { $env:VITE_PUBLIC_SHARE_ORIGIN }),
+  [string]$FrontendTransferOrigin = $(if ($env:FRONTEND_TRANSFER_ORIGIN) { $env:FRONTEND_TRANSFER_ORIGIN } else { $env:VITE_TRANSFER_ORIGIN }),
+  [int]$InstallTimeoutSeconds = $(if ($env:INSTALL_TIMEOUT_SECONDS) { [int]$env:INSTALL_TIMEOUT_SECONDS } else { 300 }),
+  [int]$BuildTimeoutSeconds = $(if ($env:BUILD_TIMEOUT_SECONDS) { [int]$env:BUILD_TIMEOUT_SECONDS } else { 180 }),
+  [int]$BackendReadyTimeoutSeconds = $(if ($env:BACKEND_READY_TIMEOUT_SECONDS) { [int]$env:BACKEND_READY_TIMEOUT_SECONDS } else { 30 }),
+  [int]$FrontendReadyTimeoutSeconds = $(if ($env:FRONTEND_READY_TIMEOUT_SECONDS) { [int]$env:FRONTEND_READY_TIMEOUT_SECONDS } else { 30 })
 )
 
 $ErrorActionPreference = 'Stop'
-
-$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-if ([string]::IsNullOrWhiteSpace($BackendOrigin)) {
-  # 使用 127.0.0.1 避免 Windows/Node 将 localhost 优先解析为 ::1，导致 Vite 代理连不上只监听 IPv4 的后端。
-  $BackendOrigin = "http://127.0.0.1:$BackendPort"
+$RootDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $IsWindows) { throw 'dev.ps1 需要 Windows 和 PowerShell 7；其他平台请使用 dev.sh。' }
+foreach ($Timeout in @($InstallTimeoutSeconds, $BuildTimeoutSeconds, $BackendReadyTimeoutSeconds, $FrontendReadyTimeoutSeconds)) {
+  if ($Timeout -le 0) { throw '启动阶段超时必须为正整数（秒）。' }
 }
-
-if ([System.IO.Path]::IsPathRooted($BackendConfig)) {
-  $BackendConfigPath = $BackendConfig
-} else {
-  $BackendConfigPath = Join-Path $RootDir $BackendConfig
-}
-
-function Require-Command {
-  param([string]$Name, [string]$InstallHint)
-  if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-    Write-Error "未找到 $Name，请先安装 $InstallHint。"
-  }
-}
-
-function Join-CmdArguments {
-  param([string[]]$Arguments)
-  # Start-Process 直接启动 bun 时可能拿到 .cmd 或脚本包装器，cmd.exe /c 需要自行保护参数空格。
-  return ($Arguments | ForEach-Object {
-    if ($_ -match '[\s"&|<>^]') {
-      '"' + ($_ -replace '"', '\"') + '"'
-    } else {
-      $_
-    }
-  }) -join ' '
-}
-
-function Wait-BackendReady {
-  param([string]$Origin, [object]$Process, [string]$StdoutLog, [string]$StderrLog)
-  $HealthUrl = "$Origin/api/health"
-  Write-Host "等待后端就绪：$HealthUrl"
-  for ($i = 0; $i -lt 60; $i++) {
-    if ($Process -and $Process.HasExited) {
-      Show-BackendFailure -Message '后端启动失败。' -Process $Process -StdoutLog $StdoutLog -StderrLog $StderrLog
-      exit $Process.ExitCode
-    }
-    try {
-      $Response = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 1
-      if ($Response.StatusCode -eq 200) {
-        return
-      }
-    } catch {
-      Start-Sleep -Milliseconds 500
-    }
-  }
-  Show-BackendFailure -Message '后端未在预期时间内就绪。' -Process $Process -StdoutLog $StdoutLog -StderrLog $StderrLog
-  exit 1
-}
-
-function Show-LogTail {
-  param([string]$Path, [string]$Title)
-  if ($Path -and (Test-Path -LiteralPath $Path)) {
-    $Content = Get-Content -LiteralPath $Path -Tail 80 -ErrorAction SilentlyContinue
-    if ($Content) {
-      Write-Host ""
-      Write-Host $Title
-      $Content | ForEach-Object { Write-Host "  $_" }
-    }
-  }
-}
-
-function Show-BackendFailure {
-  param([string]$Message, [object]$Process, [string]$StdoutLog, [string]$StderrLog)
-  Write-Host ""
-  Write-Host $Message -ForegroundColor Red
-  if ($Process -and $Process.HasExited) {
-    Write-Host "退出码：$($Process.ExitCode)"
-  }
-  Show-LogTail -Path $StderrLog -Title '后端错误日志：'
-  Show-LogTail -Path $StdoutLog -Title '后端输出日志：'
-  Write-Host ""
-  Write-Host '常见处理方式：'
-  Write-Host "  1. 如果提示 YAML 格式错误，请检查 backend/config.yaml 对应行附近的缩进。"
-  Write-Host "  2. file_picker 应与 storage 同级；不要把 roots/max_page_size/deny_names 缩进到 storage.shares 下面。"
-  Write-Host "  3. 如果提示端口监听失败，请确认 $BackendOrigin 没有被其他进程占用，或用 -BackendPort 修改端口。"
-  Write-Host "  4. 如果提示数据库无法打开，请确认 backend/data 目录可写。"
-  Write-Host "日志文件："
-  Write-Host "  stdout: $StdoutLog"
-  Write-Host "  stderr: $StderrLog"
-}
-
-Require-Command -Name 'go' -InstallHint 'Go'
-Require-Command -Name 'bun' -InstallHint 'Bun'
-
+if (-not $BackendOrigin) { $BackendOrigin = "http://127.0.0.1:$BackendPort" }
+$BackendConfigPath = [IO.Path]::GetFullPath($BackendConfig, $RootDir)
+$SettingsPath = Join-Path (Split-Path -Parent $BackendConfigPath) 'settings.yaml'
 if (-not (Test-Path -LiteralPath $BackendConfigPath -PathType Leaf)) {
-  $TargetDir = Split-Path -Parent $BackendConfigPath
-  if ($TargetDir -and -not (Test-Path -LiteralPath $TargetDir)) {
-    New-Item -ItemType Directory -Path $TargetDir | Out-Null
-  }
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $BackendConfigPath) | Out-Null
   Copy-Item -LiteralPath (Join-Path $RootDir 'backend/config.example.yaml') -Destination $BackendConfigPath
-  Write-Host "已复制 backend/config.example.yaml 到 $BackendConfig。"
-  Write-Host '请先编辑配置文件，至少替换：'
-  Write-Host '  - auth.totp_secret'
-  Write-Host '  - auth.admin.username'
-  Write-Host '  - auth.admin.password_hash'
-  Write-Host '  - storage.dirs'
-  Write-Host ''
-  Write-Host '配置完成后再次运行：pwsh -File scripts/dev.ps1'
+  if (-not (Test-Path -LiteralPath $SettingsPath)) {
+    Copy-Item -LiteralPath (Join-Path $RootDir 'backend/settings.example.yaml') -Destination $SettingsPath
+  }
+  Write-Host "已生成管理员配置：$BackendConfigPath"
+  Write-Host "服务设置（保留已有文件）：$SettingsPath"
+  Write-Host '请设置 admin.username/password_hash，并检查 settings.yaml。生成密码块：'
+  Write-Host ("  python `"{0}`" --format bootstrap" -f (Join-Path $PSScriptRoot 'hash-admin-password.py'))
+  Write-Host '配置完成后，请使用本次相同的启动参数重新运行。'
   exit 1
 }
+$Go = (Get-Command go -CommandType Application -ErrorAction Stop).Source
+$Bun = (Get-Command bun -CommandType Application -ErrorAction Stop).Source
+$ArtifactRoot = if ($env:TMPDIR) { [IO.Path]::GetFullPath($env:TMPDIR, $RootDir) } else { Join-Path $RootDir '.opencode/dev' }
+$RunDir = Join-Path $ArtifactRoot ('file-trans-dev-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
+Write-Host "诊断及构建目录：$RunDir"
+$Owners = [Collections.Generic.List[object]]::new()
+$OldEnvironment = @{}
+foreach ($Name in @('TMPDIR', 'TMP', 'TEMP', 'BACKEND_ORIGIN', 'VITE_BACKEND_ORIGIN', 'VITE_PUBLIC_SHARE_ORIGIN', 'VITE_TRANSFER_ORIGIN', 'VITE_FRONTEND_PORT', 'VITE_TRANSFER_PORT')) {
+  $OldEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
+}
 
-$FrontendDir = Join-Path $RootDir 'frontend'
-if (-not (Test-Path -LiteralPath (Join-Path $FrontendDir 'node_modules') -PathType Container)) {
-  Write-Host '首次运行：安装前端依赖...'
-  Push-Location $FrontendDir
-  try {
-    bun install
-  } finally {
-    Pop-Location
+function Start-OwnedProcess {
+  param([string]$Name, [string]$Command, [string[]]$Arguments, [string]$Directory)
+  $Info = [Diagnostics.ProcessStartInfo]::new()
+  $Info.WorkingDirectory = $Directory
+  $Info.UseShellExecute = $false
+  $Info.RedirectStandardOutput = $true
+  $Info.RedirectStandardError = $true
+  $Info.RedirectStandardInput = $true
+  # This runner cannot launch a native tool until the parent assigns its private job.
+  # It also delegates .cmd shim quoting to PowerShell instead of composing cmd /c text.
+  $Info.FileName = Join-Path $PSHOME 'pwsh.exe'
+  $Runner = @'
+$ErrorActionPreference = 'Stop'
+$Spec = [Console]::ReadLine() | ConvertFrom-Json
+if ($Spec.backendPidPath) {
+  # The native server shares the launcher's console and receives its Ctrl+C directly.
+  $Info = [Diagnostics.ProcessStartInfo]::new()
+  $Info.FileName = $Spec.command
+  $Info.UseShellExecute = $false
+  foreach ($Arg in $Spec.arguments) { $Info.ArgumentList.Add($Arg) }
+  $Server = [Diagnostics.Process]::Start($Info)
+  [IO.File]::WriteAllText($Spec.backendPidPath, [string]$Server.Id)
+  $Server.WaitForExit()
+  exit $Server.ExitCode
+}
+$NativeArgs = [string[]]$Spec.arguments
+& $Spec.command @NativeArgs
+exit $LASTEXITCODE
+'@
+  foreach ($Arg in @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $Runner)) {
+    $Info.ArgumentList.Add($Arg)
   }
+  $Job = [FileTransitDevJob]::new()
+  $Process = [Diagnostics.Process]::new()
+  $Process.StartInfo = $Info
+  $Owner = [pscustomobject]@{ Name = $Name; Process = $Process; Job = $Job; Out = $null; Err = $null; Stdout = $null; Stderr = $null; Assigned = $false; Saved = $false }
+  $Owners.Add($Owner)
+  [void]$Process.Start()
+  $Owner.Stdout = [IO.File]::Create((Join-Path $RunDir "$Name.stdout.log"))
+  $Owner.Stderr = [IO.File]::Create((Join-Path $RunDir "$Name.stderr.log"))
+  $Owner.Out = $Process.StandardOutput.BaseStream.CopyToAsync($Owner.Stdout)
+  $Owner.Err = $Process.StandardError.BaseStream.CopyToAsync($Owner.Stderr)
+  $Job.Assign($Process.Handle)
+  $Owner.Assigned = $true
+  $Spec = @{ command = $Command; arguments = $Arguments }
+  if ($Name -eq 'backend') {
+    $Spec.backendPidPath = Join-Path $RunDir 'backend.pid'
+  }
+  $Process.StandardInput.WriteLine(($Spec | ConvertTo-Json -Compress))
+  $Process.StandardInput.Close()
+  return $Owner
+}
+
+function Save-ProcessLog {
+  param($Owner)
+  if (-not $Owner.Saved -and $Owner.Out) {
+    $Owner.Out.GetAwaiter().GetResult()
+    $Owner.Err.GetAwaiter().GetResult()
+    $Owner.Stdout.Dispose()
+    $Owner.Stderr.Dispose()
+    $Owner.Saved = $true
+  }
+}
+
+function Invoke-Phase {
+  param([string]$Name, [int]$Timeout, [string]$Command, [string[]]$Arguments, [string]$Directory)
+  Write-Host "[$Name] 开始（最长 ${Timeout}s）"
+  $Owner = Start-OwnedProcess $Name $Command $Arguments $Directory
+  if (-not $Owner.Process.WaitForExit($Timeout * 1000)) {
+    Write-Host "[$Name] 超时；诊断目录：$RunDir"
+    exit 124
+  }
+  $Code = $Owner.Process.ExitCode
+  $Owner.Job.Dispose()
+  Save-ProcessLog $Owner
+  if ($Code -ne 0) {
+    Write-Host "[$Name] 失败，退出码：$Code"
+    Get-Content -LiteralPath (Join-Path $RunDir "$Name.stdout.log"), (Join-Path $RunDir "$Name.stderr.log") -Tail 80 | Write-Host
+    exit $Code
+  }
+  Write-Host "[$Name] 完成"
+}
+
+function Test-Services {
+  foreach ($Owner in @($script:BackendProcess, $script:FrontendProcess)) {
+    if ($Owner -and $Owner.Process.HasExited) {
+      $Code = $Owner.Process.ExitCode
+      Write-Host "[运行] 服务意外退出（$($Owner.Name)），原退出码：$Code；诊断目录：$RunDir"
+      if ($Code -eq 0) { $Code = 1 }
+      exit $Code
+    }
+  }
+}
+
+function Wait-Ready {
+  param([string]$Name, [string]$Url, [int]$Timeout)
+  Write-Host "[$Name 就绪] 等待 $Url（最长 ${Timeout}s）"
+  $Clock = [Diagnostics.Stopwatch]::StartNew()
+  while ($Clock.Elapsed.TotalSeconds -lt $Timeout) {
+    Test-Services
+    # Only the readiness probe has a timeout, never a transfer or the service runtime.
+    try { $Response = $Client.GetAsync($Url).GetAwaiter().GetResult() } catch [Net.Http.HttpRequestException] { $Response = $null } catch [OperationCanceledException] { $Response = $null }
+    if ($Response) {
+      $Ready = $Response.IsSuccessStatusCode
+      $Response.Dispose()
+      if ($Ready) { Test-Services; Write-Host "[$Name 就绪] 完成"; return }
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  Write-Host "[$Name 就绪] 超时；诊断目录：$RunDir"
+  exit 124
 }
 
 $BackendProcess = $null
 $FrontendProcess = $null
-$BackendStdoutLog = Join-Path ([System.IO.Path]::GetTempPath()) ("file-trans-backend-stdout-{0}.log" -f ([guid]::NewGuid().ToString('N')))
-$BackendStderrLog = Join-Path ([System.IO.Path]::GetTempPath()) ("file-trans-backend-stderr-{0}.log" -f ([guid]::NewGuid().ToString('N')))
-$OldBackendOrigin = $env:BACKEND_ORIGIN
-$OldViteBackendOrigin = $env:VITE_BACKEND_ORIGIN
-$OldPublicShareOrigin = $env:VITE_PUBLIC_SHARE_ORIGIN
-$OldTransferOrigin = $env:VITE_TRANSFER_ORIGIN
-$OldFrontendPort = $env:VITE_FRONTEND_PORT
-$OldTransferPort = $env:VITE_TRANSFER_PORT
-
+$RuntimeReady = $false
+$Handler = [Net.Http.HttpClientHandler]::new()
+$Handler.UseProxy = $false
+$Client = [Net.Http.HttpClient]::new($Handler)
+$Client.Timeout = [TimeSpan]::FromSeconds(1)
 try {
-  Write-Host "启动后端：$BackendConfig"
-  Write-Host "前端代理目标：$BackendOrigin"
-  $BackendProcess = Start-Process -FilePath 'go' `
-    -ArgumentList @('run', './cmd/server', '-config', $BackendConfigPath, '-dev', '-dev-frontend-port', [string]$FrontendPort) `
-    -WorkingDirectory (Join-Path $RootDir 'backend') `
-    -RedirectStandardOutput $BackendStdoutLog `
-    -RedirectStandardError $BackendStderrLog `
-    -NoNewWindow `
-    -PassThru
-
-  Wait-BackendReady -Origin $BackendOrigin -Process $BackendProcess -StdoutLog $BackendStdoutLog -StderrLog $BackendStderrLog
-
+  $env:TMPDIR = $RunDir
+  $env:TMP = $RunDir
+  $env:TEMP = $RunDir
+  if (-not ('FileTransitDevJob' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'dev-job.cs') }
+  $FrontendDir = Join-Path $RootDir 'frontend'
+  if (-not (Test-Path -LiteralPath (Join-Path $FrontendDir 'node_modules') -PathType Container)) {
+    Invoke-Phase install $InstallTimeoutSeconds $Bun @('install') $FrontendDir
+  } else { Write-Host '[install] 已有 node_modules，跳过安装' }
+  $Binary = Join-Path $RunDir 'server.exe'
+  Invoke-Phase build $BuildTimeoutSeconds $Go @('build', '-o', $Binary, './cmd/server') (Join-Path $RootDir 'backend')
+  foreach ($Url in @("$BackendOrigin/api/health", "http://127.0.0.1:$FrontendPort/")) {
+    try { $Response = $Client.GetAsync($Url).GetAwaiter().GetResult() } catch [Net.Http.HttpRequestException] { $Response = $null } catch [OperationCanceledException] { $Response = $null }
+    if ($Response) { $Response.Dispose(); throw "[启动] 地址已被占用：$Url；请修改端口或自行停止旧服务。" }
+  }
+  Write-Host "[后端启动] 配置：$BackendConfigPath；代理目标：$BackendOrigin"
+  $BackendProcess = Start-OwnedProcess backend $Binary @('-config', $BackendConfigPath, '-dev', '-dev-frontend-port', [string]$FrontendPort) (Join-Path $RootDir 'backend')
+  Wait-Ready 后端 "$BackendOrigin/api/health" $BackendReadyTimeoutSeconds
   $env:BACKEND_ORIGIN = $BackendOrigin
   $env:VITE_BACKEND_ORIGIN = $BackendOrigin
   $env:VITE_PUBLIC_SHARE_ORIGIN = $FrontendPublicShareOrigin
   $env:VITE_TRANSFER_ORIGIN = $FrontendTransferOrigin
   $env:VITE_FRONTEND_PORT = [string]$FrontendPort
   $env:VITE_TRANSFER_PORT = [string]$BackendPort
-
-  Write-Host "启动前端：http://localhost:$FrontendPort"
-  $FrontendCommand = 'bun ' + (Join-CmdArguments @('run', 'dev', '--', '--host', $FrontendHost, '--port', [string]$FrontendPort))
-  # Windows 上 bun 常以 bun.cmd/shim 形式出现在 PATH 中，Start-Process 不能总是把它当原生 Win32 程序启动。
-  # 通过 cmd.exe 启动可复用命令解析规则，避免 “%1 不是有效的 Win32” 错误。
-  $FrontendProcess = Start-Process -FilePath 'cmd.exe' `
-    -ArgumentList @('/d', '/s', '/c', $FrontendCommand) `
-    -WorkingDirectory $FrontendDir `
-    -NoNewWindow `
-    -PassThru
-
-  while ($true) {
-    Start-Sleep -Seconds 1
-    if ($BackendProcess.HasExited -or $FrontendProcess.HasExited) {
-      break
-    }
-  }
-
-  if ($BackendProcess.HasExited) {
-    if ($BackendProcess.ExitCode -ne 0) {
-      Show-BackendFailure -Message '后端进程已退出。' -Process $BackendProcess -StdoutLog $BackendStdoutLog -StderrLog $BackendStderrLog
-    }
-    exit $BackendProcess.ExitCode
-  }
-  if ($FrontendProcess.HasExited) {
-    exit $FrontendProcess.ExitCode
-  }
+  Write-Host "[前端启动] http://localhost:$FrontendPort"
+  $FrontendProcess = Start-OwnedProcess frontend $Bun @('run', 'dev', '--', '--host', $FrontendHost, '--port', [string]$FrontendPort, '--strictPort') $FrontendDir
+  Wait-Ready 前端 "http://127.0.0.1:$FrontendPort/" $FrontendReadyTimeoutSeconds
+  $ServerPid = [int][IO.File]::ReadAllText((Join-Path $RunDir 'backend.pid'))
+  $RuntimeReady = $true
+  Write-Host '[运行] 前后端已就绪。按一次 Ctrl+C 开始停止，等待当前传输完成。'
+  while ($true) { Test-Services; Start-Sleep -Milliseconds 200 }
 } finally {
-  if ($BackendProcess -and -not $BackendProcess.HasExited) {
-    Stop-Process -Id $BackendProcess.Id -Force -ErrorAction SilentlyContinue
+  if ($RuntimeReady) {
+    # Wait on the native server, not its runner (a console event may stop the runner first).
+    $NativeServer = Get-Process -Id $ServerPid -ErrorAction SilentlyContinue
+    if ($NativeServer) {
+      Write-Host '[停止] 等待本次后端退出，无固定截止时间；不会强杀后端。'
+      Write-Host '本控制台 Ctrl+C 直接通知 Go 排空；若已按过则只需等待。若因前端退出进入此处，请按一次 Ctrl+C。'
+      $NativeServer.WaitForExit()
+      $NativeServer.Dispose()
+    }
   }
-  if ($FrontendProcess -and -not $FrontendProcess.HasExited) {
-    Stop-Process -Id $FrontendProcess.Id -Force -ErrorAction SilentlyContinue
+  # Only close the backend job after drain, or for a startup failure before runtime.
+  foreach ($Owner in $Owners) {
+    $Owner.Job.Dispose()
+    if ($Owner.Out -and -not $Owner.Assigned -and -not $Owner.Process.HasExited) { $Owner.Process.Kill($true) }
+    if ($Owner.Out) { $Owner.Process.WaitForExit(); Save-ProcessLog $Owner }
+    $Owner.Process.Dispose()
   }
-  $env:BACKEND_ORIGIN = $OldBackendOrigin
-  $env:VITE_BACKEND_ORIGIN = $OldViteBackendOrigin
-  $env:VITE_PUBLIC_SHARE_ORIGIN = $OldPublicShareOrigin
-  $env:VITE_TRANSFER_ORIGIN = $OldTransferOrigin
-  $env:VITE_FRONTEND_PORT = $OldFrontendPort
-  $env:VITE_TRANSFER_PORT = $OldTransferPort
+  $Client.Dispose()
+  foreach ($Name in $OldEnvironment.Keys) { [Environment]::SetEnvironmentVariable($Name, $OldEnvironment[$Name], 'Process') }
 }

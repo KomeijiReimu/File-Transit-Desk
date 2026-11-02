@@ -45,6 +45,17 @@ jobs:
           cache-dependency-path: backend/go.sum
       # fsutil/config 不依赖 SQLite/CGO，单独作为 Windows 路径与原子保存语义门禁。
       - run: go test ./internal/fsutil ./internal/config
+      - name: Verify administrator system paths on Windows
+        env:
+          CGO_ENABLED: "1"
+        run: go test ./internal/server -run '^TestAdminPickerSystemResolveAndRestrictedMode$' -count=1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Validate actual Windows launcher with native tool stubs
+        working-directory: .
+        shell: pwsh
+        run: python scripts/check-dev-launchers.py --powershell
 
   frontend:
     runs-on: ubuntu-latest
