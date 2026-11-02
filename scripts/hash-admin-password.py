@@ -3,6 +3,7 @@
 
 import argparse
 import getpass
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -26,7 +27,10 @@ def read_password(argument_password: Optional[str]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="生成管理员 Argon2id 密码哈希")
+    parser = argparse.ArgumentParser(
+        description="生成管理员 Argon2id 密码哈希",
+        epilog=f'新配置使用：python "{Path(__file__).resolve()}" --format bootstrap',
+    )
     parser.add_argument(
         "password",
         nargs="?",
@@ -34,9 +38,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--format",
-        choices=("yaml", "phc", "legacy-sha256"),
+        choices=("bootstrap", "yaml", "phc", "legacy-sha256"),
         default="yaml",
-        help="输出格式，默认 yaml。legacy-sha256 仅用于短期回滚。",
+        help="新配置使用 bootstrap（顶层 admin）；默认 yaml 兼容旧配置。legacy-sha256 仅用于短期回滚。",
     )
     args = parser.parse_args()
     password = read_password(args.password)
@@ -47,18 +51,25 @@ def main() -> None:
 
     repo_root = Path(__file__).resolve().parents[1]
     backend = repo_root / "backend"
+    environment = os.environ.copy()
+    temporary_dir = Path(environment.get("TMPDIR") or repo_root / ".opencode/password-cli").resolve()
+    temporary_dir.mkdir(parents=True, exist_ok=True)
+    environment["TMPDIR"] = str(temporary_dir)
     completed = subprocess.run(
         ["go", "run", "./cmd/hash-admin-password", "--format", args.format],
         cwd=backend,
         input=password + "\n",
         text=True,
+        encoding="utf-8",
         capture_output=True,
         shell=False,
         check=False,
+        env=environment,
     )
     if completed.returncode != 0:
         message = completed.stderr.strip() or "管理员密码哈希生成失败。"
-        raise SystemExit(message)
+        print(message, file=sys.stderr)
+        raise SystemExit(completed.returncode if completed.returncode > 0 else 128 - completed.returncode)
     sys.stdout.write(completed.stdout)
 
 

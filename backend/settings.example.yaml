@@ -1,0 +1,147 @@
+# 必须与 config.yaml 同目录；相对路径以 config.yaml 所在目录为准。
+accounts:
+  registration_enabled: true
+  registration_approval_required: true
+  totp_enabled: false
+server:
+  host: "0.0.0.0"
+  port: 17878
+  # HTTP keep-alive 请求间连续空闲超时；仅重启生效，不是请求或传输总时长。
+  keepalive_idle_timeout_seconds: 120
+  # 直接运行保持 false/[]。Compose 经内置 Nginx 时改为 true，并使用下方 172.28.0.0/24；代理信任配置仅重启生效。
+  trust_proxy_headers: false
+  trusted_proxy_cidrs: []
+database:
+  path: "./data/filetrans.db"
+auth:
+  # 启用动态验证码登录前，填写自己的 Base32 TOTP secret。
+  totp_secret: ""
+  # 仅本地开发可改为 true；还必须以 -dev 启动，且 totp_secret 为空时才接受 000000。
+  dev_allow_fixed_code: false
+  # 会话绝对最长有效期；到期后必须重新登录。
+  session_ttl_seconds: 86400
+  # 用户无活动超过该时间后视为空闲过期；前端只在可见且有操作时发送心跳续期。
+  idle_timeout_seconds: 7200
+  # 心跳恢复宽限期；普通 API 不使用宽限，只有 heartbeat 可在短暂超时后续期。
+  idle_grace_seconds: 30
+  # 登录态上传开始前签发的单次上传票据有效期；票据是 bearer 授权，泄露即等同本次上传权限。
+  upload_lease_ttl_seconds: 1800
+  cookie_secure: false
+abuse:
+  login:
+    # 所有账号与管理员共享的 Argon2id 验证/哈希并发数；0 使用有界默认值 2。
+    max_concurrent_admin_verifications: 2
+    global_per_minute: 120
+    ip_max_failures: 10
+    window_seconds: 180
+    block_seconds: 90
+  creation:
+    token_global_per_minute: 120
+    token_per_session_per_minute: 30
+    lease_global_per_minute: 600
+    lease_per_owner_per_minute: 60
+    public_lease_per_ip_per_minute: 120
+    max_active_tokens: 1000
+    max_outstanding_leases_total: 5000
+    max_outstanding_leases_per_owner: 64
+  uploads:
+    # 单实例活跃/取消中上传并发；0 可分别关闭对应限制。
+    global: 16
+    per_resource: 8
+    per_session: 4
+    per_token: 2
+chat:
+  # 普通用户只能在消息创建后该时间内撤回自己的消息。
+  withdraw_window_seconds: 300
+  # 正文同时受 Unicode 字符数和 UTF-8 字节数约束。
+  max_message_chars: 2000
+  max_message_bytes: 8192
+  # 消息达到时间或数量任一保留上限后，由后台分批清理最旧记录。
+  retention_days: 90
+  max_messages: 50000
+  cleanup_batch: 500
+  # 发送消息同时受 session、可信客户端 IP 和全局固定窗口限制。
+  session_messages_per_minute: 20
+  ip_messages_per_minute: 60
+  global_messages_per_minute: 300
+web:
+  static_dir: "../frontend/dist"
+downloads:
+  # 下载票据有效期。点击下载时先兑换票据，长下载和 Range 续传不再依赖页面会话。
+  lease_ttl_seconds: 7200
+  # 下载票据最大有效期上限，防止误配置过长。
+  lease_max_ttl_seconds: 21600
+  # 对不超过该大小的文件写入 SHA-256 内容哈希，并在票据首次成功使用时复核；0 表示所有文件都做内容哈希。
+  content_hash_max_mb: 64
+  # 全局同时读取文件内容计算下载哈希的数量；满载立即返回 503，不等待。
+  max_concurrent_hashes: 2
+  # 默认仅在 lease 首次使用时复核内容哈希；不可信本地写者场景可启用每次请求复核。
+  verify_hash_on_every_request: false
+cors:
+  # 生产默认同源；仅显式跨域部署时填写。-dev 会单独允许指定的开发前端端口。
+  allow_origins: []
+storage:
+  # 整个请求体上限；后端 Fiber BodyLimit 也使用该值。
+  upload_max_mb: 5120
+  # 单个文件上限，必须小于等于 upload_max_mb。
+  upload_max_file_mb: 5120
+  # 单次 multipart 请求最多允许的文件数量。
+  upload_max_files: 20
+  # 崩溃或取消后残留的 .upload-*.tmp 临时文件保留时间。
+  upload_temp_retention_seconds: 86400
+  # 启动后定时清理 .upload-*.tmp 的间隔。
+  upload_temp_cleanup_interval_seconds: 3600
+  # 单次后台清理的扫描项数与时间预算；修改后需重启。
+  upload_temp_cleanup_max_entries: 50000
+  upload_temp_cleanup_max_duration_seconds: 5
+  # 每次普通目录列表最多扫描的原始目录项；临时文件也计入预算，第 N+1 项只探测 truncated。
+  directory_list_scan_limit: 5000
+  # 普通目录显式分页的单页上限；客户端更大的正 pageSize 会被夹紧到该值。
+  directory_list_max_page_size: 200
+  # 开始写临时文件前必须额外保留的磁盘空间；两项取较大值，0 可分别关闭。
+  min_free_mb: 1024
+  min_free_percent: 5
+  # 白名单非空时，只允许这些扩展名；示例： [".zip", ".txt", ".pdf"]。
+  allowed_extensions: []
+  # 黑名单优先级高于白名单；默认清空，管理员可在 Web 配置管理页按需添加。
+  blocked_extensions: []
+  dirs:
+    - id: "default"
+      name: "共享目录"
+      type: "directory"
+      path: "./uploads"
+      allow_download: true
+      allow_upload: true
+  # 管理员也可在前端“配置管理”页维护目录和单文件资源；单文件资源只允许下载。
+  shares: []
+file_picker:
+  # system：管理员可浏览系统路径；restricted：仅允许下方 roots。
+  mode: system
+  roots:
+    - id: "uploads"
+      name: "上传目录"
+      path: "./uploads"
+      allow_select_files: true
+      allow_select_dirs: true
+      show_hidden: false
+      follow_symlinks: false
+  # 管理员 picker 每次最多扫描的原始目录项；scannedEntries 对外永不超过该值。
+  max_scan_entries: 5000
+  # picker 单页最多返回的条目数；客户端固定请求更大值时会安全夹紧。
+  max_page_size: 200
+  deny_names: []
+  deny_patterns: []
+tokens:
+  default_ttl_seconds: 3600
+  # 管理员创建令牌时允许的最长有效期，防止误创建长期公开链接。
+  max_ttl_seconds: 86400
+  # 单个上传令牌的累计上传容量；0 表示不限制。
+  upload_max_mb: 5120
+audit:
+  retain: 1000
+  # 0 表示不按时间抑制，事件仍会写审计。
+  unauthorized_sample_seconds: 60
+  # 0 表示不限制对应 action 的全局审计写入量。
+  unauthorized_global_per_minute: 120
+  # 审计写入累计到该次数后批量清理；0 表示只由启动/维护显式清理。
+  prune_every_writes: 100

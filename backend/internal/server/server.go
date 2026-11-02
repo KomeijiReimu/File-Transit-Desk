@@ -191,7 +191,8 @@ type dirDTO struct {
 }
 
 type safeConfigDTO struct {
-	Resources []dirDTO `json:"resources"`
+	Accounts  config.AccountPolicy `json:"accounts"`
+	Resources []dirDTO             `json:"resources"`
 	Storage   struct {
 		UploadMaxMB                         int      `json:"uploadMaxMB"`
 		UploadMaxFileMB                     int      `json:"uploadMaxFileMB"`
@@ -339,8 +340,8 @@ func NewWithOptions(cfg *config.Config, st *store.Store, configPath string, opti
 	if options.DevFrontendPort < 1 || options.DevFrontendPort > 65535 {
 		return nil, fmt.Errorf("dev frontend port must be between 1 and 65535")
 	}
-	if !options.DevMode && cfg.Auth.DevAllowFixedCode && cfg.Auth.TOTPSecret == "" {
-		return nil, fmt.Errorf("auth.dev_allow_fixed_code with an empty TOTP secret requires explicit dev mode")
+	if cfg.Accounts.TOTPEnabled && !options.DevMode && cfg.Auth.DevAllowFixedCode && cfg.Auth.TOTPSecret == "" {
+		return nil, fmt.Errorf("空 TOTP 密钥配合 auth.dev_allow_fixed_code 使用时，必须显式启用开发模式")
 	}
 	if cfg.Server.KeepaliveIdleTimeoutSeconds < 1 || cfg.Server.KeepaliveIdleTimeoutSeconds > 86400 {
 		return nil, fmt.Errorf("server keepalive idle timeout must be between 1 and 86400 seconds")
@@ -1056,7 +1057,7 @@ func dirToDTO(dir config.Dir, includeRoot bool) dirDTO {
 
 func (s *Server) safeConfig(c *fiber.Ctx) error {
 	cfg := s.cfg()
-	out := safeConfigDTO{Resources: make([]dirDTO, 0, len(cfg.Resources())), ConfigWritable: s.configPath != ""}
+	out := safeConfigDTO{Accounts: cfg.Accounts, Resources: make([]dirDTO, 0, len(cfg.Resources())), ConfigWritable: s.configPath != "" && !cfg.Legacy()}
 	for _, dir := range cfg.Resources() {
 		out.Resources = append(out.Resources, dirToDTO(dir, true))
 	}
@@ -1089,6 +1090,7 @@ func (s *Server) createResource(c *fiber.Ctx) error {
 	if err := c.BodyParser(&in); err != nil {
 		return fiber.ErrBadRequest
 	}
+	in.Path = s.cfg().ResolvePath(strings.TrimSpace(in.Path))
 	resource, err := resourceFromRequest(in)
 	if err != nil {
 		return err
@@ -1127,6 +1129,7 @@ func (s *Server) updateResource(c *fiber.Ctx) error {
 		return fiber.ErrBadRequest
 	}
 	in.ID = c.Params("id")
+	in.Path = s.cfg().ResolvePath(strings.TrimSpace(in.Path))
 	resource, err := resourceFromRequest(in)
 	if err != nil {
 		return err
@@ -1264,6 +1267,9 @@ func (s *Server) updateConfig(mutator func(*config.Config) error) error {
 }
 
 func (s *Server) updateConfigWithBeforePublish(mutator func(*config.Config) error, beforePublish func(old, next *config.Config) error, afterPublished func()) error {
+	if s.cfg().Legacy() {
+		return fiber.NewError(fiber.StatusConflict, "旧版配置仅支持读取，请先停止服务并运行 -migrate-config -config 配置路径。")
+	}
 	if s.configPath == "" {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "当前服务未记录配置文件路径，不能在线写回配置。")
 	}
@@ -1312,6 +1318,7 @@ func (s *Server) updateConfigWithBeforePublish(mutator func(*config.Config) erro
 					log.Printf("[CRITICAL] failed to persist config sync failure audit: %v", auditErr)
 				}
 			}
+			return fiber.NewError(fiber.StatusInternalServerError, "配置已生效，但保存确认失败。请刷新确认当前配置，并检查服务端日志。")
 		} else {
 			log.Printf("[ERROR] config publish failed after authorization revocation: %v", commitErr)
 		}
@@ -1509,6 +1516,9 @@ func (s *Server) protectedResourcePaths(cfg *config.Config) protectedResourcePat
 	if s.configPath != "" {
 		appendFile(s.configPath + ".bak")
 		paths.configDir = filepath.Dir(s.configPath)
+		appendFile(s.configPath + ".pre-migration.bak")
+		appendFile(filepath.Join(paths.configDir, "settings.yaml"))
+		appendFile(filepath.Join(paths.configDir, "settings.yaml.bak"))
 	}
 	appendFile(cfg.Database.Path)
 	if cfg.Database.Path != "" {

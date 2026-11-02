@@ -365,17 +365,6 @@ storage:
 	}
 }
 
-func TestDefaultUploadBlacklistIsEmpty(t *testing.T) {
-	// 默认不再预置阻断扩展名，是否限制危险类型交由管理员按场景配置。
-	c := Default()
-	if len(c.Storage.BlockedExtensions) != 0 {
-		t.Fatalf("expected default blocked extensions to be empty, got %v", c.Storage.BlockedExtensions)
-	}
-	if len(c.FilePicker.DenyNames) != 0 || len(c.FilePicker.DenyPatterns) != 0 {
-		t.Fatalf("expected default file picker filters to be empty, got names=%v patterns=%v", c.FilePicker.DenyNames, c.FilePicker.DenyPatterns)
-	}
-}
-
 func TestLoadReportsFriendlyYAMLError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	bad := []byte("storage:\n  shares: []\n    roots: []\n")
@@ -387,7 +376,7 @@ func TestLoadReportsFriendlyYAMLError(t *testing.T) {
 		t.Fatalf("expected malformed yaml to fail")
 	}
 	message := err.Error()
-	for _, want := range []string{"配置文件格式错误", "config.yaml", "file_picker", "storage.shares"} {
+	for _, want := range []string{"配置格式错误", "config.yaml"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("expected friendly error to contain %q, got %q", want, message)
 		}

@@ -7,10 +7,12 @@ import (
 	"testing"
 
 	"filetrans-backend/internal/security"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestRunFormats(t *testing.T) {
-	for _, format := range []string{"yaml", "phc"} {
+	for _, format := range []string{"yaml", "phc", "bootstrap"} {
 		var out bytes.Buffer
 		if err := run([]string{"--format", format}, strings.NewReader("secret\n"), &out); err != nil {
 			t.Fatalf("run %s: %v", format, err)
@@ -27,6 +29,20 @@ func TestRunFormats(t *testing.T) {
 			if legacy != "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b" {
 				t.Fatalf("YAML rollback SHA does not match the input password: %q", legacy)
 			}
+		} else if format == "bootstrap" {
+			var parsed struct {
+				Admin struct {
+					Username     string `yaml:"username"`
+					PasswordHash string `yaml:"password_hash"`
+				} `yaml:"admin"`
+			}
+			if err := yaml.Unmarshal(out.Bytes(), &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Admin.Username != "admin" {
+				t.Fatal("bootstrap username missing")
+			}
+			phc = parsed.Admin.PasswordHash
 		} else if strings.Contains(out.String(), "password_sha256") {
 			t.Fatalf("phc format must not include rollback SHA: %q", out.String())
 		}

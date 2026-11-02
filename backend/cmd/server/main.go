@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -29,30 +30,54 @@ func realMain() int {
 	cfgPath := flag.String("config", "config.yaml", "config path")
 	devMode := flag.Bool("dev", false, "enable explicit development mode")
 	devFrontendPort := flag.Int("dev-frontend-port", 5173, "development frontend port")
+	migrate := flag.Bool("migrate-config", false, "离线迁移旧配置到 bootstrap/settings 两文件并退出")
 	flag.Parse()
+	abs, err := filepath.Abs(*cfgPath)
+	if err != nil {
+		log.Printf("配置路径无效：%v", err)
+		return 1
+	}
+	*cfgPath = abs
+	if *migrate {
+		if err := config.MigrateConfig(abs); err != nil {
+			log.Printf("配置迁移失败：%v", err)
+			return 1
+		}
+		log.Printf("配置迁移完成：%s", abs)
+		return 0
+	}
+	created, err := config.InitializeExamples(abs)
+	if err != nil {
+		log.Printf("首次启动配置准备失败：%v", err)
+		return 1
+	}
+	if created {
+		log.Printf("已生成首次启动配置：%s 和同目录 settings.yaml。请填写管理员用户名和密码摘要后重新启动。密码工具支持 --format bootstrap；如需启用动态验证码登录，请在 settings.yaml 配置 auth.totp_secret 并启用 accounts.totp_enabled。", abs)
+		return 1
+	}
 
 	// 启动前先完成配置校验和数据库迁移，任何关键错误都直接终止，避免以半可用状态对外服务。
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		log.Printf("event=startup_config_failed")
+		log.Printf("event=startup_config_failed 配置加载失败：%v", err)
 		return 1
 	}
 	listenEndpoint, err := server.ResolveListenEndpoint(cfg.Server.Host, cfg.Server.Port)
 	if err != nil {
-		log.Printf("event=startup_listener_config_failed")
+		log.Printf("event=startup_listener_config_failed 监听地址配置校验失败：%v", err)
 		return 1
 	}
 
 	st, err := store.Open(cfg.Database.Path, cfg.Audit.Retain)
 	if err != nil {
-		log.Printf("event=startup_database_failed")
+		log.Printf("event=startup_database_failed 数据库初始化失败（路径：%s）：%v", cfg.Database.Path, err)
 		return 1
 	}
 
 	runtime, err := server.NewRuntimeWithOptions(cfg, st, *cfgPath, server.Options{DevMode: *devMode, DevFrontendPort: *devFrontendPort})
 	if err != nil {
 		_ = st.DB.Close()
-		log.Printf("event=startup_runtime_failed")
+		log.Printf("event=startup_runtime_failed 服务初始化失败：%v", err)
 		return 1
 	}
 	addr := listenerAddress(listenEndpoint)
@@ -75,9 +100,9 @@ func runServer(runtime runtimeControl, listen func() error, signals <-chan os.Si
 	select {
 	case err := <-listenErr:
 		if err != nil {
-			log.Printf("event=listener_failed")
+			log.Printf("event=listener_failed 服务监听失败：%v", err)
 		} else {
-			log.Printf("event=listener_stopped_unexpectedly")
+			log.Printf("event=listener_stopped_unexpectedly 服务监听意外停止")
 		}
 		listenerFailed = true
 	case <-signals:

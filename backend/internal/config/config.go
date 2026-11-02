@@ -16,6 +16,8 @@ import (
 )
 
 type Config struct {
+	source     *configSource
+	Accounts   AccountPolicy    `yaml:"accounts"`
 	Server     ServerConfig     `yaml:"server"`
 	Database   DatabaseConfig   `yaml:"database"`
 	Auth       AuthConfig       `yaml:"auth"`
@@ -122,10 +124,11 @@ type StorageConfig struct {
 	AllowedExtensions                   []string `yaml:"allowed_extensions"`
 	BlockedExtensions                   []string `yaml:"blocked_extensions"`
 	Dirs                                []Dir    `yaml:"dirs"`
-	Shares                              []Dir    `yaml:"shares,omitempty"`
+	Shares                              []Dir    `yaml:"shares"`
 }
 
 type FilePickerConfig struct {
+	Mode           string           `yaml:"mode"`
 	Roots          []FilePickerRoot `yaml:"roots"`
 	MaxScanEntries int              `yaml:"max_scan_entries"`
 	MaxPageSize    int              `yaml:"max_page_size"`
@@ -186,7 +189,7 @@ type PreparedSave struct {
 	syncParent func(string) error
 }
 
-var ErrInvalidConfig = errors.New("invalid config content")
+var ErrInvalidConfig = errors.New("配置内容无效")
 
 const (
 	ResourceDirectory = "directory"
@@ -195,20 +198,7 @@ const (
 )
 
 func Load(path string) (*Config, error) {
-	// 先加载默认值，再让 YAML 覆盖，保证新增配置项对旧配置文件保持兼容。
-	c := Default()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("读取配置文件失败\n配置文件：%s\n原因：%w\n处理建议：请确认配置文件存在，并且当前用户对该文件有读取权限", displayPath(path), err)
-	}
-	if err := yaml.Unmarshal(b, c); err != nil {
-		return nil, fmt.Errorf("配置文件格式错误\n配置文件：%s\n原因：%w\n处理建议：请检查提示行附近的 YAML 缩进、冒号和列表层级；例如 file_picker 应与 storage 同级，不能缩进到 storage.shares 下面", displayPath(path), err)
-	}
-	c.normalize()
-	if err := c.validate(); err != nil {
-		return nil, fmt.Errorf("配置内容校验失败\n配置文件：%s\n原因：%w\n处理建议：请按上面的原因修改配置；如果是首次运行，可对照 backend/config.example.yaml", displayPath(path), err)
-	}
-	return c, nil
+	return loadLayered(path)
 }
 
 func displayPath(path string) string {
@@ -229,13 +219,19 @@ func SaveAtomic(path string, c *Config) error {
 }
 
 func PrepareAtomic(path string, c *Config) (*PreparedSave, *Config, error) {
+	if c.Legacy() {
+		return nil, nil, ErrLegacyConfig
+	}
 	next, err := c.NormalizedClone()
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
-	b, err := yaml.Marshal(next)
+	b, err := settingsForSave(next)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	if next.source != nil {
+		path = next.source.settingsPath
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -279,13 +275,13 @@ func PrepareAtomic(path string, c *Config) (*PreparedSave, *Config, error) {
 
 func (p *PreparedSave) Commit() (bool, error) {
 	if p == nil {
-		return false, fmt.Errorf("prepared config is nil")
+		return false, fmt.Errorf("待发布配置为空")
 	}
 	if p.published {
 		return true, nil
 	}
 	if p.tempPath == "" {
-		return false, fmt.Errorf("prepared config is not available")
+		return false, fmt.Errorf("待发布配置已不可用")
 	}
 	if err := p.rename(p.tempPath, p.path); err != nil {
 		return false, err
@@ -347,13 +343,16 @@ func (c *Config) Clone() *Config {
 	var out Config
 	b, err := yaml.Marshal(c)
 	if err != nil || yaml.Unmarshal(b, &out) != nil {
-		return Default()
+		panic("配置克隆失败")
 	}
+	out.source = c.source
 	return &out
 }
 
 func Default() *Config {
 	c := &Config{}
+	c.Accounts = AccountPolicy{RegistrationEnabled: true, RegistrationApprovalRequired: true, TOTPEnabled: true}
+	c.FilePicker.Mode = "system"
 	c.Server.Host = "0.0.0.0"
 	c.Server.Port = 17878
 	c.Server.KeepaliveIdleTimeoutSeconds = 120
@@ -423,81 +422,21 @@ func (c *Config) normalize() {
 	if c.Server.Host == "" {
 		c.Server.Host = "0.0.0.0"
 	}
-	if c.Server.Port <= 0 {
-		c.Server.Port = 17878
-	}
-	if c.Server.KeepaliveIdleTimeoutSeconds <= 0 {
-		c.Server.KeepaliveIdleTimeoutSeconds = 120
-	}
 	if c.Database.Path == "" {
 		c.Database.Path = "./data/filetrans.db"
 	}
-	if c.Auth.SessionTTLSeconds <= 0 {
-		c.Auth.SessionTTLSeconds = int64((24 * time.Hour) / time.Second)
-	}
-	if c.Auth.IdleTimeoutSeconds <= 0 {
-		c.Auth.IdleTimeoutSeconds = int64((2 * time.Hour) / time.Second)
-	}
-	if c.Auth.IdleGraceSeconds < 0 {
-		c.Auth.IdleGraceSeconds = 0
-	}
-	if c.Auth.UploadLeaseTTLSeconds <= 0 {
-		c.Auth.UploadLeaseTTLSeconds = int64((30 * time.Minute) / time.Second)
-	}
-	if c.Downloads.LeaseTTLSeconds <= 0 {
-		c.Downloads.LeaseTTLSeconds = int64((2 * time.Hour) / time.Second)
-	}
-	if c.Downloads.LeaseMaxTTLSeconds <= 0 {
-		c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
-	}
 	if c.Downloads.LeaseTTLSeconds > c.Downloads.LeaseMaxTTLSeconds {
 		c.Downloads.LeaseTTLSeconds = c.Downloads.LeaseMaxTTLSeconds
-	}
-	if c.Storage.UploadMaxMB <= 0 {
-		c.Storage.UploadMaxMB = 5120
-	}
-	if c.Storage.UploadMaxFileMB <= 0 {
-		c.Storage.UploadMaxFileMB = c.Storage.UploadMaxMB
-	}
-	if c.Storage.UploadMaxFiles <= 0 {
-		c.Storage.UploadMaxFiles = 20
-	}
-	if c.Storage.UploadTempRetentionSeconds <= 0 {
-		c.Storage.UploadTempRetentionSeconds = 86400
-	}
-	if c.Storage.UploadTempCleanupIntervalSeconds <= 0 {
-		c.Storage.UploadTempCleanupIntervalSeconds = 3600
-	}
-	if c.Storage.DirectoryListScanLimit <= 0 {
-		c.Storage.DirectoryListScanLimit = 5000
-	}
-	if c.Storage.DirectoryListMaxPageSize <= 0 {
-		c.Storage.DirectoryListMaxPageSize = 200
 	}
 	c.Storage.AllowedExtensions = normalizeExtensions(c.Storage.AllowedExtensions)
 	c.Storage.BlockedExtensions = normalizeExtensions(c.Storage.BlockedExtensions)
 	c.Storage.Dirs = normalizeResources(c.Storage.Dirs, ResourceDirectory)
 	c.Storage.Shares = normalizeResources(c.Storage.Shares, "")
 	c.FilePicker.Roots = normalizeFilePickerRoots(c.FilePicker.Roots)
-	if c.FilePicker.MaxPageSize <= 0 {
-		c.FilePicker.MaxPageSize = 200
-	}
-	if c.FilePicker.MaxScanEntries <= 0 {
-		c.FilePicker.MaxScanEntries = 5000
-	}
 	c.FilePicker.DenyNames = normalizeNames(c.FilePicker.DenyNames)
 	c.FilePicker.DenyPatterns = normalizeNames(c.FilePicker.DenyPatterns)
-	if c.Tokens.DefaultTTLSeconds <= 0 {
-		c.Tokens.DefaultTTLSeconds = 3600
-	}
-	if c.Tokens.MaxTTLSeconds <= 0 {
-		c.Tokens.MaxTTLSeconds = int64((24 * time.Hour) / time.Second)
-	}
 	if c.Tokens.DefaultTTLSeconds > c.Tokens.MaxTTLSeconds {
 		c.Tokens.DefaultTTLSeconds = c.Tokens.MaxTTLSeconds
-	}
-	if c.Audit.Retain <= 0 {
-		c.Audit.Retain = 1000
 	}
 	// Chat defaults are seeded before YAML decoding. Do not re-default zero or
 	// negative values here: explicit invalid user input must reach validation
@@ -505,20 +444,26 @@ func (c *Config) normalize() {
 }
 
 func (c *Config) validate() error {
+	if c.Auth.SessionTTLSeconds < 60 || c.Auth.IdleGraceSeconds < 0 {
+		return fmt.Errorf("会话有效期不得小于 60 秒，空闲宽限期不得为负数")
+	}
+	if c.FilePicker.Mode != "system" && c.FilePicker.Mode != "restricted" {
+		return fmt.Errorf("file_picker.mode 必须为 system 或 restricted")
+	}
 	if c.Chat.WithdrawWindowSeconds < 1 || c.Chat.WithdrawWindowSeconds > 86400 {
-		return fmt.Errorf("chat.withdraw_window_seconds must be between 1 and 86400")
+		return fmt.Errorf("chat.withdraw_window_seconds 必须在 1 至 86400 之间")
 	}
 	if c.Chat.MaxMessageChars < 1 || c.Chat.MaxMessageChars > 10000 {
-		return fmt.Errorf("chat.max_message_chars must be between 1 and 10000")
+		return fmt.Errorf("chat.max_message_chars 必须在 1 至 10000 之间")
 	}
 	if c.Chat.MaxMessageBytes < 1 || c.Chat.MaxMessageBytes > 65536 {
-		return fmt.Errorf("chat.max_message_bytes must be between 1 and 65536")
+		return fmt.Errorf("chat.max_message_bytes 必须在 1 至 65536 之间")
 	}
 	if c.Chat.RetentionDays < 1 || c.Chat.RetentionDays > 3650 {
-		return fmt.Errorf("chat.retention_days must be between 1 and 3650")
+		return fmt.Errorf("chat.retention_days 必须在 1 至 3650 之间")
 	}
 	if c.Chat.MaxMessages < 1 || c.Chat.MaxMessages > 1000000 {
-		return fmt.Errorf("chat.max_messages must be between 1 and 1000000")
+		return fmt.Errorf("chat.max_messages 必须在 1 至 1000000 之间")
 	}
 	for name, limit := range map[string]int{
 		"chat.session_messages_per_minute": c.Chat.SessionMessagesPerMinute,
@@ -526,81 +471,81 @@ func (c *Config) validate() error {
 		"chat.global_messages_per_minute":  c.Chat.GlobalMessagesPerMinute,
 	} {
 		if limit < 1 || limit > 100000 {
-			return fmt.Errorf("%s must be between 1 and 100000", name)
+			return fmt.Errorf("%s 必须在 1 至 100000 之间", name)
 		}
 	}
 	if c.Chat.CleanupBatch < 1 || c.Chat.CleanupBatch > 10000 {
-		return fmt.Errorf("chat.cleanup_batch must be between 1 and 10000")
+		return fmt.Errorf("chat.cleanup_batch 必须在 1 至 10000 之间")
 	}
 	if c.Audit.UnauthorizedSampleSeconds < 0 || c.Audit.UnauthorizedSampleSeconds > 86400 {
-		return fmt.Errorf("audit.unauthorized_sample_seconds must be between 0 and 86400")
+		return fmt.Errorf("audit.unauthorized_sample_seconds 必须在 0 至 86400 之间")
 	}
 	if c.Audit.UnauthorizedGlobalPerMinute < 0 || c.Audit.UnauthorizedGlobalPerMinute > 100000 {
-		return fmt.Errorf("audit.unauthorized_global_per_minute must be between 0 and 100000")
+		return fmt.Errorf("audit.unauthorized_global_per_minute 必须在 0 至 100000 之间")
 	}
 	if c.Audit.PruneEveryWrites < 0 || c.Audit.PruneEveryWrites > 100000 {
-		return fmt.Errorf("audit.prune_every_writes must be between 0 and 100000")
+		return fmt.Errorf("audit.prune_every_writes 必须在 0 至 100000 之间")
 	}
 	// 启动阶段集中拒绝危险配置，避免服务运行后才在请求路径上暴露问题。
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
-		return fmt.Errorf("server.port must be between 1 and 65535")
+		return fmt.Errorf("server.port 必须在 1 至 65535 之间")
 	}
 	if c.Server.KeepaliveIdleTimeoutSeconds < 1 || c.Server.KeepaliveIdleTimeoutSeconds > 86400 {
-		return fmt.Errorf("server.keepalive_idle_timeout_seconds must be between 1 and 86400")
+		return fmt.Errorf("server.keepalive_idle_timeout_seconds 必须在 1 至 86400 之间")
 	}
 	if c.Auth.IdleTimeoutSeconds < 30 {
-		return fmt.Errorf("auth.idle_timeout_seconds must be at least 30")
+		return fmt.Errorf("auth.idle_timeout_seconds 不得小于 30")
 	}
 	if c.Auth.IdleTimeoutSeconds > c.Auth.SessionTTLSeconds {
-		return fmt.Errorf("auth.idle_timeout_seconds must not exceed auth.session_ttl_seconds")
+		return fmt.Errorf("auth.idle_timeout_seconds 不得超过 auth.session_ttl_seconds")
 	}
 	if c.Auth.IdleGraceSeconds > c.Auth.IdleTimeoutSeconds {
-		return fmt.Errorf("auth.idle_grace_seconds must not exceed auth.idle_timeout_seconds")
+		return fmt.Errorf("auth.idle_grace_seconds 不得超过 auth.idle_timeout_seconds")
 	}
 	if c.Auth.UploadLeaseTTLSeconds < 60 || c.Auth.UploadLeaseTTLSeconds > c.Auth.SessionTTLSeconds {
-		return fmt.Errorf("auth.upload_lease_ttl_seconds must be between 60 and auth.session_ttl_seconds")
+		return fmt.Errorf("auth.upload_lease_ttl_seconds 必须在 60 至 auth.session_ttl_seconds 之间")
 	}
 	if c.Downloads.LeaseTTLSeconds < 60 {
-		return fmt.Errorf("downloads.lease_ttl_seconds must be at least 60")
+		return fmt.Errorf("downloads.lease_ttl_seconds 不得小于 60")
 	}
 	if c.Downloads.LeaseMaxTTLSeconds < c.Downloads.LeaseTTLSeconds {
-		return fmt.Errorf("downloads.lease_max_ttl_seconds must be greater than or equal to downloads.lease_ttl_seconds")
+		return fmt.Errorf("downloads.lease_max_ttl_seconds 不得小于 downloads.lease_ttl_seconds")
 	}
 	if c.Downloads.ContentHashMaxMB < 0 || c.Downloads.ContentHashMaxMB > 102400 {
-		return fmt.Errorf("downloads.content_hash_max_mb must be between 0 and 102400")
+		return fmt.Errorf("downloads.content_hash_max_mb 必须在 0 至 102400 之间")
 	}
 	if c.Downloads.MaxConcurrentHashes < 1 || c.Downloads.MaxConcurrentHashes > 16 {
-		return fmt.Errorf("downloads.max_concurrent_hashes must be between 1 and 16")
+		return fmt.Errorf("downloads.max_concurrent_hashes 必须在 1 至 16 之间")
 	}
 	if c.Storage.UploadMaxMB < 1 || c.Storage.UploadMaxMB > maxUploadLimitMB {
-		return fmt.Errorf("storage.upload_max_mb must be between 1 and %d", maxUploadLimitMB)
+		return fmt.Errorf("storage.upload_max_mb 必须在 1 至 %d 之间", maxUploadLimitMB)
 	}
 	if c.Storage.UploadMaxFileMB < 1 || c.Storage.UploadMaxFileMB > c.Storage.UploadMaxMB {
-		return fmt.Errorf("storage.upload_max_file_mb must be between 1 and storage.upload_max_mb")
+		return fmt.Errorf("storage.upload_max_file_mb 必须在 1 至 storage.upload_max_mb 之间")
 	}
 	if c.Storage.UploadMaxFiles < 1 || c.Storage.UploadMaxFiles > 1000 {
-		return fmt.Errorf("storage.upload_max_files must be between 1 and 1000")
+		return fmt.Errorf("storage.upload_max_files 必须在 1 至 1000 之间")
 	}
 	if c.Storage.UploadTempCleanupMaxEntries < 100 || c.Storage.UploadTempCleanupMaxEntries > 1000000 {
-		return fmt.Errorf("storage.upload_temp_cleanup_max_entries must be between 100 and 1000000")
+		return fmt.Errorf("storage.upload_temp_cleanup_max_entries 必须在 100 至 1000000 之间")
 	}
 	if c.Storage.UploadTempCleanupMaxDurationSeconds < 1 || c.Storage.UploadTempCleanupMaxDurationSeconds > 60 {
-		return fmt.Errorf("storage.upload_temp_cleanup_max_duration_seconds must be between 1 and 60")
+		return fmt.Errorf("storage.upload_temp_cleanup_max_duration_seconds 必须在 1 至 60 之间")
 	}
 	if c.Storage.DirectoryListScanLimit < 100 || c.Storage.DirectoryListScanLimit > 100000 {
-		return fmt.Errorf("storage.directory_list_scan_limit must be between 100 and 100000")
+		return fmt.Errorf("storage.directory_list_scan_limit 必须在 100 至 100000 之间")
 	}
 	if c.Storage.DirectoryListMaxPageSize < 1 || c.Storage.DirectoryListMaxPageSize > 1000 {
-		return fmt.Errorf("storage.directory_list_max_page_size must be between 1 and 1000")
+		return fmt.Errorf("storage.directory_list_max_page_size 必须在 1 至 1000 之间")
 	}
 	if c.Storage.DirectoryListMaxPageSize > c.Storage.DirectoryListScanLimit {
-		return fmt.Errorf("storage.directory_list_max_page_size must not exceed directory_list_scan_limit")
+		return fmt.Errorf("storage.directory_list_max_page_size 不得超过 directory_list_scan_limit")
 	}
 	if c.Tokens.UploadMaxMB < 0 || c.Tokens.UploadMaxMB > maxUploadLimitMB {
-		return fmt.Errorf("tokens.upload_max_mb must be between 0 and %d", maxUploadLimitMB)
+		return fmt.Errorf("tokens.upload_max_mb 必须在 0 至 %d 之间", maxUploadLimitMB)
 	}
 	if overlap := intersectExtensions(c.Storage.AllowedExtensions, c.Storage.BlockedExtensions); overlap != "" {
-		return fmt.Errorf("extension %q cannot appear in both storage.allowed_extensions and storage.blocked_extensions", overlap)
+		return fmt.Errorf("扩展名 %q 不能同时出现在允许列表和阻断列表中", overlap)
 	}
 	if err := validateExtensionList("storage.allowed_extensions", c.Storage.AllowedExtensions); err != nil {
 		return err
@@ -609,135 +554,135 @@ func (c *Config) validate() error {
 		return err
 	}
 	if c.FilePicker.MaxScanEntries < 100 || c.FilePicker.MaxScanEntries > 100000 {
-		return fmt.Errorf("file_picker.max_scan_entries must be between 100 and 100000")
+		return fmt.Errorf("file_picker.max_scan_entries 必须在 100 至 100000 之间")
 	}
 	if c.FilePicker.MaxPageSize < 1 || c.FilePicker.MaxPageSize > 200 {
-		return fmt.Errorf("file_picker.max_page_size must be between 1 and 200")
+		return fmt.Errorf("file_picker.max_page_size 必须在 1 至 200 之间")
 	}
 	if c.FilePicker.MaxPageSize > c.FilePicker.MaxScanEntries {
-		return fmt.Errorf("file_picker.max_page_size must not exceed max_scan_entries")
+		return fmt.Errorf("file_picker.max_page_size 不得超过 max_scan_entries")
 	}
 	if c.Server.TrustProxyHeaders && len(c.Server.TrustedProxyCIDRs) == 0 {
-		return fmt.Errorf("server.trusted_proxy_cidrs must not be empty when trust_proxy_headers is true")
+		return fmt.Errorf("启用 trust_proxy_headers 时 server.trusted_proxy_cidrs 不得为空")
 	}
 	if !c.Server.TrustProxyHeaders && len(c.Server.TrustedProxyCIDRs) != 0 {
-		return fmt.Errorf("server.trusted_proxy_cidrs must be empty when trust_proxy_headers is false")
+		return fmt.Errorf("未启用 trust_proxy_headers 时 server.trusted_proxy_cidrs 必须为空")
 	}
 	if len(c.Server.TrustedProxyCIDRs) > 64 {
-		return fmt.Errorf("server.trusted_proxy_cidrs must contain at most 64 entries")
+		return fmt.Errorf("server.trusted_proxy_cidrs 最多允许 64 项")
 	}
 	for _, value := range c.Server.TrustedProxyCIDRs {
 		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
 		if err != nil {
-			return fmt.Errorf("server.trusted_proxy_cidrs contains an invalid CIDR")
+			return fmt.Errorf("server.trusted_proxy_cidrs 包含无效 CIDR")
 		}
 		if unsafeTrustedProxyPrefix(prefix) {
-			return fmt.Errorf("server.trusted_proxy_cidrs must not trust all IPv4 or IPv6 addresses")
+			return fmt.Errorf("server.trusted_proxy_cidrs 不得信任所有 IPv4 或 IPv6 地址")
 		}
 	}
 	seenPickerRoots := map[string]struct{}{}
 	for _, root := range c.FilePicker.Roots {
 		if !validResourceID(root.ID) {
-			return fmt.Errorf("file_picker root id %q may only contain letters, numbers, underscore and hyphen", root.ID)
+			return fmt.Errorf("文件选择器根 ID %q 只能包含字母、数字、下划线和短横线", root.ID)
 		}
 		if _, ok := seenPickerRoots[root.ID]; ok {
-			return fmt.Errorf("file_picker contains duplicate root id %q", root.ID)
+			return fmt.Errorf("文件选择器存在重复根 ID %q", root.ID)
 		}
 		if strings.TrimSpace(root.Path) == "" {
-			return fmt.Errorf("file_picker root %s path must not be empty", root.ID)
+			return fmt.Errorf("文件选择器根 %s 的路径不能为空", root.ID)
 		}
 		if !root.AllowSelectFiles && !root.AllowSelectDirs {
-			return fmt.Errorf("file_picker root %s must allow selecting files or directories", root.ID)
+			return fmt.Errorf("文件选择器根 %s 必须允许选择文件或目录", root.ID)
 		}
 		seenPickerRoots[root.ID] = struct{}{}
 	}
 	if c.Tokens.DefaultTTLSeconds < 60 {
-		return fmt.Errorf("tokens.default_ttl_seconds must be at least 60")
+		return fmt.Errorf("tokens.default_ttl_seconds 不得小于 60")
 	}
 	if c.Tokens.MaxTTLSeconds < c.Tokens.DefaultTTLSeconds {
-		return fmt.Errorf("tokens.max_ttl_seconds must be greater than or equal to tokens.default_ttl_seconds")
+		return fmt.Errorf("tokens.max_ttl_seconds 不得小于 tokens.default_ttl_seconds")
 	}
 	secret := c.Auth.TOTPSecret
-	if secret == "" && !c.Auth.DevAllowFixedCode {
-		return fmt.Errorf("auth.totp_secret must be set unless auth.dev_allow_fixed_code is true")
+	if c.Accounts.TOTPEnabled && secret == "" && !c.Auth.DevAllowFixedCode {
+		return fmt.Errorf("启用动态验证码登录时必须设置 auth.totp_secret（显式开发模式除外）")
 	}
 	if strings.Contains(secret, "REPLACE_WITH_YOUR_BASE32_SECRET") {
-		return fmt.Errorf("auth.totp_secret still contains the example placeholder")
+		return fmt.Errorf("auth.totp_secret 仍为示例占位符，请替换后启动")
 	}
 	if secret != "" {
 		if err := validateBase32Secret(secret); err != nil {
-			return fmt.Errorf("auth.totp_secret must be a valid Base32 secret: %w", err)
+			return fmt.Errorf("auth.totp_secret 必须为有效 Base32 密钥：%w", err)
 		}
 	}
 	if strings.TrimSpace(c.Auth.Admin.Username) == "" {
-		return fmt.Errorf("auth.admin.username must be set")
+		return fmt.Errorf("管理员 username 不能为空")
 	}
 	if len(c.Auth.Admin.Username) > 128 {
-		return fmt.Errorf("auth.admin.username must not exceed 128 bytes")
+		return fmt.Errorf("管理员 username 不能超过 128 字节")
 	}
 	adminPHC := strings.TrimSpace(c.Auth.Admin.PasswordHash)
 	legacyHash := strings.TrimSpace(c.Auth.Admin.PasswordSHA256)
 	if adminPHC == "" && legacyHash == "" {
-		return fmt.Errorf("auth.admin.password_hash or deprecated password_sha256 must be set")
+		return fmt.Errorf("必须配置管理员 password_hash（旧版可使用 password_sha256）")
 	}
 	if strings.Contains(adminPHC, "REPLACE_WITH_ADMIN_PASSWORD_HASH") || strings.Contains(legacyHash, "REPLACE_WITH_ADMIN_PASSWORD_SHA256") || strings.Contains(c.Auth.Admin.Username, "REPLACE_WITH_ADMIN_USERNAME") {
-		return fmt.Errorf("auth.admin still contains the example placeholder")
+		return fmt.Errorf("管理员配置仍含示例占位符，请替换后启动")
 	}
 	if adminPHC != "" {
 		if err := security.Validate(adminPHC); err != nil {
-			return fmt.Errorf("auth.admin.password_hash must be a valid bounded Argon2id PHC string")
+			return fmt.Errorf("管理员 password_hash 必须为参数有界的有效 Argon2id PHC 字符串")
 		}
 	}
 	if legacyHash != "" && (len(legacyHash) != 64 || strings.Trim(legacyHash, "0123456789abcdefABCDEF") != "") {
-		return fmt.Errorf("auth.admin.password_sha256 must be a sha256 hex string")
+		return fmt.Errorf("旧版管理员 password_sha256 必须为 SHA256 十六进制字符串")
 	}
 	if c.Abuse.Login.MaxConcurrentAdminVerifications < 0 || c.Abuse.Login.MaxConcurrentAdminVerifications > 8 {
-		return fmt.Errorf("abuse.login.max_concurrent_admin_verifications must be between 0 and 8")
+		return fmt.Errorf("abuse.login.max_concurrent_admin_verifications 必须在 0 至 8 之间（0 使用默认并发 2）")
 	}
 	if c.Abuse.Login.GlobalPerMinute < 0 || c.Abuse.Login.GlobalPerMinute > 100000 || c.Abuse.Login.IPMaxFailures < 0 || c.Abuse.Login.IPMaxFailures > 1000 || c.Abuse.Login.WindowSeconds < 0 || c.Abuse.Login.WindowSeconds > 86400 || c.Abuse.Login.BlockSeconds < 0 || c.Abuse.Login.BlockSeconds > 86400 {
-		return fmt.Errorf("abuse.login rate limits are outside the supported range")
+		return fmt.Errorf("abuse.login 频率限制超出支持范围")
 	}
 	creationLimits := []int{c.Abuse.Creation.TokenGlobalPerMinute, c.Abuse.Creation.TokenPerSessionPerMinute, c.Abuse.Creation.LeaseGlobalPerMinute, c.Abuse.Creation.LeasePerOwnerPerMinute, c.Abuse.Creation.PublicLeasePerIPPerMinute}
 	for _, limit := range creationLimits {
 		if limit < 0 || limit > 100000 {
-			return fmt.Errorf("abuse.creation rate limits must be between 0 and 100000")
+			return fmt.Errorf("abuse.creation 频率限制必须在 0 至 100000 之间")
 		}
 	}
 	if c.Abuse.Creation.MaxActiveTokens < 0 || c.Abuse.Creation.MaxActiveTokens > 1000000 || c.Abuse.Creation.MaxOutstandingLeasesTotal < 0 || c.Abuse.Creation.MaxOutstandingLeasesTotal > 1000000 || c.Abuse.Creation.MaxOutstandingLeasesOwner < 0 || c.Abuse.Creation.MaxOutstandingLeasesOwner > 100000 {
-		return fmt.Errorf("abuse.creation outstanding limits are outside the supported range")
+		return fmt.Errorf("abuse.creation 未完成票据数量限制超出支持范围")
 	}
 	for _, limit := range []int{c.Abuse.Uploads.Global, c.Abuse.Uploads.PerResource, c.Abuse.Uploads.PerSession, c.Abuse.Uploads.PerToken} {
 		if limit < 0 || limit > 10000 {
-			return fmt.Errorf("abuse.uploads limits must be between 0 and 10000")
+			return fmt.Errorf("abuse.uploads 并发限制必须在 0 至 10000 之间")
 		}
 	}
 	if c.Storage.MinFreeMB < 0 || c.Storage.MinFreeMB > 1000000000 || c.Storage.MinFreePercent < 0 || c.Storage.MinFreePercent > 100 {
-		return fmt.Errorf("storage free space reserve is outside the supported range")
+		return fmt.Errorf("storage 磁盘预留空间超出支持范围")
 	}
 	for _, origin := range c.CORS.AllowOrigins {
 		if strings.TrimSpace(origin) == "*" {
-			return fmt.Errorf("cors.allow_origins must not contain * when credential cookies are enabled")
+			return fmt.Errorf("使用凭据 Cookie 时 cors.allow_origins 不得包含 *")
 		}
 	}
 	seenDirs := map[string]struct{}{}
 	for _, dir := range c.Resources() {
 		if strings.TrimSpace(dir.ID) == "" {
-			return fmt.Errorf("storage resources contains an empty id")
+			return fmt.Errorf("storage 资源列表含空 ID")
 		}
 		if !validResourceID(dir.ID) {
-			return fmt.Errorf("storage resource id %q may only contain letters, numbers, underscore and hyphen", dir.ID)
+			return fmt.Errorf("资源 ID %q 只能包含字母、数字、下划线和短横线", dir.ID)
 		}
 		if strings.TrimSpace(dir.Path) == "" {
-			return fmt.Errorf("storage resource %s path must not be empty", dir.ID)
+			return fmt.Errorf("资源 %s 的路径不能为空", dir.ID)
 		}
 		if _, ok := seenDirs[dir.ID]; ok {
-			return fmt.Errorf("storage resources contains duplicate id %q", dir.ID)
+			return fmt.Errorf("资源列表含重复 ID %q", dir.ID)
 		}
 		if dir.Type != ResourceDirectory && dir.Type != ResourceFile {
-			return fmt.Errorf("storage resource %s type must be directory or file", dir.ID)
+			return fmt.Errorf("资源 %s 类型必须为 directory 或 file", dir.ID)
 		}
 		if dir.Type == ResourceFile && dir.AllowUpload {
-			return fmt.Errorf("storage file resource %s cannot allow upload", dir.ID)
+			return fmt.Errorf("单文件资源 %s 不能允许上传", dir.ID)
 		}
 		seenDirs[dir.ID] = struct{}{}
 	}
@@ -856,7 +801,7 @@ func validateBase32Secret(secret string) error {
 
 func validateSecretLength(decoded []byte) error {
 	if len(decoded) < 10 {
-		return fmt.Errorf("decoded secret must be at least 10 bytes")
+		return fmt.Errorf("解码后密钥不得少于 10 字节")
 	}
 	return nil
 }

@@ -4,6 +4,7 @@
 # Runtime configuration and backups must never enter the image context.
 config/
 config.yaml*
+settings.yaml*
 *.bak
 
 # Runtime data and uploads.

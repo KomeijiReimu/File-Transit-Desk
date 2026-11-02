@@ -22,12 +22,12 @@ func main() {
 func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	flags := flag.NewFlagSet("hash-admin-password", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	format := flags.String("format", "yaml", "output format: yaml, phc, or legacy-sha256")
+	format := flags.String("format", "yaml", "输出格式：bootstrap、yaml、phc、legacy-sha256")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("password must be provided on stdin")
+		return fmt.Errorf("请通过标准输入提供密码")
 	}
 	input, err := io.ReadAll(io.LimitReader(stdin, 1026))
 	if err != nil {
@@ -35,18 +35,20 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	input = []byte(strings.TrimSuffix(strings.TrimSuffix(string(input), "\n"), "\r"))
 	if len(input) == 0 {
-		return fmt.Errorf("password must not be empty")
+		return fmt.Errorf("密码不能为空")
 	}
 	if len(input) > 1024 {
-		return fmt.Errorf("password must not exceed 1024 bytes")
+		return fmt.Errorf("密码不能超过 1024 字节")
 	}
 	switch *format {
-	case "yaml", "phc":
+	case "yaml", "phc", "bootstrap":
 		phc, err := security.Hash(input)
 		if err != nil {
 			return err
 		}
-		if *format == "yaml" {
+		if *format == "bootstrap" {
+			_, err = fmt.Fprintf(stdout, "admin:\n  username: admin\n  password_hash: %q\n", phc)
+		} else if *format == "yaml" {
 			sum := sha256.Sum256(input)
 			_, err = fmt.Fprintf(stdout, "auth:\n  admin:\n    password_hash: %q\n    password_sha256: %q\n", phc, hex.EncodeToString(sum[:]))
 		} else {
@@ -58,6 +60,6 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		_, err := fmt.Fprintln(stdout, hex.EncodeToString(sum[:]))
 		return err
 	default:
-		return fmt.Errorf("unsupported format %q", *format)
+		return fmt.Errorf("不支持的输出格式 %q", *format)
 	}
 }

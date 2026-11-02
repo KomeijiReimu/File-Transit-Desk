@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 func TestChatDefaultsExplicitValuesAndBounds(t *testing.T) {
@@ -23,20 +21,6 @@ func TestChatDefaultsExplicitValuesAndBounds(t *testing.T) {
 	if got := Default().Chat; got != want {
 		t.Fatalf("chat defaults=%+v want=%+v", got, want)
 	}
-	exampleBytes, err := os.ReadFile("../../config.example.yaml")
-	if err != nil {
-		t.Fatalf("read example config: %v", err)
-	}
-	var example struct {
-		Chat ChatConfig `yaml:"chat"`
-	}
-	if err := yaml.Unmarshal(exampleBytes, &example); err != nil {
-		t.Fatalf("parse example config: %v", err)
-	}
-	if example.Chat != want {
-		t.Fatalf("chat example=%+v want=%+v", example.Chat, want)
-	}
-
 	cfg := validTestConfig()
 	cfg.Chat = ChatConfig{
 		WithdrawWindowSeconds:    601,

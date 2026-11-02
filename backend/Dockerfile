@@ -15,6 +15,7 @@ RUN apk add --no-cache ca-certificates tzdata wget \
   && chown -R filetrans:filetrans /app
 WORKDIR /app
 COPY --from=build --chown=filetrans:filetrans /out/filetrans /usr/local/bin/filetrans
+COPY --chown=filetrans:filetrans config.example.yaml settings.example.yaml /app/
 EXPOSE 17878
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:17878/api/health/ready || exit 1
