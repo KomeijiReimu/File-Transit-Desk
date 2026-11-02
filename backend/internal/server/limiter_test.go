@@ -130,7 +130,7 @@ func TestBlockedLoginIPDoesNotConsumeGlobalBucket(t *testing.T) {
 	app := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
 	app.Get("/", func(c *fiber.Ctx) error { return s.checkLoginAdmission(c, "user", "198.51.100.1") })
 	for i := 0; i < 3; i++ {
-		resp, requestErr := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		resp, requestErr := app.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1)
 		if requestErr != nil {
 			t.Fatalf("blocked request: %v", requestErr)
 		}

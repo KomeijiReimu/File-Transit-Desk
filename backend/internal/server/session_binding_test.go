@@ -46,7 +46,7 @@ func TestLoginMeHeartbeatAndRecoverableErrorReturnSessionBinding(t *testing.T) {
 
 	userLogin := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"code":"000000"}`))
 	userLogin.Header.Set("Content-Type", "application/json")
-	userResponse, err := app.Test(userLogin)
+	userResponse, err := app.Test(userLogin, -1)
 	if err != nil {
 		t.Fatalf("user login: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestLoginMeHeartbeatAndRecoverableErrorReturnSessionBinding(t *testing.T) {
 
 	meRequest := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 	meRequest.AddCookie(userCookie)
-	meResponse, err := app.Test(meRequest)
+	meResponse, err := app.Test(meRequest, -1)
 	if err != nil {
 		t.Fatalf("me request: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestLoginMeHeartbeatAndRecoverableErrorReturnSessionBinding(t *testing.T) {
 	heartbeatRequest := httptest.NewRequest(http.MethodPost, "/api/auth/heartbeat", nil)
 	heartbeatRequest.AddCookie(userCookie)
 	heartbeatRequest.Header.Set(sessionBindingHeader, userBinding)
-	heartbeatResponse, err := app.Test(heartbeatRequest)
+	heartbeatResponse, err := app.Test(heartbeatRequest, -1)
 	if err != nil {
 		t.Fatalf("heartbeat request: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestLoginMeHeartbeatAndRecoverableErrorReturnSessionBinding(t *testing.T) {
 
 	adminLogin := httptest.NewRequest(http.MethodPost, "/api/auth/admin-login", strings.NewReader(`{"username":"admin","password":"secret"}`))
 	adminLogin.Header.Set("Content-Type", "application/json")
-	adminResponse, err := app.Test(adminLogin)
+	adminResponse, err := app.Test(adminLogin, -1)
 	if err != nil {
 		t.Fatalf("admin login: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestLoginMeHeartbeatAndRecoverableErrorReturnSessionBinding(t *testing.T) {
 	}
 	recoverableRequest := httptest.NewRequest(http.MethodGet, "/api/dirs", nil)
 	recoverableRequest.AddCookie(&http.Cookie{Name: "sid", Value: "recoverable-binding"})
-	recoverableResponse, err := app.Test(recoverableRequest)
+	recoverableResponse, err := app.Test(recoverableRequest, -1)
 	if err != nil {
 		t.Fatalf("recoverable request: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestAuthSessionBindingHeaderRejectsSubjectChangeBeforeHandler(t *testing.T)
 		if binding != "" {
 			req.Header.Set(sessionBindingHeader, binding)
 		}
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("protected request: %v", err)
 		}
@@ -202,7 +202,7 @@ func TestAuthSessionBindingHeaderRejectsSubjectChangeBeforeHandler(t *testing.T)
 	heartbeat := httptest.NewRequest(http.MethodPost, "/api/auth/heartbeat", nil)
 	heartbeat.AddCookie(&http.Cookie{Name: "sid", Value: "subject-b"})
 	heartbeat.Header.Set(sessionBindingHeader, bindingA)
-	heartbeatResponse, err := app.Test(heartbeat)
+	heartbeatResponse, err := app.Test(heartbeat, -1)
 	if err != nil {
 		t.Fatalf("mismatched heartbeat: %v", err)
 	}

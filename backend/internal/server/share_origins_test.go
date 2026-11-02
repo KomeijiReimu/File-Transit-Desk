@@ -228,7 +228,7 @@ func TestShareOriginsEndpointIsAdminOnlyCompatibleAndIgnoresSpoofedOrigin(t *tes
 
 	userReq := httptest.NewRequest(http.MethodGet, "/api/share-origins", nil)
 	userReq.AddCookie(&http.Cookie{Name: "sid", Value: "share-user"})
-	userResp, err := app.Test(userReq)
+	userResp, err := app.Test(userReq, -1)
 	if err != nil {
 		t.Fatalf("non-admin share origins request: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestShareOriginsEndpointIsAdminOnlyCompatibleAndIgnoresSpoofedOrigin(t *tes
 
 	adminReq := httptest.NewRequest(http.MethodGet, "/api/share-origins?currentOrigin="+url.QueryEscape("https://Share.Example/"), nil)
 	adminReq.AddCookie(&http.Cookie{Name: "sid", Value: "share-admin"})
-	adminResp, err := app.Test(adminReq)
+	adminResp, err := app.Test(adminReq, -1)
 	if err != nil {
 		t.Fatalf("admin share origins request: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestShareOriginsEndpointIsAdminOnlyCompatibleAndIgnoresSpoofedOrigin(t *tes
 	spoofReq.Header.Set("X-Forwarded-Proto", "https")
 	spoofReq.Header.Set("X-Forwarded-Host", "forwarded.example")
 	spoofReq.AddCookie(&http.Cookie{Name: "sid", Value: "share-admin"})
-	spoofResp, err := app.Test(spoofReq)
+	spoofResp, err := app.Test(spoofReq, -1)
 	if err != nil {
 		t.Fatalf("spoofed share origins request: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestShareOriginsKeepsTrustedHTTPSOriginSeparateFromLoopbackListener(t *test
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.Header.Set("X-Forwarded-Host", "files.example")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "proxy-admin"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("trusted proxy share origins request: %v", err)
 	}

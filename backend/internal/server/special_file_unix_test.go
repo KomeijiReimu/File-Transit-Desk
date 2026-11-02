@@ -106,6 +106,7 @@ func TestResourceAPIRejectsSpecialAndReplacementWithoutLeakingDetails(t *testing
 			}
 			cfg := testConfig(root)
 			cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "root", Path: root, AllowSelectFiles: true, AllowSelectDirs: true}}
+			cfg.FilePicker.Mode = "restricted"
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
 			if err := config.SaveAtomic(configPath, cfg); err != nil {
 				t.Fatalf("save config: %v", err)
@@ -125,7 +126,7 @@ func TestResourceAPIRejectsSpecialAndReplacementWithoutLeakingDetails(t *testing
 			req := httptest.NewRequest(http.MethodPost, "/api/config/resources", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			req.AddCookie(&http.Cookie{Name: "sid", Value: "special-admin"})
-			resp, err := app.Test(req)
+			resp, err := app.Test(req, -1)
 			if err != nil {
 				t.Fatalf("create resource: %v", err)
 			}
@@ -174,7 +175,7 @@ func TestHashReplacementWithFIFOUsesStableDownloadError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"default","path":"hash.txt"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "hash-special-session"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("create lease: %v", err)
 	}

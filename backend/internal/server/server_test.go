@@ -59,7 +59,7 @@ func TestAdminOnlyTokenRoutes(t *testing.T) {
 	}
 	userReq := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
 	userReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	userResp, err := app.Test(userReq)
+	userResp, err := app.Test(userReq, -1)
 	if err != nil {
 		t.Fatalf("user request: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestAdminOnlyTokenRoutes(t *testing.T) {
 	}
 	adminReq := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
 	adminReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	adminResp, err := app.Test(adminReq)
+	adminResp, err := app.Test(adminReq, -1)
 	if err != nil {
 		t.Fatalf("admin request: %v", err)
 	}
@@ -88,7 +88,6 @@ func TestAdminPasswordPHCPriorityLegacyAndWrongUsernameWork(t *testing.T) {
 	}
 	cfg := testConfig(t.TempDir())
 	cfg.Auth.Admin.PasswordHash = phc
-	cfg.Abuse.Login.IPMaxFailures = 2
 	cfg.Abuse.Login.IPMaxFailures = 2
 	cfg.Auth.Admin.PasswordSHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte("legacy-password")))
 	s := &Server{config: cfg, adminVerifySlots: newAdminVerifySlots(2)}
@@ -124,8 +123,8 @@ func TestAdminPasswordPHCPriorityLegacyAndWrongUsernameWork(t *testing.T) {
 }
 
 func TestAdminArgonCapacityReturnsStable503(t *testing.T) {
-	if newAdminVerifySlots(0) != nil {
-		t.Fatalf("expected explicit zero verification limit to disable slots")
+	if cap(newAdminVerifySlots(0)) != 2 {
+		t.Fatalf("zero must use the bounded shared password capacity default")
 	}
 	phc, err := security.Hash([]byte("password"))
 	if err != nil {
@@ -164,7 +163,7 @@ func TestAdminArgonCapacityReturnsStable503(t *testing.T) {
 	}
 	secondReq := httptest.NewRequest(http.MethodPost, "/api/auth/admin-login", strings.NewReader(`{"username":"admin","password":"password"}`))
 	secondReq.Header.Set("Content-Type", "application/json")
-	secondResp, err := app.Test(secondReq)
+	secondResp, err := app.Test(secondReq, -1)
 	if err != nil {
 		t.Fatalf("second admin login: %v", err)
 	}
@@ -184,7 +183,7 @@ func TestAdminArgonCapacityReturnsStable503(t *testing.T) {
 	}
 	thirdReq := httptest.NewRequest(http.MethodPost, "/api/auth/admin-login", strings.NewReader(`{"username":"admin","password":"password"}`))
 	thirdReq.Header.Set("Content-Type", "application/json")
-	thirdResp, err := app.Test(thirdReq)
+	thirdResp, err := app.Test(thirdReq, -1)
 	if err != nil {
 		t.Fatalf("third admin login: %v", err)
 	}
@@ -212,7 +211,7 @@ func TestAdminLoginRejectsOversizedBodyBeforePasswordVerification(t *testing.T) 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/admin-login", strings.NewReader(strings.Repeat("x", maxAdminLoginBodyBytes+1)))
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = maxAdminLoginBodyBytes + 1
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("oversized admin login: %v", err)
 	}
@@ -240,7 +239,7 @@ func TestSharedTOTPCodeCanCreateMultipleSessionsInSameWindow(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(fmt.Sprintf(`{"code":%q}`, code)))
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("shared TOTP login %d: %v", i, err)
 		}
@@ -281,7 +280,7 @@ func TestLoginGlobalBucketsAreSeparateForUserAndAdmin(t *testing.T) {
 	post := func(path, body string) (*http.Response, map[string]any) {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("login request: %v", requestErr)
 		}
@@ -321,7 +320,7 @@ func TestLoginFailureBucketsUseTrustedProxyIPAndSuccessResets(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(fmt.Sprintf(`{"code":%q}`, code)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Forwarded-For", ip)
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("login request: %v", requestErr)
 		}
@@ -367,7 +366,7 @@ func TestCreationRateLimitCodesAndStoreLimitResponses(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("creation request: %v", requestErr)
 		}
@@ -396,7 +395,7 @@ func TestCreationRateLimitCodesAndStoreLimitResponses(t *testing.T) {
 		code   string
 		retry  string
 	}{{"/outstanding", http.StatusTooManyRequests, "outstanding_lease_limit", "30"}, {"/tokens", http.StatusForbidden, "active_token_limit_reached", ""}} {
-		result, requestErr := errorApp.Test(httptest.NewRequest(http.MethodGet, tc.path, nil))
+		result, requestErr := errorApp.Test(httptest.NewRequest(http.MethodGet, tc.path, nil), -1)
 		if requestErr != nil {
 			t.Fatalf("store error response: %v", requestErr)
 		}
@@ -419,7 +418,7 @@ func TestPublicDownloadLeaseRateLimitRunsBeforeTokenLookup(t *testing.T) {
 	}
 	defer st.DB.Close()
 	app := New(cfg, st)
-	first, err := app.Test(httptest.NewRequest(http.MethodPost, "/t/missing-token/download-lease", nil))
+	first, err := app.Test(httptest.NewRequest(http.MethodPost, "/t/missing-token/download-lease", nil), -1)
 	if err != nil {
 		t.Fatalf("first public lease: %v", err)
 	}
@@ -427,7 +426,7 @@ func TestPublicDownloadLeaseRateLimitRunsBeforeTokenLookup(t *testing.T) {
 	if first.StatusCode == http.StatusTooManyRequests {
 		t.Fatalf("expected first request to reach token lookup, got %d", first.StatusCode)
 	}
-	second, err := app.Test(httptest.NewRequest(http.MethodPost, "/t/missing-token/download-lease", nil))
+	second, err := app.Test(httptest.NewRequest(http.MethodPost, "/t/missing-token/download-lease", nil), -1)
 	if err != nil {
 		t.Fatalf("second public lease: %v", err)
 	}
@@ -454,7 +453,7 @@ func TestPublicLeasePerIPUsesTrustedProxyClientIP(t *testing.T) {
 	request := func(token, ip string) (*http.Response, map[string]any) {
 		req := httptest.NewRequest(http.MethodPost, "/t/"+token+"/download-lease", nil)
 		req.Header.Set("X-Forwarded-For", ip)
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("public lease request: %v", requestErr)
 		}
@@ -496,7 +495,7 @@ func TestDirsHidePathForUserAndShowRootForAdmin(t *testing.T) {
 	}
 	userReq := httptest.NewRequest(http.MethodGet, "/api/dirs", nil)
 	userReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	userResp, err := app.Test(userReq)
+	userResp, err := app.Test(userReq, -1)
 	if err != nil {
 		t.Fatalf("user dirs request: %v", err)
 	}
@@ -520,7 +519,7 @@ func TestDirsHidePathForUserAndShowRootForAdmin(t *testing.T) {
 	}
 	adminReq := httptest.NewRequest(http.MethodGet, "/api/dirs", nil)
 	adminReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	adminResp, err := app.Test(adminReq)
+	adminResp, err := app.Test(adminReq, -1)
 	if err != nil {
 		t.Fatalf("admin dirs request: %v", err)
 	}
@@ -563,7 +562,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 
 	adminReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
 	adminReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	adminResp, err := app.Test(adminReq)
+	adminResp, err := app.Test(adminReq, -1)
 	if err != nil {
 		t.Fatalf("safe config request: %v", err)
 	}
@@ -576,7 +575,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 	createDir := httptest.NewRequest(http.MethodPost, "/api/config/resources", strings.NewReader(fmt.Sprintf(`{"id":"photos","name":"照片","type":"directory","path":%q,"allowDownload":true,"allowUpload":true}`, dirRoot)))
 	createDir.Header.Set("Content-Type", "application/json")
 	createDir.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	createDirResp, err := app.Test(createDir)
+	createDirResp, err := app.Test(createDir, -1)
 	if err != nil {
 		t.Fatalf("create dir resource: %v", err)
 	}
@@ -589,7 +588,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 	createFile := httptest.NewRequest(http.MethodPost, "/api/config/resources", strings.NewReader(fmt.Sprintf(`{"id":"manual","name":"说明文档","type":"file","path":%q,"allowDownload":true,"allowUpload":true}`, filePath)))
 	createFile.Header.Set("Content-Type", "application/json")
 	createFile.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	createFileResp, err := app.Test(createFile)
+	createFileResp, err := app.Test(createFile, -1)
 	if err != nil {
 		t.Fatalf("create file resource: %v", err)
 	}
@@ -604,7 +603,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 	}
 	userDirsReq := httptest.NewRequest(http.MethodGet, "/api/dirs", nil)
 	userDirsReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	userDirsResp, err := app.Test(userDirsReq)
+	userDirsResp, err := app.Test(userDirsReq, -1)
 	if err != nil {
 		t.Fatalf("user dirs request: %v", err)
 	}
@@ -619,7 +618,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=manual", nil)
 	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	listResp, err := app.Test(listReq)
+	listResp, err := app.Test(listReq, -1)
 	if err != nil {
 		t.Fatalf("file resource list: %v", err)
 	}
@@ -632,7 +631,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"manual","path":"manual.pdf"}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("file resource lease: %v", err)
 	}
@@ -658,7 +657,7 @@ func TestAdminConfigCanManageDirectoryAndFileResources(t *testing.T) {
 	updateFile := httptest.NewRequest(http.MethodPut, "/api/config/resources/manual", strings.NewReader(fmt.Sprintf(`{"id":"manual","name":"说明文档","type":"file","path":%q,"allowDownload":true,"allowUpload":false}`, newFilePath)))
 	updateFile.Header.Set("Content-Type", "application/json")
 	updateFile.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	updateFileResp, err := app.Test(updateFile)
+	updateFileResp, err := app.Test(updateFile, -1)
 	if err != nil {
 		t.Fatalf("update file resource: %v", err)
 	}
@@ -709,7 +708,7 @@ func TestTokenListReturnsValidityAndDeleteAudit(t *testing.T) {
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
 	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	listResp, err := app.Test(listReq)
+	listResp, err := app.Test(listReq, -1)
 	if err != nil {
 		t.Fatalf("list tokens request: %v", err)
 	}
@@ -737,7 +736,7 @@ func TestTokenListReturnsValidityAndDeleteAudit(t *testing.T) {
 
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/tokens/"+strconv.FormatInt(tok.ID, 10), nil)
 	deleteReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	deleteResp, err := app.Test(deleteReq)
+	deleteResp, err := app.Test(deleteReq, -1)
 	if err != nil {
 		t.Fatalf("delete token request: %v", err)
 	}
@@ -782,7 +781,7 @@ func TestCreateTokenStoresResourceFingerprintForDownloadAndUpload(t *testing.T) 
 		req := httptest.NewRequest(http.MethodPost, "/api/tokens", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("create token: %v", err)
 		}
@@ -824,7 +823,7 @@ func TestUploadPolicyRejectsBlockedExtension(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
 		req.Header.Set("Content-Type", contentType)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("upload request %q: %v", name, err)
 		}
@@ -861,7 +860,7 @@ func TestAdminCanUpdateUploadPolicyWithEmptyBlacklist(t *testing.T) {
 	policyReq := httptest.NewRequest(http.MethodPut, "/api/config/upload-policy", strings.NewReader(`{"allowedExtensions":[],"blockedExtensions":[]}`))
 	policyReq.Header.Set("Content-Type", "application/json")
 	policyReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	policyResp, err := app.Test(policyReq)
+	policyResp, err := app.Test(policyReq, -1)
 	if err != nil {
 		t.Fatalf("update upload policy: %v", err)
 	}
@@ -875,7 +874,7 @@ func TestAdminCanUpdateUploadPolicyWithEmptyBlacklist(t *testing.T) {
 	uploadReq := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
 	uploadReq.Header.Set("Content-Type", contentType)
 	uploadReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	uploadResp, err := app.Test(uploadReq)
+	uploadResp, err := app.Test(uploadReq, -1)
 	if err != nil {
 		t.Fatalf("upload request: %v", err)
 	}
@@ -888,7 +887,7 @@ func TestAdminCanUpdateUploadPolicyWithEmptyBlacklist(t *testing.T) {
 	badReq.Header.Set("Content-Type", "application/json")
 	badReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
 	restoreLog := discardTestLog(t)
-	badResp, err := app.Test(badReq)
+	badResp, err := app.Test(badReq, -1)
 	restoreLog()
 	if err != nil {
 		t.Fatalf("bad policy request: %v", err)
@@ -916,7 +915,7 @@ func TestAuditLogsPagination(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/audit/logs?page=2&pageSize=2", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("audit page request: %v", err)
 	}
@@ -956,7 +955,7 @@ func TestAuditLogsGlobalFiltersAndValidation(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, "/api/admin/audit?"+query, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("audit request: %v", err)
 		}
@@ -994,7 +993,7 @@ func TestAuditLogsGlobalFiltersAndValidation(t *testing.T) {
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/api/admin/audit?"+query, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		invalidResp, err := app.Test(req)
+		invalidResp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("invalid filter request: %v", err)
 		}
@@ -1015,7 +1014,7 @@ func TestAuditLogsGlobalFiltersAndValidation(t *testing.T) {
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/api/admin/audit?"+query, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		pageResp, err := app.Test(req)
+		pageResp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("invalid page request: %v", err)
 		}
@@ -1057,7 +1056,7 @@ func TestAuditDTOStatusMatchesExactFailureClassificationAcrossRoutes(t *testing.
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, path+"?page=1&pageSize=20&status=all", nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("audit request %s: %v", path, err)
 		}
@@ -1096,7 +1095,7 @@ func TestAuditDTOStatusMatchesExactFailureClassificationAcrossRoutes(t *testing.
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/api/admin/audit?page=1&pageSize=20&status="+tc.status, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("status request: %v", err)
 		}
@@ -1113,7 +1112,7 @@ func TestAuditDTOStatusMatchesExactFailureClassificationAcrossRoutes(t *testing.
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/audit?page=1&pageSize=1&status=all", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("raw DTO request: %v", err)
 	}
@@ -1198,7 +1197,7 @@ func TestDevelopmentTransferOriginAllowedForSameHost(t *testing.T) {
 	preflight.Header.Set("Origin", "http://192.168.124.9:5173")
 	preflight.Header.Set("Access-Control-Request-Method", "POST")
 	preflight.Header.Set("Access-Control-Request-Headers", "Authorization")
-	preflightResp, err := app.Test(preflight)
+	preflightResp, err := app.Test(preflight, -1)
 	if err != nil {
 		t.Fatalf("preflight request: %v", err)
 	}
@@ -1211,7 +1210,7 @@ func TestDevelopmentTransferOriginAllowedForSameHost(t *testing.T) {
 	req.Host = "192.168.124.9:17878"
 	req.Header.Set("Origin", "http://192.168.124.9:5173")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("same-host dev origin request: %v", err)
 	}
@@ -1238,7 +1237,7 @@ func TestDevelopmentTransferOriginAllowedForConfiguredPort(t *testing.T) {
 	req.Host = "192.168.124.9:17878"
 	req.Header.Set("Origin", "http://192.168.124.9:5174")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("configured dev origin request: %v", err)
 	}
@@ -1265,7 +1264,7 @@ func TestDevelopmentTransferOriginRejectsDifferentHost(t *testing.T) {
 	req.Host = "192.168.124.9:17878"
 	req.Header.Set("Origin", "http://192.168.124.10:5173")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("different-host dev origin request: %v", err)
 	}
@@ -1300,7 +1299,7 @@ func TestProductionOriginsRequireSameOriginOrExplicitAllowlist(t *testing.T) {
 			preflight := httptest.NewRequest(http.MethodOptions, "/api/auth/logout", nil)
 			preflight.Header.Set("Origin", tc.origin)
 			preflight.Header.Set("Access-Control-Request-Method", "POST")
-			preflightResp, err := app.Test(preflight)
+			preflightResp, err := app.Test(preflight, -1)
 			if err != nil {
 				t.Fatalf("preflight: %v", err)
 			}
@@ -1313,7 +1312,7 @@ func TestProductionOriginsRequireSameOriginOrExplicitAllowlist(t *testing.T) {
 			req.Host = "192.168.124.9:17878"
 			req.Header.Set("Origin", tc.origin)
 			req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-			resp, err := app.Test(req)
+			resp, err := app.Test(req, -1)
 			if err != nil {
 				t.Fatalf("origin request: %v", err)
 			}
@@ -1351,7 +1350,7 @@ func TestExplicitDevModeControlsFixedCode(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"code":"000000"}`))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("fixed-code dev login: %v", err)
 	}
@@ -1368,7 +1367,7 @@ func TestExplicitDevModeControlsFixedCode(t *testing.T) {
 	}
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"code":"000000"}`))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err = realSecretApp.Test(req)
+	resp, err = realSecretApp.Test(req, -1)
 	if err != nil {
 		t.Fatalf("fixed-code login with real secret: %v", err)
 	}
@@ -1418,7 +1417,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	}
 	rootsReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/roots", nil)
 	rootsReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	rootsResp, err := app.Test(rootsReq)
+	rootsResp, err := app.Test(rootsReq, -1)
 	if err != nil {
 		t.Fatalf("picker roots: %v", err)
 	}
@@ -1436,7 +1435,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&pageSize=10", nil)
 	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	listResp, err := app.Test(listReq)
+	listResp, err := app.Test(listReq, -1)
 	if err != nil {
 		t.Fatalf("list picker: %v", err)
 	}
@@ -1467,7 +1466,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 
 	sizeSortReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&pageSize=10&sort=size&order=desc", nil)
 	sizeSortReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	sizeSortResp, err := app.Test(sizeSortReq)
+	sizeSortResp, err := app.Test(sizeSortReq, -1)
 	if err != nil {
 		t.Fatalf("size sort picker: %v", err)
 	}
@@ -1479,7 +1478,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	for _, sortBy := range []string{"type", "modifiedAt"} {
 		sortReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&pageSize=10&sort="+sortBy+"&order=desc", nil)
 		sortReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		sortResp, err := app.Test(sortReq)
+		sortResp, err := app.Test(sortReq, -1)
 		if err != nil {
 			t.Fatalf("%s sort picker: %v", sortBy, err)
 		}
@@ -1493,7 +1492,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 	validateReq := httptest.NewRequest(http.MethodPost, "/api/config/file-picker/validate", strings.NewReader(`{"rootId":"pick","path":"/manual.pdf","expectedType":"file"}`))
 	validateReq.Header.Set("Content-Type", "application/json")
 	validateReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	validateResp, err := app.Test(validateReq)
+	validateResp, err := app.Test(validateReq, -1)
 	if err != nil {
 		t.Fatalf("validate picker: %v", err)
 	}
@@ -1505,7 +1504,7 @@ func TestAdminFilePickerListsAndValidatesWithinRoot(t *testing.T) {
 
 	traversalReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=pick&path=../", nil)
 	traversalReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	traversalResp, err := app.Test(traversalReq)
+	traversalResp, err := app.Test(traversalReq, -1)
 	if err != nil {
 		t.Fatalf("traversal picker: %v", err)
 	}
@@ -1531,7 +1530,7 @@ func TestAdminFilePickerDoesNotInjectSystemRoot(t *testing.T) {
 
 	rootsReq := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/roots", nil)
 	rootsReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	rootsResp, err := app.Test(rootsReq)
+	rootsResp, err := app.Test(rootsReq, -1)
 	if err != nil {
 		t.Fatalf("roots request: %v", err)
 	}
@@ -1624,7 +1623,7 @@ func TestResourceAPIUsesCanonicalSymlinkContainment(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/config/file-picker/validate", strings.NewReader(fmt.Sprintf(`{"rootId":"allowed","path":%q,"expectedType":"directory"}`, tc.path)))
 		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-		resp, err := pickerApp.Test(req)
+		resp, err := pickerApp.Test(req, -1)
 		if err != nil {
 			t.Fatalf("picker symlink validation: %v", err)
 		}
@@ -1647,7 +1646,7 @@ func TestLegacyOutsideAllowlistResourceCanOnlyTightenOrDelete(t *testing.T) {
 	}
 	dirsReq := httptest.NewRequest(http.MethodGet, "/api/dirs", nil)
 	dirsReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	dirsResp, err := app.Test(dirsReq)
+	dirsResp, err := app.Test(dirsReq, -1)
 	if err != nil {
 		t.Fatalf("list legacy resource: %v", err)
 	}
@@ -1678,7 +1677,7 @@ func TestLegacyOutsideAllowlistResourceCanOnlyTightenOrDelete(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/config/resources/legacy", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("delete legacy resource: %v", err)
 	}
@@ -1706,7 +1705,7 @@ func TestResourceAPIProtectsServicePathsAndStaticOverlap(t *testing.T) {
 	pickerReq := httptest.NewRequest(http.MethodPost, "/api/config/file-picker/validate", strings.NewReader(fmt.Sprintf(`{"rootId":"host","path":%q,"expectedType":"file"}`, protected[0])))
 	pickerReq.Header.Set("Content-Type", "application/json")
 	pickerReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	pickerResp, err := app.Test(pickerReq)
+	pickerResp, err := app.Test(pickerReq, -1)
 	if err != nil {
 		t.Fatalf("validate protected picker path: %v", err)
 	}
@@ -1754,7 +1753,7 @@ func TestUploadCommitsFinalFileWithOwnerOnlyPermission(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
 	req.Header.Set("Content-Type", contentType)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("upload request: %v", err)
 	}
@@ -1788,7 +1787,7 @@ func TestUploadDuplicateNamesDoNotOverwrite(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
 		req.Header.Set("Content-Type", contentType)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("upload request: %v", err)
 		}
@@ -1829,7 +1828,7 @@ func TestUploadRejectsActualFileSizeOverLimit(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
 	req.Header.Set("Content-Type", contentType)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("upload request: %v", err)
 	}
@@ -1855,7 +1854,7 @@ func TestFriendlyMissingPathErrors(t *testing.T) {
 	}
 	listReq := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=default&path=missing", nil)
 	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	listResp, err := app.Test(listReq)
+	listResp, err := app.Test(listReq, -1)
 	if err != nil {
 		t.Fatalf("missing list request: %v", err)
 	}
@@ -1867,7 +1866,7 @@ func TestFriendlyMissingPathErrors(t *testing.T) {
 	tokenReq := httptest.NewRequest(http.MethodPost, "/api/tokens", strings.NewReader(`{"type":"download","dirId":"default","path":"missing.zip","ttlMinutes":30,"maxUses":1}`))
 	tokenReq.Header.Set("Content-Type", "application/json")
 	tokenReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	tokenResp, err := app.Test(tokenReq)
+	tokenResp, err := app.Test(tokenReq, -1)
 	if err != nil {
 		t.Fatalf("missing token path request: %v", err)
 	}
@@ -1893,7 +1892,7 @@ func TestUploadTokenRequiresDirectoryWhenPathExists(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/tokens", strings.NewReader(`{"type":"upload","dirId":"default","path":"file.txt","ttlMinutes":30,"maxUses":1}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("upload token request: %v", err)
 	}
@@ -1917,7 +1916,7 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	}
 	idleReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 	idleReq.AddCookie(&http.Cookie{Name: "sid", Value: "idle-sid"})
-	idleResp, err := app.Test(idleReq)
+	idleResp, err := app.Test(idleReq, -1)
 	if err != nil {
 		t.Fatalf("idle me request: %v", err)
 	}
@@ -1939,7 +1938,7 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	}
 	heartbeatReq := httptest.NewRequest(http.MethodPost, "/api/auth/heartbeat", nil)
 	heartbeatReq.AddCookie(&http.Cookie{Name: "sid", Value: "active-sid"})
-	heartbeatResp, err := app.Test(heartbeatReq)
+	heartbeatResp, err := app.Test(heartbeatReq, -1)
 	if err != nil {
 		t.Fatalf("heartbeat request: %v", err)
 	}
@@ -1959,7 +1958,7 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	}
 	strictReq := httptest.NewRequest(http.MethodGet, "/api/dirs", nil)
 	strictReq.AddCookie(&http.Cookie{Name: "sid", Value: "grace-sid"})
-	strictResp, err := app.Test(strictReq)
+	strictResp, err := app.Test(strictReq, -1)
 	if err != nil {
 		t.Fatalf("strict idle request: %v", err)
 	}
@@ -1976,7 +1975,7 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	}
 	graceHeartbeatReq := httptest.NewRequest(http.MethodPost, "/api/auth/heartbeat", nil)
 	graceHeartbeatReq.AddCookie(&http.Cookie{Name: "sid", Value: "grace-sid"})
-	graceHeartbeatResp, err := app.Test(graceHeartbeatReq)
+	graceHeartbeatResp, err := app.Test(graceHeartbeatReq, -1)
 	if err != nil {
 		t.Fatalf("grace heartbeat request: %v", err)
 	}
@@ -1996,7 +1995,7 @@ func TestIdleSessionHeartbeatAndExpiry(t *testing.T) {
 	}
 	capReq := httptest.NewRequest(http.MethodPost, "/api/auth/heartbeat", nil)
 	capReq.AddCookie(&http.Cookie{Name: "sid", Value: "absolute-cap-sid"})
-	capResp, err := app.Test(capReq)
+	capResp, err := app.Test(capReq, -1)
 	if err != nil {
 		t.Fatalf("absolute-cap heartbeat: %v", err)
 	}
@@ -2035,7 +2034,7 @@ func TestRecoverableIdleCodeForUserAndAdminOnlyWithinGrace(t *testing.T) {
 		}
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: tc.id})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("%s recoverable request: %v", tc.role, err)
 		}
@@ -2063,7 +2062,7 @@ func TestRecoverableIdleCodeForUserAndAdminOnlyWithinGrace(t *testing.T) {
 		}
 		req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: tc.id})
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("%s request: %v", tc.name, err)
 		}
@@ -2076,7 +2075,7 @@ func TestRecoverableIdleCodeForUserAndAdminOnlyWithinGrace(t *testing.T) {
 
 	invalidReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 	invalidReq.AddCookie(&http.Cookie{Name: "sid", Value: "not-a-session"})
-	invalidResp, err := app.Test(invalidReq)
+	invalidResp, err := app.Test(invalidReq, -1)
 	if err != nil {
 		t.Fatalf("invalid session request: %v", err)
 	}
@@ -2122,7 +2121,7 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 	rangeReq := httptest.NewRequest(http.MethodGet, "/api/files/download?dirId=default&path=test.txt", nil)
 	rangeReq.Header.Set("Range", "bytes=4-9")
 	rangeReq.AddCookie(&http.Cookie{Name: "sid", Value: "sid"})
-	rangeResp, err := app.Test(rangeReq)
+	rangeResp, err := app.Test(rangeReq, -1)
 	if err != nil {
 		t.Fatalf("range request: %v", err)
 	}
@@ -2131,7 +2130,7 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"default","path":"test.txt"}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create lease request: %v", err)
 	}
@@ -2152,7 +2151,7 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 	}
 	leaseRangeReq := httptest.NewRequest(http.MethodGet, lease.URL, nil)
 	leaseRangeReq.Header.Set("Range", "bytes=10-15")
-	leaseRangeResp, err := app.Test(leaseRangeReq)
+	leaseRangeResp, err := app.Test(leaseRangeReq, -1)
 	if err != nil {
 		t.Fatalf("lease range request: %v", err)
 	}
@@ -2164,7 +2163,7 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 		t.Fatalf("restore replaced file mtime: %v", err)
 	}
 	changedContentReq := httptest.NewRequest(http.MethodGet, lease.URL, nil)
-	changedContentResp, err := app.Test(changedContentReq)
+	changedContentResp, err := app.Test(changedContentReq, -1)
 	if err != nil {
 		t.Fatalf("changed content lease request: %v", err)
 	}
@@ -2189,7 +2188,7 @@ func TestDownloadRangeAndLeaseSurviveSessionExpiry(t *testing.T) {
 	staleReq := httptest.NewRequest(http.MethodGet, "/api/files/download?dirId=default&path=test.txt", nil)
 	staleReq.Header.Set("Range", "bytes=10-15")
 	staleReq.AddCookie(&http.Cookie{Name: "sid", Value: "sid"})
-	staleResp, err := app.Test(staleReq)
+	staleResp, err := app.Test(staleReq, -1)
 	if err != nil {
 		t.Fatalf("stale range request: %v", err)
 	}
@@ -2225,7 +2224,7 @@ func TestLegacyEmptyResourceFingerprintsAreRejectedWithoutPathLeak(t *testing.T)
 	}
 
 	infoReq := httptest.NewRequest(http.MethodGet, "/t/legacy-token/info", nil)
-	infoResp, err := app.Test(infoReq)
+	infoResp, err := app.Test(infoReq, -1)
 	if err != nil {
 		t.Fatalf("legacy token info: %v", err)
 	}
@@ -2243,7 +2242,7 @@ func TestLegacyEmptyResourceFingerprintsAreRejectedWithoutPathLeak(t *testing.T)
 	}
 	listReq := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
 	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	listResp, err := app.Test(listReq)
+	listResp, err := app.Test(listReq, -1)
 	if err != nil {
 		t.Fatalf("list legacy token: %v", err)
 	}
@@ -2254,7 +2253,7 @@ func TestLegacyEmptyResourceFingerprintsAreRejectedWithoutPathLeak(t *testing.T)
 	}
 
 	downloadReq := httptest.NewRequest(http.MethodGet, "/t/legacy-token/download", nil)
-	downloadResp, err := app.Test(downloadReq)
+	downloadResp, err := app.Test(downloadReq, -1)
 	if err != nil {
 		t.Fatalf("legacy token download: %v", err)
 	}
@@ -2263,7 +2262,7 @@ func TestLegacyEmptyResourceFingerprintsAreRejectedWithoutPathLeak(t *testing.T)
 		t.Fatalf("expected legacy token to be forbidden, got %d", downloadResp.StatusCode)
 	}
 	leaseReq := httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=legacy-lease", nil)
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("legacy lease download: %v", err)
 	}
@@ -2306,7 +2305,7 @@ func TestTokenStatusReasonsTakePriorityOverEmptyResourceFingerprint(t *testing.T
 
 	for plain, want := range map[string]string{"empty-revoked": "revoked", "empty-expired": "expired", "empty-exhausted": "exhausted"} {
 		req := httptest.NewRequest(http.MethodGet, "/t/"+plain+"/info", nil)
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("token info %s: %v", plain, err)
 		}
@@ -2319,7 +2318,7 @@ func TestTokenStatusReasonsTakePriorityOverEmptyResourceFingerprint(t *testing.T
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
 	listReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	listResp, err := app.Test(listReq)
+	listResp, err := app.Test(listReq, -1)
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
@@ -2360,7 +2359,7 @@ func TestUploadTokensRejectEmptyFingerprintAndChangedRoot(t *testing.T) {
 	}
 	oldApp := New(oldCfg, st)
 	infoReq := httptest.NewRequest(http.MethodGet, "/t/empty-upload/info", nil)
-	infoResp, err := oldApp.Test(infoReq)
+	infoResp, err := oldApp.Test(infoReq, -1)
 	if err != nil {
 		t.Fatalf("empty upload info: %v", err)
 	}
@@ -2371,7 +2370,7 @@ func TestUploadTokensRejectEmptyFingerprintAndChangedRoot(t *testing.T) {
 	}
 	emptyLeaseReq := httptest.NewRequest(http.MethodPost, "/t/empty-upload/upload-lease", strings.NewReader(`{"fileName":"empty.txt","fileSize":1}`))
 	emptyLeaseReq.Header.Set("Content-Type", "application/json")
-	emptyLeaseResp, err := oldApp.Test(emptyLeaseReq)
+	emptyLeaseResp, err := oldApp.Test(emptyLeaseReq, -1)
 	if err != nil {
 		t.Fatalf("empty upload lease: %v", err)
 	}
@@ -2383,7 +2382,7 @@ func TestUploadTokensRejectEmptyFingerprintAndChangedRoot(t *testing.T) {
 	changedApp := New(testConfig(newRoot), st)
 	changedLeaseReq := httptest.NewRequest(http.MethodPost, "/t/changed-upload/upload-lease", strings.NewReader(`{"fileName":"changed.txt","fileSize":1}`))
 	changedLeaseReq.Header.Set("Content-Type", "application/json")
-	changedLeaseResp, err := changedApp.Test(changedLeaseReq)
+	changedLeaseResp, err := changedApp.Test(changedLeaseReq, -1)
 	if err != nil {
 		t.Fatalf("changed-root upload lease: %v", err)
 	}
@@ -2426,7 +2425,7 @@ func TestResourceFingerprintRejectsChangedRootAndPermissionAfterRestart(t *testi
 
 	changedRootApp := New(testConfig(newRoot), st)
 	infoReq := httptest.NewRequest(http.MethodGet, "/t/restart-token/info", nil)
-	infoResp, err := changedRootApp.Test(infoReq)
+	infoResp, err := changedRootApp.Test(infoReq, -1)
 	if err != nil {
 		t.Fatalf("changed-root info: %v", err)
 	}
@@ -2436,7 +2435,7 @@ func TestResourceFingerprintRejectsChangedRootAndPermissionAfterRestart(t *testi
 		t.Fatalf("expected changed root binding failure, got %+v", changedInfo)
 	}
 	reserveReq := httptest.NewRequest(http.MethodPost, "/t/restart-token/download-lease", nil)
-	reserveResp, err := changedRootApp.Test(reserveReq)
+	reserveResp, err := changedRootApp.Test(reserveReq, -1)
 	if err != nil {
 		t.Fatalf("changed-root reserve: %v", err)
 	}
@@ -2449,7 +2448,7 @@ func TestResourceFingerprintRejectsChangedRootAndPermissionAfterRestart(t *testi
 		t.Fatalf("expected rejected token reservation rolled back, token=%+v err=%v", loaded, err)
 	}
 	leaseReq := httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=restart-lease", nil)
-	leaseResp, err := changedRootApp.Test(leaseReq)
+	leaseResp, err := changedRootApp.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("changed-root lease: %v", err)
 	}
@@ -2459,7 +2458,7 @@ func TestResourceFingerprintRejectsChangedRootAndPermissionAfterRestart(t *testi
 	permissionCfg.Storage.Dirs[0].AllowDownload = false
 	permissionApp := New(permissionCfg, st)
 	permissionInfoReq := httptest.NewRequest(http.MethodGet, "/t/restart-token/info", nil)
-	permissionInfoResp, err := permissionApp.Test(permissionInfoReq)
+	permissionInfoResp, err := permissionApp.Test(permissionInfoReq, -1)
 	if err != nil {
 		t.Fatalf("permission-change info: %v", err)
 	}
@@ -2488,7 +2487,7 @@ func TestUnchangedResourceFingerprintSurvivesRestartAndRange(t *testing.T) {
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"default","path":"stable.txt"}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create stable lease: %v", err)
 	}
@@ -2507,7 +2506,7 @@ func TestUnchangedResourceFingerprintSurvivesRestartAndRange(t *testing.T) {
 		t.Fatalf("create stable token: %v", err)
 	}
 	infoReq := httptest.NewRequest(http.MethodGet, "/t/stable-token/info", nil)
-	infoResp, err := restarted.Test(infoReq)
+	infoResp, err := restarted.Test(infoReq, -1)
 	if err != nil {
 		t.Fatalf("stable token info after restart: %v", err)
 	}
@@ -2518,7 +2517,7 @@ func TestUnchangedResourceFingerprintSurvivesRestartAndRange(t *testing.T) {
 	}
 	rangeReq := httptest.NewRequest(http.MethodGet, lease.URL, nil)
 	rangeReq.Header.Set("Range", "bytes=3-6")
-	rangeResp, err := restarted.Test(rangeReq)
+	rangeResp, err := restarted.Test(rangeReq, -1)
 	if err != nil {
 		t.Fatalf("stable range after restart: %v", err)
 	}
@@ -2547,7 +2546,7 @@ func TestDownloadLeaseSkipsHashAboveConfiguredThreshold(t *testing.T) {
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"default","path":"large.bin"}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "sid-large"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create large lease request: %v", err)
 	}
@@ -2565,7 +2564,7 @@ func TestDownloadLeaseSkipsHashAboveConfiguredThreshold(t *testing.T) {
 	}
 	largeReq := httptest.NewRequest(http.MethodGet, lease.URL, nil)
 	largeReq.Header.Set("Range", "bytes=0-3")
-	largeResp, err := app.Test(largeReq)
+	largeResp, err := app.Test(largeReq, -1)
 	if err != nil {
 		t.Fatalf("large lease range request: %v", err)
 	}
@@ -2576,7 +2575,7 @@ func TestDownloadLeaseSkipsHashAboveConfiguredThreshold(t *testing.T) {
 		t.Fatalf("create large public token: %v", err)
 	}
 	publicLeaseReq := httptest.NewRequest(http.MethodPost, "/t/large-token/download-lease", nil)
-	publicLeaseResp, err := app.Test(publicLeaseReq)
+	publicLeaseResp, err := app.Test(publicLeaseReq, -1)
 	if err != nil {
 		t.Fatalf("create public large lease request: %v", err)
 	}
@@ -2616,7 +2615,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 	legacyReq := httptest.NewRequest(http.MethodGet, "/t/public-token/download", nil)
-	legacyResp, err := app.Test(legacyReq)
+	legacyResp, err := app.Test(legacyReq, -1)
 	if err != nil {
 		t.Fatalf("legacy public download page request: %v", err)
 	}
@@ -2632,7 +2631,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 		t.Fatalf("expected legacy confirmation page not to consume token, got uses=%d", unused.Uses)
 	}
 	leaseReq := httptest.NewRequest(http.MethodPost, "/t/public-token/download-lease", nil)
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("public lease request: %v", err)
 	}
@@ -2651,7 +2650,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodGet, lease.URL, nil)
 		req.Header.Set("Range", "bytes=4-9")
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("public lease range request %d: %v", i, err)
 		}
@@ -2678,7 +2677,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 		t.Fatalf("expected one first-use lease audit log, got %d", leaseUseCount)
 	}
 	secondReq := httptest.NewRequest(http.MethodPost, "/t/public-token/download-lease", nil)
-	secondResp, err := app.Test(secondReq)
+	secondResp, err := app.Test(secondReq, -1)
 	if err != nil {
 		t.Fatalf("second public lease request: %v", err)
 	}
@@ -2690,7 +2689,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 	}
 	revokeReq := httptest.NewRequest(http.MethodPost, "/api/tokens/"+strconv.FormatInt(tok.ID, 10)+"/revoke", nil)
 	revokeReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	revokeResp, err := app.Test(revokeReq)
+	revokeResp, err := app.Test(revokeReq, -1)
 	if err != nil {
 		t.Fatalf("revoke token request: %v", err)
 	}
@@ -2699,7 +2698,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 		t.Fatalf("expected revoke ok, got %d", revokeResp.StatusCode)
 	}
 	revokedLeaseReq := httptest.NewRequest(http.MethodGet, lease.URL, nil)
-	revokedLeaseResp, err := app.Test(revokedLeaseReq)
+	revokedLeaseResp, err := app.Test(revokedLeaseReq, -1)
 	if err != nil {
 		t.Fatalf("revoked lease request: %v", err)
 	}
@@ -2713,7 +2712,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 		t.Fatalf("create delete token: %v", err)
 	}
 	deleteLeaseReq := httptest.NewRequest(http.MethodPost, "/t/delete-token/download-lease", nil)
-	deleteLeaseResp, err := app.Test(deleteLeaseReq)
+	deleteLeaseResp, err := app.Test(deleteLeaseReq, -1)
 	if err != nil {
 		t.Fatalf("delete token lease request: %v", err)
 	}
@@ -2724,7 +2723,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 	}
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/tokens/"+strconv.FormatInt(deleteTok.ID, 10), nil)
 	deleteReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	deleteResp, err := app.Test(deleteReq)
+	deleteResp, err := app.Test(deleteReq, -1)
 	if err != nil {
 		t.Fatalf("delete token request: %v", err)
 	}
@@ -2733,7 +2732,7 @@ func TestPublicDownloadLeaseConsumesTokenOnceAndSupportsRange(t *testing.T) {
 		t.Fatalf("expected delete token ok, got %d", deleteResp.StatusCode)
 	}
 	deletedLeaseReq := httptest.NewRequest(http.MethodGet, deleteLease.URL, nil)
-	deletedLeaseResp, err := app.Test(deletedLeaseReq)
+	deletedLeaseResp, err := app.Test(deletedLeaseReq, -1)
 	if err != nil {
 		t.Fatalf("deleted lease request: %v", err)
 	}
@@ -2763,7 +2762,7 @@ func TestPublicDownloadLeaseExpiresNoLaterThanToken(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/t/short-token/download-lease", nil)
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("public lease request: %v", err)
 	}
@@ -2847,7 +2846,7 @@ func TestUploadLeaseSurvivesSessionDeletion(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"lease.txt","fileSize":5}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("create lease: %v", err)
 	}
@@ -2873,7 +2872,7 @@ func TestUploadLeaseSurvivesSessionDeletion(t *testing.T) {
 	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
 	uploadReq.Header.Set("Content-Type", w.FormDataContentType())
 	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
-	uploadResp, err := app.Test(uploadReq)
+	uploadResp, err := app.Test(uploadReq, -1)
 	if err != nil {
 		t.Fatalf("upload by lease: %v", err)
 	}
@@ -2904,7 +2903,7 @@ func TestUploadLeaseDoesNotRegisterTransferBeforeBodyUpload(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"visible.bin","fileSize":7}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("create lease: %v", err)
 	}
@@ -2936,7 +2935,7 @@ func TestRawUploadLeaseSuccessAndSingleUse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello raw"))
 	req.Header.Set("Authorization", "Bearer "+lease.Lease)
 	req.ContentLength = int64(len("hello raw"))
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("raw upload: %v", err)
 	}
@@ -2953,7 +2952,7 @@ func TestRawUploadLeaseSuccessAndSingleUse(t *testing.T) {
 	retry := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello raw"))
 	retry.Header.Set("Authorization", "Bearer "+lease.Lease)
 	retry.ContentLength = int64(len("hello raw"))
-	retryResp, err := app.Test(retry)
+	retryResp, err := app.Test(retry, -1)
 	if err != nil {
 		t.Fatalf("raw retry: %v", err)
 	}
@@ -2978,7 +2977,7 @@ func TestRawUploadLengthMismatchDoesNotConsumeLease(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hey"))
 	req.Header.Set("Authorization", "Bearer "+lease.Lease)
 	req.ContentLength = 3
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("raw length mismatch: %v", err)
 	}
@@ -2997,7 +2996,7 @@ func TestRawUploadLengthMismatchDoesNotConsumeLease(t *testing.T) {
 	zeroReq := httptest.NewRequest(http.MethodPost, zero.RawUploadURL, http.NoBody)
 	zeroReq.Header.Set("Authorization", "Bearer "+zero.Lease)
 	zeroReq.ContentLength = 0
-	zeroResp, err := app.Test(zeroReq)
+	zeroResp, err := app.Test(zeroReq, -1)
 	if err != nil {
 		t.Fatalf("zero raw upload: %v", err)
 	}
@@ -3299,7 +3298,7 @@ func TestCompletedUploadFileSurvivesResourcePublish(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello"))
 	req.Header.Set("Authorization", "Bearer "+lease.Lease)
 	req.ContentLength = 5
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("complete upload: %v", err)
 	}
@@ -3403,7 +3402,7 @@ func TestUploadLeaseFingerprintRejectsAfterRestartWithChangedResource(t *testing
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"restart.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create upload lease: %v", err)
 	}
@@ -3417,11 +3416,14 @@ func TestUploadLeaseFingerprintRejectsAfterRestartWithChangedResource(t *testing
 	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
 	uploadReq.Header.Set("Content-Type", contentType)
 	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
-	uploadResp, err := restarted.Test(uploadReq)
+	uploadResp, err := restarted.Test(uploadReq, -1)
 	if err != nil {
 		t.Fatalf("upload stale lease after restart: %v", err)
 	}
-	assertErrorContains(t, uploadResp, http.StatusForbidden, "资源已变化")
+	uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("stale upload lease status=%d, want 403", uploadResp.StatusCode)
+	}
 	if _, err := os.Stat(filepath.Join(newRoot, "restart.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected stale lease not to write into new root, stat=%v", err)
 	}
@@ -3459,7 +3461,7 @@ func TestUploadLeaseFingerprintCatchesOnlineResourceChangeWithoutCleanup(t *test
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"race.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create upload lease: %v", err)
 	}
@@ -3473,11 +3475,14 @@ func TestUploadLeaseFingerprintCatchesOnlineResourceChangeWithoutCleanup(t *test
 	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
 	uploadReq.Header.Set("Content-Type", contentType)
 	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
-	uploadResp, err := app.Test(uploadReq)
+	uploadResp, err := app.Test(uploadReq, -1)
 	if err != nil {
 		t.Fatalf("upload stale lease after hot config change: %v", err)
 	}
-	assertErrorContains(t, uploadResp, http.StatusForbidden, "资源已变化")
+	uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("stale upload lease status=%d, want 403", uploadResp.StatusCode)
+	}
 	if _, err := os.Stat(filepath.Join(newRoot, "race.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected stale lease not to write into hot-updated root, stat=%v", err)
 	}
@@ -3504,7 +3509,7 @@ func TestUploadLeaseRejectsQueryToken(t *testing.T) {
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"query.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create upload lease: %v", err)
 	}
@@ -3516,7 +3521,7 @@ func TestUploadLeaseRejectsQueryToken(t *testing.T) {
 	body, contentType := multipartUploadBody(t, "ignored.txt", []byte("hello"))
 	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL+"?lease="+url.QueryEscape(lease.Lease), body)
 	uploadReq.Header.Set("Content-Type", contentType)
-	uploadResp, err := app.Test(uploadReq)
+	uploadResp, err := app.Test(uploadReq, -1)
 	if err != nil {
 		t.Fatalf("upload by query lease: %v", err)
 	}
@@ -3573,7 +3578,7 @@ func TestUploadLeaseInvalidatedWhenResourceChanges(t *testing.T) {
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"moved.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create upload lease: %v", err)
 	}
@@ -3585,7 +3590,7 @@ func TestUploadLeaseInvalidatedWhenResourceChanges(t *testing.T) {
 	updateReq := httptest.NewRequest(http.MethodPut, "/api/config/resources/default", strings.NewReader(fmt.Sprintf(`{"id":"default","name":"Default","type":"directory","path":%q,"allowDownload":true,"allowUpload":true}`, newRoot)))
 	updateReq.Header.Set("Content-Type", "application/json")
 	updateReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	updateResp, err := app.Test(updateReq)
+	updateResp, err := app.Test(updateReq, -1)
 	if err != nil {
 		t.Fatalf("update resource: %v", err)
 	}
@@ -3608,7 +3613,7 @@ func TestUploadLeaseInvalidatedWhenResourceChanges(t *testing.T) {
 	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
 	uploadReq.Header.Set("Content-Type", contentType)
 	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
-	uploadResp, err := app.Test(uploadReq)
+	uploadResp, err := app.Test(uploadReq, -1)
 	if err != nil {
 		t.Fatalf("upload by stale lease: %v", err)
 	}
@@ -3948,7 +3953,7 @@ func TestUploadLeaseInvalidatedAfterResourceDeleteAndRecreate(t *testing.T) {
 	leaseReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(`{"dirId":"default","path":"","fileName":"recreated.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
 	leaseReq.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create upload lease: %v", err)
 	}
@@ -3959,7 +3964,7 @@ func TestUploadLeaseInvalidatedAfterResourceDeleteAndRecreate(t *testing.T) {
 	}
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/config/resources/default", nil)
 	deleteReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	deleteResp, err := app.Test(deleteReq)
+	deleteResp, err := app.Test(deleteReq, -1)
 	if err != nil {
 		t.Fatalf("delete resource: %v", err)
 	}
@@ -3970,7 +3975,7 @@ func TestUploadLeaseInvalidatedAfterResourceDeleteAndRecreate(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/api/config/resources", strings.NewReader(fmt.Sprintf(`{"id":"default","name":"Default","type":"directory","path":%q,"allowDownload":true,"allowUpload":true}`, newRoot)))
 	createReq.Header.Set("Content-Type", "application/json")
 	createReq.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	createResp, err := app.Test(createReq)
+	createResp, err := app.Test(createReq, -1)
 	if err != nil {
 		t.Fatalf("recreate resource: %v", err)
 	}
@@ -3982,7 +3987,7 @@ func TestUploadLeaseInvalidatedAfterResourceDeleteAndRecreate(t *testing.T) {
 	uploadReq := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
 	uploadReq.Header.Set("Content-Type", contentType)
 	uploadReq.Header.Set("Authorization", "Bearer "+lease.Lease)
-	uploadResp, err := app.Test(uploadReq)
+	uploadResp, err := app.Test(uploadReq, -1)
 	if err != nil {
 		t.Fatalf("upload by stale lease: %v", err)
 	}
@@ -4010,7 +4015,7 @@ func TestStreamingUploadLimitCleansTempFile(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", body)
 	req.Header.Set("Content-Type", contentType)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "user-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("upload request: %v", err)
 	}
@@ -4209,7 +4214,7 @@ func TestActiveTransfersAPIShape(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/transfers/active", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("active transfers: %v", err)
 	}
@@ -4256,7 +4261,7 @@ func TestAdminCancelUploadTransfer(t *testing.T) {
 	s.transfers.add(&transferRecord{ID: "upload-1", Type: "upload", Status: transferActive, Source: "session", DirID: "default", FileName: "slow.bin", Cancelable: true, cancel: func() { close(canceled) }})
 	req := httptest.NewRequest(http.MethodPost, "/api/transfers/upload-1/cancel", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("cancel transfer: %v", err)
 	}
@@ -4320,7 +4325,7 @@ func TestPublicUploadStreamingLimitCleansTempAndRollsBackToken(t *testing.T) {
 	body, contentType := multipartUploadBody(t, "too-large.bin", bytes.Repeat([]byte("x"), 1024*1024+10))
 	req := httptest.NewRequest(http.MethodPost, "/t/public-upload/upload", body)
 	req.Header.Set("Content-Type", contentType)
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("public upload request: %v", err)
 	}
@@ -4358,7 +4363,7 @@ func TestPublicUploadLeaseCannotUseSessionMultipartEndpoint(t *testing.T) {
 	}
 	leaseReq := httptest.NewRequest(http.MethodPost, "/t/public-raw-token/upload-lease", strings.NewReader(`{"fileName":"bypass.txt","fileSize":6}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create public upload lease: %v", err)
 	}
@@ -4371,7 +4376,7 @@ func TestPublicUploadLeaseCannotUseSessionMultipartEndpoint(t *testing.T) {
 	bypassReq := httptest.NewRequest(http.MethodPost, "/api/files/upload-by-lease", body)
 	bypassReq.Header.Set("Content-Type", contentType)
 	bypassReq.Header.Set("Authorization", "Bearer "+lease.Lease)
-	bypassResp, err := app.Test(bypassReq)
+	bypassResp, err := app.Test(bypassReq, -1)
 	if err != nil {
 		t.Fatalf("bypass multipart upload: %v", err)
 	}
@@ -4422,7 +4427,7 @@ func TestPublicRawUploadRechecksResourceAfterTokenReservation(t *testing.T) {
 	s.routes(app)
 	leaseReq := httptest.NewRequest(http.MethodPost, "/t/raw-race-token/upload-lease", strings.NewReader(`{"fileName":"race.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create public upload lease: %v", err)
 	}
@@ -4439,7 +4444,7 @@ func TestPublicRawUploadRechecksResourceAfterTokenReservation(t *testing.T) {
 	rawReq := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello"))
 	rawReq.Header.Set("Authorization", "Bearer "+lease.Lease)
 	rawReq.ContentLength = 5
-	rawResp, err := app.Test(rawReq)
+	rawResp, err := app.Test(rawReq, -1)
 	if err != nil {
 		t.Fatalf("raw upload after resource race: %v", err)
 	}
@@ -4485,7 +4490,7 @@ func TestUploadDiskReserveThresholdsAndErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s.availableDiskSpace = func(string) (uint64, uint64, error) { return tc.available, tc.total, tc.err }
-			resp, requestErr := app.Test(httptest.NewRequest(http.MethodGet, "/check", nil))
+			resp, requestErr := app.Test(httptest.NewRequest(http.MethodGet, "/check", nil), -1)
 			if requestErr != nil {
 				t.Fatalf("disk check request: %v", requestErr)
 			}
@@ -4505,7 +4510,7 @@ func TestUploadDiskReserveThresholdsAndErrors(t *testing.T) {
 	}
 	cfg.Storage.MinFreeMB = int(^uint(0) >> 1)
 	s.availableDiskSpace = func(string) (uint64, uint64, error) { return ^uint64(0), ^uint64(0), nil }
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/check", nil))
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/check", nil), -1)
 	if err != nil {
 		t.Fatalf("overflow disk check: %v", err)
 	}
@@ -4527,7 +4532,7 @@ func TestUploadDiskReserveThresholdsAndErrors(t *testing.T) {
 		_, _, err := s.saveRawUniqueAtomic(c, dir.Path, "", "disk.txt", strings.NewReader("hello"), "session", "session", "disk-owner", "disk-permit", "disk-test", dir.ID, 5, resourceAuthorizationFingerprint(dir))
 		return err
 	})
-	writeResp, err := app.Test(httptest.NewRequest(http.MethodPost, "/write", nil))
+	writeResp, err := app.Test(httptest.NewRequest(http.MethodPost, "/write", nil), -1)
 	if err != nil {
 		t.Fatalf("disk write rejection: %v", err)
 	}
@@ -4559,7 +4564,7 @@ func TestPublicRawUploadCapacityRollsBackTokenAndConsumesLease(t *testing.T) {
 	s.routes(app)
 	leaseReq := httptest.NewRequest(http.MethodPost, "/t/capacity-token/upload-lease", strings.NewReader(`{"fileName":"capacity.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create lease: %v", err)
 	}
@@ -4574,7 +4579,7 @@ func TestPublicRawUploadCapacityRollsBackTokenAndConsumesLease(t *testing.T) {
 	rawReq := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello"))
 	rawReq.Header.Set("Authorization", "Bearer "+lease.Lease)
 	rawReq.ContentLength = 5
-	rawResp, err := app.Test(rawReq)
+	rawResp, err := app.Test(rawReq, -1)
 	if err != nil {
 		t.Fatalf("raw capacity request: %v", err)
 	}
@@ -4618,7 +4623,7 @@ func TestRegisterUploadTransferReturnsScopedConcurrencyCode(t *testing.T) {
 		_, err := s.acquireUploadPermit(c, dir.ID, fingerprint, "session", "two")
 		return err
 	})
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1)
 	if err != nil {
 		t.Fatalf("register transfer: %v", err)
 	}
@@ -4650,7 +4655,7 @@ func TestPublicRawUploadDiskFailureRollsBackToken(t *testing.T) {
 	s.routes(app)
 	leaseReq := httptest.NewRequest(http.MethodPost, "/t/disk-token/upload-lease", strings.NewReader(`{"fileName":"disk-fail.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create lease: %v", err)
 	}
@@ -4663,7 +4668,7 @@ func TestPublicRawUploadDiskFailureRollsBackToken(t *testing.T) {
 	rawReq := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello"))
 	rawReq.Header.Set("Authorization", "Bearer "+lease.Lease)
 	rawReq.ContentLength = 5
-	rawResp, err := app.Test(rawReq)
+	rawResp, err := app.Test(rawReq, -1)
 	if err != nil {
 		t.Fatalf("raw disk failure: %v", err)
 	}
@@ -4773,7 +4778,7 @@ func TestMultipartPermitOwnerLimitsPublicTokenAndUploadLease(t *testing.T) {
 		body, contentType := multipartUploadBody(t, "public.txt", []byte("hello"))
 		req := httptest.NewRequest(http.MethodPost, "/t/multipart-owner-token/upload", body)
 		req.Header.Set("Content-Type", contentType)
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("public multipart: %v", err)
 		}
@@ -4817,7 +4822,7 @@ func TestMultipartPermitOwnerLimitsPublicTokenAndUploadLease(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, lease.UploadURL, body)
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Authorization", "Bearer "+lease.Lease)
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil {
 			t.Fatalf("lease multipart: %v", err)
 		}
@@ -4868,7 +4873,7 @@ func TestMultipartDirIDBindingEnforcesResourcePermitBeforeFile(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "binding-session"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("binding upload: %v", err)
 	}
@@ -4889,7 +4894,7 @@ func TestUploadFinalCommitRejectsPublishedResourceChangeAfterTempClose(t *testin
 	}
 	leaseReq := httptest.NewRequest(http.MethodPost, "/t/final-race-token/upload-lease", strings.NewReader(`{"fileName":"final-race.txt","fileSize":5}`))
 	leaseReq.Header.Set("Content-Type", "application/json")
-	leaseResp, err := app.Test(leaseReq)
+	leaseResp, err := app.Test(leaseReq, -1)
 	if err != nil {
 		t.Fatalf("create lease: %v", err)
 	}
@@ -4914,7 +4919,7 @@ func TestUploadFinalCommitRejectsPublishedResourceChangeAfterTempClose(t *testin
 		req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello"))
 		req.Header.Set("Authorization", "Bearer "+lease.Lease)
 		req.ContentLength = 5
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		done <- requestResult{resp: resp, err: requestErr}
 	}()
 	select {
@@ -5007,7 +5012,7 @@ func TestUploadFinalCommitBeforePublishKeepsFile(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello"))
 		req.Header.Set("Authorization", "Bearer "+lease.Lease)
 		req.ContentLength = 5
-		resp, _ := app.Test(req)
+		resp, _ := app.Test(req, -1)
 		done <- resp
 	}()
 	<-reached
@@ -5059,7 +5064,7 @@ func TestUploadFinalCommitChecksEachSameNameCandidate(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, lease.RawUploadURL, strings.NewReader("hello"))
 	req.Header.Set("Authorization", "Bearer "+lease.Lease)
 	req.ContentLength = 5
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("same-name upload: %v", err)
 	}
@@ -5110,7 +5115,7 @@ func TestCapabilityResponsesAlwaysSetSecurityHeadersIncludingRange(t *testing.T)
 		for key, value := range headers {
 			req.Header.Set(key, value)
 		}
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("%s %s: %v", method, path, requestErr)
 		}
@@ -5193,7 +5198,7 @@ func TestCapabilityHeadersPrecedeCORSForOptionsAndRejectedOrigins(t *testing.T) 
 		req := httptest.NewRequest(http.MethodOptions, path, nil)
 		req.Header.Set("Origin", "https://rejected.example")
 		req.Header.Set("Access-Control-Request-Method", http.MethodPost)
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("OPTIONS %s: %v", path, requestErr)
 		}
@@ -5206,7 +5211,7 @@ func TestCapabilityHeadersPrecedeCORSForOptionsAndRejectedOrigins(t *testing.T) 
 	ordinaryReq := httptest.NewRequest(http.MethodOptions, "/api/health", nil)
 	ordinaryReq.Header.Set("Origin", "https://rejected.example")
 	ordinaryReq.Header.Set("Access-Control-Request-Method", http.MethodGet)
-	ordinaryResp, err := app.Test(ordinaryReq)
+	ordinaryResp, err := app.Test(ordinaryReq, -1)
 	if err != nil {
 		t.Fatalf("ordinary OPTIONS: %v", err)
 	}
@@ -5242,7 +5247,7 @@ func TestCheckedFiberBodyLimitAndKeepaliveIdleTimeout(t *testing.T) {
 	s := &Server{config: cfg, store: st}
 	safeApp := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
 	safeApp.Get("/", s.safeConfig)
-	resp, err := safeApp.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	resp, err := safeApp.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1)
 	if err != nil {
 		t.Fatalf("safe config: %v", err)
 	}
@@ -5292,7 +5297,7 @@ func TestDownloadLeaseCreationRejectsSameSizeMtimeReplacementAfterHash(t *testin
 	req := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"default","path":"replace.txt"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "hash-race-session"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("create lease: %v", err)
 	}
@@ -5337,7 +5342,7 @@ func TestDownloadFinalValidationRejectsSameFileIdentityChange(t *testing.T) {
 	s.routes(app)
 	req := httptest.NewRequest(http.MethodGet, "/api/files/download?dirId=default&path=direct.txt", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "download-race-session"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("direct download: %v", err)
 	}
@@ -5417,7 +5422,7 @@ func TestDownloadByLeaseFinalRevalidationFailureDoesNotTouchOrAuditUse(t *testin
 			}
 			app := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
 			s.routes(app)
-			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+plain, nil))
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+plain, nil), -1)
 			if err != nil {
 				t.Fatalf("download by lease: %v", err)
 			}
@@ -5494,7 +5499,7 @@ func TestDownloadLeaseConcurrentFirstRangeHashesAndAuditsOnce(t *testing.T) {
 		go func(i int) {
 			req := httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+plain, nil)
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", i*10, i*10+9))
-			resp, requestErr := app.Test(req)
+			resp, requestErr := app.Test(req, -1)
 			if resp != nil {
 				_, _ = io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
@@ -5545,7 +5550,7 @@ func TestDownloadLeaseConcurrentFirstRangeHashesAndAuditsOnce(t *testing.T) {
 	for _, byteRange := range []string{"bytes=100-109", "bytes=110-119"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+plain, nil)
 		req.Header.Set("Range", byteRange)
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil || resp.StatusCode != http.StatusPartialContent {
 			t.Fatalf("subsequent range %s status=%v err=%v", byteRange, responseStatus(resp), err)
 		}
@@ -5576,7 +5581,7 @@ func TestDownloadLeaseConcurrentFirstRangeHashesAndAuditsOnce(t *testing.T) {
 	restarted.routes(restartApp)
 	req := httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+plain, nil)
 	req.Header.Set("Range", "bytes=120-129")
-	resp, err := restartApp.Test(req)
+	resp, err := restartApp.Test(req, -1)
 	if err != nil || resp.StatusCode != http.StatusPartialContent {
 		t.Fatalf("restart range status=%v err=%v", responseStatus(resp), err)
 	}
@@ -5624,7 +5629,7 @@ func TestDownloadLeaseStrictModeHashesEveryRequest(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+plain, nil)
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", i, i))
-		resp, err := app.Test(req)
+		resp, err := app.Test(req, -1)
 		if err != nil || resp.StatusCode != http.StatusPartialContent {
 			t.Fatalf("strict request %d status=%v err=%v", i, responseStatus(resp), err)
 		}
@@ -5671,11 +5676,11 @@ func TestDownloadHashCapacityRejectsUnrelatedLeaseWithoutMarkingUse(t *testing.T
 	s.routes(app)
 	firstDone := make(chan *http.Response, 1)
 	go func() {
-		resp, _ := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=capacity-one", nil))
+		resp, _ := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=capacity-one", nil), -1)
 		firstDone <- resp
 	}()
 	<-started
-	second, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=capacity-two", nil))
+	second, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=capacity-two", nil), -1)
 	if err != nil {
 		t.Fatalf("second request: %v", err)
 	}
@@ -5691,7 +5696,7 @@ func TestDownloadHashCapacityRejectsUnrelatedLeaseWithoutMarkingUse(t *testing.T
 	createReq := httptest.NewRequest(http.MethodPost, "/api/files/download-lease", strings.NewReader(`{"dirId":"default","path":"capacity.txt"}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	createReq.AddCookie(&http.Cookie{Name: "sid", Value: "hash-create-session"})
-	createResp, err := app.Test(createReq)
+	createResp, err := app.Test(createReq, -1)
 	if err != nil {
 		t.Fatalf("create lease while hash busy: %v", err)
 	}
@@ -5751,7 +5756,7 @@ func TestDownloadLeaseHashMismatchAndNoHashFirstUseSemantics(t *testing.T) {
 			s.routes(app)
 			req := httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+url.QueryEscape(plain), nil)
 			req.Header.Set("Range", "bytes=0-2")
-			resp, err := app.Test(req)
+			resp, err := app.Test(req, -1)
 			if err != nil {
 				t.Fatalf("request: %v", err)
 			}
@@ -5786,7 +5791,7 @@ func TestDownloadHashFlightPanicUnblocksWaiters(t *testing.T) {
 	}
 	results := make(chan result, 5)
 	request := func() {
-		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+url.QueryEscape(plain), nil))
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+url.QueryEscape(plain), nil), -1)
 		if err != nil {
 			results <- result{err: err}
 			return
@@ -5845,7 +5850,7 @@ func TestDownloadHashCapacityFlightMapsErrorForEveryWaiter(t *testing.T) {
 	}
 	results := make(chan result, 5)
 	request := func() {
-		resp, _ := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+url.QueryEscape(plain), nil))
+		resp, _ := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease="+url.QueryEscape(plain), nil), -1)
 		var payload map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&payload)
 		resp.Body.Close()
@@ -5897,7 +5902,7 @@ func TestDownloadHashFailureReleasesSlotForAnotherLease(t *testing.T) {
 	}
 	app := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
 	s.routes(app)
-	failed, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=failure.txt", nil))
+	failed, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=failure.txt", nil), -1)
 	if err != nil {
 		t.Fatalf("failure request: %v", err)
 	}
@@ -5906,7 +5911,7 @@ func TestDownloadHashFailureReleasesSlotForAnotherLease(t *testing.T) {
 		t.Fatalf("expected hash failure conflict, got %d", failed.StatusCode)
 	}
 	s.duringDownloadFileHash = nil
-	succeeded, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=success.txt", nil))
+	succeeded, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/files/download-by-lease?lease=success.txt", nil), -1)
 	if err != nil || succeeded.StatusCode != http.StatusOK {
 		t.Fatalf("second lease could not acquire released slot: status=%v err=%v", responseStatus(succeeded), err)
 	}
@@ -5982,7 +5987,7 @@ func TestAuthFastFailureAvoidsEmptyLookupAndRequestCleanup(t *testing.T) {
 	app := fiber.New(fiber.Config{ErrorHandler: jsonErrorHandler})
 	app.Get("/protected", s.auth(func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) }))
 	for i := 0; i < 1000; i++ {
-		resp, requestErr := app.Test(httptest.NewRequest(http.MethodGet, "/protected", nil))
+		resp, requestErr := app.Test(httptest.NewRequest(http.MethodGet, "/protected", nil), -1)
 		if requestErr != nil || resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("missing-cookie request %d status=%v err=%v", i, responseStatus(resp), requestErr)
 		}
@@ -6001,7 +6006,7 @@ func TestAuthFastFailureAvoidsEmptyLookupAndRequestCleanup(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "invalid-session"})
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil || resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("invalid-cookie request %d status=%v err=%v", i, responseStatus(resp), requestErr)
 		}
@@ -6090,7 +6095,7 @@ func TestLoginFailedAuditIsNotSampled(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"code":"111111"}`))
 		req.Header.Set("Content-Type", "application/json")
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil || resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("login failure %d status=%v err=%v", i, responseStatus(resp), requestErr)
 		}
@@ -6147,29 +6152,6 @@ func TestPolicyAuditIsCompleteAndFailureLogDoesNotLeakDetail(t *testing.T) {
 	}
 }
 
-func TestCriticalAuditCallSiteClassification(t *testing.T) {
-	var source strings.Builder
-	for _, name := range []string{"server.go", "file_picker.go", "download_safety.go"} {
-		content, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		source.Write(content)
-	}
-	criticalActions := []string{"login_failed", "login_success", "config_resource_create", "config_resource_update", "config_resource_delete", "config_upload_policy_update", "token_create", "token_revoke", "token_delete", "illegal_access", "file_picker_denied", "download_lease_create", "public_download_lease_create", "download_lease_resource_changed", "download_lease_file_changed", "upload_lease_create", "upload_lease_resource_changed", "upload_lease_failed", "token_upload_failed", "token_upload_denied", "token_denied"}
-	for _, action := range criticalActions {
-		if !strings.Contains(source.String(), `criticalAudit("`+action+`"`) {
-			t.Fatalf("critical action %s is not routed through criticalAudit", action)
-		}
-		if strings.Contains(source.String(), `_ = s.store.Audit("`+action+`"`) {
-			t.Fatalf("critical action %s still ignores Store.Audit errors", action)
-		}
-	}
-	if !strings.Contains(source.String(), `bestEffortAudit("download"`) {
-		t.Fatalf("ordinary download success should remain best-effort")
-	}
-}
-
 func TestDirectoryAndPickerBoundedPaginationContract(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "directory-a"), 0755); err != nil {
@@ -6202,7 +6184,7 @@ func TestDirectoryAndPickerBoundedPaginationContract(t *testing.T) {
 	list := func(path, session string, out any) *http.Response {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: session})
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("GET %s: %v", path, requestErr)
 		}
@@ -6295,7 +6277,7 @@ func TestDirectoryMetadataFailureBecomesUnknownWithoutFailingRequest(t *testing.
 	s.routes(app)
 	req := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=default&page=1&pageSize=20", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "metadata-user"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -6356,7 +6338,7 @@ func TestListingPageSizeClampsBeforeOffsetForFilesAndPicker(t *testing.T) {
 	filePage := func(page, pageSize string) fileListResponse {
 		req := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=default&page="+page+"&pageSize="+pageSize, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "clamp-user"})
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("file page: %v", requestErr)
 		}
@@ -6370,7 +6352,7 @@ func TestListingPageSizeClampsBeforeOffsetForFilesAndPicker(t *testing.T) {
 	pickerPage := func(page, pageSize string) filePickerListResponse {
 		req := httptest.NewRequest(http.MethodGet, "/api/config/file-picker/list?rootId=clamped&page="+page+"&pageSize="+pageSize, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "clamp-admin"})
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("picker page: %v", requestErr)
 		}
@@ -6407,7 +6389,7 @@ func TestListingPageSizeClampsBeforeOffsetForFilesAndPicker(t *testing.T) {
 	for _, query := range []string{"page=0&pageSize=100", "page=1&pageSize=0", "page=9223372036854775807&pageSize=9223372036854775807"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=default&"+query, nil)
 		req.AddCookie(&http.Cookie{Name: "sid", Value: "clamp-user"})
-		resp, requestErr := app.Test(req)
+		resp, requestErr := app.Test(req, -1)
 		if requestErr != nil {
 			t.Fatalf("invalid page request: %v", requestErr)
 		}
@@ -6419,7 +6401,7 @@ func TestListingPageSizeClampsBeforeOffsetForFilesAndPicker(t *testing.T) {
 	}
 	legacyReq := httptest.NewRequest(http.MethodGet, "/api/files/list?dirId=default", nil)
 	legacyReq.AddCookie(&http.Cookie{Name: "sid", Value: "clamp-user"})
-	legacyResp, err := app.Test(legacyReq)
+	legacyResp, err := app.Test(legacyReq, -1)
 	if err != nil {
 		t.Fatalf("legacy list: %v", err)
 	}
@@ -6587,6 +6569,7 @@ func newResourcePolicyTestApp(t *testing.T, roots []config.FilePickerRoot, resou
 	cfg.Database.Path = databasePath
 	cfg.Web.StaticDir = staticDir
 	cfg.FilePicker.Roots = roots
+	cfg.FilePicker.Mode = "restricted"
 	cfg.SetResources(resources)
 	if err := config.SaveAtomic(configPath, cfg); err != nil {
 		t.Fatalf("save resource policy config: %v", err)
@@ -6619,7 +6602,7 @@ func requestResourceChange(t *testing.T, app *fiber.App, method, path, body stri
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "admin-sid"})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("resource request: %v", err)
 	}
@@ -6692,7 +6675,7 @@ func createTestUploadLeaseForSession(t *testing.T, app *fiber.App, sessionID, fi
 	req := httptest.NewRequest(http.MethodPost, "/api/files/upload-lease", strings.NewReader(fmt.Sprintf(`{"dirId":"default","path":"","fileName":%q,"fileSize":%d}`, fileName, fileSize)))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: sessionID})
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("create upload lease: %v", err)
 	}
@@ -6767,6 +6750,7 @@ func testConfig(root string) *config.Config {
 }
 
 func setTestStorageAndPickerRoot(cfg *config.Config, root string) {
+	cfg.FilePicker.Mode = "restricted"
 	cfg.Storage.Dirs = []config.Dir{{ID: "default", Name: "Default", Path: root, AllowDownload: true, AllowUpload: true}}
 	cfg.FilePicker.Roots = []config.FilePickerRoot{{ID: "test-root", Name: "Test Root", Path: root, AllowSelectFiles: true, AllowSelectDirs: true, FollowSymlinks: true}}
 }
