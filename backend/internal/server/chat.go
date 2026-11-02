@@ -393,6 +393,9 @@ func nullTimePointer(value sql.NullTime) *time.Time {
 
 func chatViewer(c *fiber.Ctx) (string, string) {
 	key, _ := c.Locals("sessionID").(string)
+	if id, ok := c.Locals("userID").(int64); ok {
+		key = fmt.Sprintf("account:%d", id)
+	}
 	role, _ := c.Locals("role").(string)
 	return key, role
 }

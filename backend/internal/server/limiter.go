@@ -86,6 +86,9 @@ func outstandingLeaseError(c *fiber.Ctx) error {
 }
 
 func (s *Server) creationStoreError(c *fiber.Ctx, err error) error {
+	if errors.Is(err, store.ErrLeaseSessionInvalid) {
+		return newCodedAPIError(fiber.StatusUnauthorized, "session_invalid", "会话无效或已过期，请重新登录。")
+	}
 	if errors.Is(err, store.ErrOutstandingLeaseLimit) {
 		return outstandingLeaseError(c)
 	}

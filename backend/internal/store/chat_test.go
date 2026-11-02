@@ -11,6 +11,81 @@ import (
 )
 
 func TestChatMigrationIsIdempotentAndDoesNotReferenceSessions(t *testing.T) {
+	freshPath := filepath.Join(t.TempDir(), "fresh.db")
+	started := time.Now()
+	fresh, err := Open(freshPath, 100)
+	if err != nil {
+		t.Fatalf("open fresh store: %v", err)
+	}
+	openDuration := time.Since(started)
+	started = time.Now()
+	if err := fresh.Migrate(); err != nil {
+		fresh.DB.Close()
+		t.Fatalf("repeat fresh migration: %v", err)
+	}
+	migrateDuration := time.Since(started)
+	if err := fresh.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("persistent SQLite fresh Open=%s; idempotent Migrate=%s", openDuration, migrateDuration)
+	t.Run("late failure rolls back schema and backfill", func(t *testing.T) {
+		db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "rollback.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(1)
+		if _, err := db.Exec(`
+CREATE TABLE sessions(id TEXT PRIMARY KEY, expires_at DATETIME NOT NULL, created_at DATETIME NOT NULL, last_seen_at DATETIME);
+INSERT INTO sessions(id,expires_at,created_at) VALUES('legacy-session','2030-01-01 00:00:00','2026-01-01 00:00:00');
+CREATE TABLE chat_sync_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation INTEGER NOT NULL CHECK(generation>0));
+INSERT INTO chat_sync_metadata(singleton,generation) VALUES(1,7);
+CREATE TRIGGER fail_chat_migration BEFORE INSERT ON chat_sync_metadata BEGIN SELECT RAISE(ABORT,'forced chat migration failure'); END;
+`); err != nil {
+			t.Fatal(err)
+		}
+		var originalSchema string
+		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='sessions'`).Scan(&originalSchema); err != nil {
+			t.Fatal(err)
+		}
+		st := &Store{DB: db}
+		if err := st.Migrate(); err == nil || !strings.Contains(err.Error(), "forced chat migration failure") {
+			t.Fatalf("expected late migration failure: %v", err)
+		}
+		var schema string
+		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='sessions'`).Scan(&schema); err != nil || schema != originalSchema {
+			t.Fatalf("legacy schema changed after rollback: %q, %v", schema, err)
+		}
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='legacy-session' AND last_seen_at IS NULL AND expires_at='2030-01-01 00:00:00' AND created_at='2026-01-01 00:00:00'`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("legacy data/backfill was not rolled back: count=%d err=%v", count, err)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('sessions','chat_sync_metadata','fail_chat_migration')`).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("new schema objects survived rollback: count=%d err=%v", count, err)
+		}
+		var generation int
+		if err := db.QueryRow(`SELECT generation FROM chat_sync_metadata WHERE singleton=1`).Scan(&generation); err != nil || generation != 7 {
+			t.Fatalf("legacy metadata changed: generation=%d err=%v", generation, err)
+		}
+		if _, err := db.Exec(`DROP TRIGGER fail_chat_migration`); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Migrate(); err != nil {
+			t.Fatalf("retry after trigger removal: %v", err)
+		}
+		if err := st.Migrate(); err != nil {
+			t.Fatalf("idempotent recovered migration: %v", err)
+		}
+		if !columnExists(t, db, "sessions", "user_id") || !columnExists(t, db, "sessions", "auth_version") {
+			t.Fatal("account migration did not finish")
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='legacy-session' AND last_seen_at=created_at AND idle_expires_at=expires_at`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("recovered migration did not backfill session: count=%d err=%v", count, err)
+		}
+		if state, err := st.CurrentChatSyncState(); err != nil || state.Generation != 7 {
+			t.Fatalf("recovered migration reset metadata: %+v, %v", state, err)
+		}
+	})
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	legacy, err := sql.Open("sqlite3", path)
 	if err != nil {

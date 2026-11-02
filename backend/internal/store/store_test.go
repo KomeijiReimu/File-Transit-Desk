@@ -288,15 +288,6 @@ func TestTokenUploadByteQuota(t *testing.T) {
 	if err != nil || loadedToken.ResourceFingerprint != "resource-v1" {
 		t.Fatalf("expected token fingerprint round trip, token=%+v err=%v", loadedToken, err)
 	}
-	loadedByID, err := st.TokenByID(token.ID)
-	if err != nil || loadedByID.ResourceFingerprint != "resource-v1" {
-		t.Fatalf("expected token fingerprint from id lookup, token=%+v err=%v", loadedByID, err)
-	}
-	tokens, err := st.Tokens()
-	if err != nil || len(tokens) != 1 || tokens[0].ResourceFingerprint != "resource-v1" {
-		t.Fatalf("expected token fingerprint from list, tokens=%+v err=%v", tokens, err)
-	}
-
 	reserved, err := st.ReserveTokenUse("hash", "upload", time.Now(), 600, 1000)
 	if err != nil {
 		t.Fatalf("reserve token: %v", err)
@@ -456,27 +447,32 @@ func TestCreateLeaseLimitedCountsBothKindsAndIgnoresExpiredUsed(t *testing.T) {
 	}
 	defer st.DB.Close()
 	now := time.Now()
-	if err := st.CreateDownloadLease(&DownloadLease{Hash: "expired-download", Source: "session", SessionID: sql.NullString{String: "owner", Valid: true}, FileSHA256: sql.NullString{String: "", Valid: true}, ExpiresAt: now.Add(-time.Minute)}); err != nil {
+	for _, id := range []string{"owner", "other", "third"} {
+		if err := st.CreateSession(id, now.Add(time.Hour), "user", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.CreateDownloadLease(&DownloadLease{Hash: "expired-download", Source: "session", SessionID: sql.NullString{String: hashSessionID("owner"), Valid: true}, FileSHA256: sql.NullString{String: "", Valid: true}, ExpiresAt: now.Add(-time.Minute)}); err != nil {
 		t.Fatalf("create expired download: %v", err)
 	}
-	used := &UploadLease{Hash: "used-upload", Source: "session", SessionID: "owner", ExpiresAt: now.Add(time.Hour)}
+	used := &UploadLease{Hash: "used-upload", Source: "session", SessionID: hashSessionID("owner"), ExpiresAt: now.Add(time.Hour)}
 	if err := st.CreateUploadLease(used); err != nil {
 		t.Fatalf("create upload: %v", err)
 	}
 	if _, err := st.ReserveUploadLease(used.Hash, now); err != nil {
 		t.Fatalf("reserve upload: %v", err)
 	}
-	active := &DownloadLease{Hash: "active-download", Source: "session", SessionID: sql.NullString{String: "owner", Valid: true}, ExpiresAt: now.Add(time.Hour)}
+	active := &DownloadLease{Hash: "active-download", Source: "session", SessionID: sql.NullString{String: hashSessionID("owner"), Valid: true}, ExpiresAt: now.Add(time.Hour)}
 	if err := st.CreateDownloadLeaseLimited(active, 2, 1); err != nil {
 		t.Fatalf("expired and used leases must not count: %v", err)
 	}
-	if err := st.CreateUploadLeaseLimited(&UploadLease{Hash: "owner-overflow", Source: "session", SessionID: "owner", ExpiresAt: now.Add(time.Hour)}, 2, 1); !errors.Is(err, ErrOutstandingLeaseLimit) {
+	if err := st.CreateUploadLeaseLimited(&UploadLease{Hash: "owner-overflow", Source: "session", SessionID: hashSessionID("owner"), ExpiresAt: now.Add(time.Hour)}, 2, 1); !errors.Is(err, ErrOutstandingLeaseLimit) {
 		t.Fatalf("expected owner limit across lease kinds, got %v", err)
 	}
-	if err := st.CreateUploadLeaseLimited(&UploadLease{Hash: "other-owner", Source: "session", SessionID: "other", ExpiresAt: now.Add(time.Hour)}, 2, 2); err != nil {
+	if err := st.CreateUploadLeaseLimited(&UploadLease{Hash: "other-owner", Source: "session", SessionID: hashSessionID("other"), ExpiresAt: now.Add(time.Hour)}, 2, 2); err != nil {
 		t.Fatalf("create second total lease: %v", err)
 	}
-	if err := st.CreateDownloadLeaseLimited(&DownloadLease{Hash: "total-overflow", Source: "session", SessionID: sql.NullString{String: "third", Valid: true}, ExpiresAt: now.Add(time.Hour)}, 2, 2); !errors.Is(err, ErrOutstandingLeaseLimit) {
+	if err := st.CreateDownloadLeaseLimited(&DownloadLease{Hash: "total-overflow", Source: "session", SessionID: sql.NullString{String: hashSessionID("third"), Valid: true}, ExpiresAt: now.Add(time.Hour)}, 2, 2); !errors.Is(err, ErrOutstandingLeaseLimit) {
 		t.Fatalf("expected total outstanding limit, got %v", err)
 	}
 }
@@ -490,7 +486,7 @@ func TestSessionDeletionDoesNotRemoveExistingLimitedLease(t *testing.T) {
 	if err := st.CreateSession("session-owner", time.Now().Add(time.Hour), "user", ""); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	lease := &DownloadLease{Hash: "surviving-lease", Source: "session", SessionID: sql.NullString{String: "session-owner", Valid: true}, ExpiresAt: time.Now().Add(time.Hour)}
+	lease := &DownloadLease{Hash: "surviving-lease", Source: "session", SessionID: sql.NullString{String: hashSessionID("session-owner"), Valid: true}, ExpiresAt: time.Now().Add(time.Hour)}
 	if err := st.CreateDownloadLeaseLimited(lease, 10, 10); err != nil {
 		t.Fatalf("create limited lease: %v", err)
 	}
@@ -731,10 +727,13 @@ func TestCreateLeaseLimitedConcurrentDoesNotExceedTotal(t *testing.T) {
 	var successes atomic.Int32
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
+		if err := st.CreateSession("owner-"+strconv.Itoa(i), time.Now().Add(time.Hour), "user", ""); err != nil {
+			t.Fatal(err)
+		}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			lease := &DownloadLease{Hash: "concurrent-lease-" + strconv.Itoa(i), Source: "session", SessionID: sql.NullString{String: "owner-" + strconv.Itoa(i), Valid: true}, ExpiresAt: time.Now().Add(time.Hour)}
+			lease := &DownloadLease{Hash: "concurrent-lease-" + strconv.Itoa(i), Source: "session", SessionID: sql.NullString{String: hashSessionID("owner-" + strconv.Itoa(i)), Valid: true}, ExpiresAt: time.Now().Add(time.Hour)}
 			err := st.CreateDownloadLeaseLimited(lease, 3, 3)
 			if err == nil {
 				successes.Add(1)

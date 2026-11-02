@@ -110,8 +110,8 @@ type chatMutationLease struct {
 	overlapped bool
 }
 
-func (s *Store) migrateChat() error {
-	_, err := s.DB.Exec(`
+func (s *Store) migrateChat(tx *sql.Tx) error {
+	_, err := tx.Exec(`
 CREATE TABLE IF NOT EXISTS chat_messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   author_key TEXT NOT NULL,

@@ -53,6 +53,10 @@ type Token struct {
 }
 
 type Session struct {
+	UserID        sql.NullInt64
+	AuthVersion   int64
+	AuthMethod    string
+	Username      string
 	ID            string
 	ExpiresAt     time.Time
 	IdleExpiresAt time.Time
@@ -63,6 +67,7 @@ type Session struct {
 }
 
 type DownloadLease struct {
+	UserID              sql.NullInt64
 	ID                  int64
 	Hash                string
 	Source              string
@@ -81,6 +86,7 @@ type DownloadLease struct {
 }
 
 type UploadLease struct {
+	UserID              sql.NullInt64
 	ID                  int64
 	Hash                string
 	Source              string
@@ -138,8 +144,13 @@ func (s *Store) PingContext(ctx context.Context) error {
 }
 
 func (s *Store) Migrate() error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	// 所有建表语句都必须幂等；旧库新增列放在后面的 addColumnIfMissing，避免 IF NOT EXISTS 表无法补列。
-	_, err := s.DB.Exec(`
+	_, err = tx.Exec(`
 CREATE TABLE IF NOT EXISTS sessions(
   id TEXT PRIMARY KEY,
   expires_at DATETIME NOT NULL,
@@ -221,48 +232,48 @@ CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires
 	if err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("sessions", "role", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
+	if err := s.addColumnIfMissing(tx, "sessions", "role", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("sessions", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.addColumnIfMissing(tx, "sessions", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("sessions", "last_seen_at", "DATETIME"); err != nil {
+	if err := s.addColumnIfMissing(tx, "sessions", "last_seen_at", "DATETIME"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("sessions", "idle_expires_at", "DATETIME"); err != nil {
+	if err := s.addColumnIfMissing(tx, "sessions", "idle_expires_at", "DATETIME"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("download_leases", "file_sha256", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.addColumnIfMissing(tx, "download_leases", "file_sha256", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("download_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.addColumnIfMissing(tx, "download_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("upload_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.addColumnIfMissing(tx, "upload_leases", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("upload_leases", "source", "TEXT NOT NULL DEFAULT 'session'"); err != nil {
+	if err := s.addColumnIfMissing(tx, "upload_leases", "source", "TEXT NOT NULL DEFAULT 'session'"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("upload_leases", "token_id", "INTEGER"); err != nil {
+	if err := s.addColumnIfMissing(tx, "upload_leases", "token_id", "INTEGER"); err != nil {
 		return err
 	}
 	// 旧版本 sessions 没有空闲会话字段，迁移时用既有创建时间和绝对过期时间回填。
-	if _, err := s.DB.Exec(`UPDATE sessions SET last_seen_at = created_at WHERE last_seen_at IS NULL`); err != nil {
+	if _, err := tx.Exec(`UPDATE sessions SET last_seen_at = created_at WHERE last_seen_at IS NULL`); err != nil {
 		return err
 	}
-	if _, err := s.DB.Exec(`UPDATE sessions SET idle_expires_at = expires_at WHERE idle_expires_at IS NULL`); err != nil {
+	if _, err := tx.Exec(`UPDATE sessions SET idle_expires_at = expires_at WHERE idle_expires_at IS NULL`); err != nil {
 		return err
 	}
 	// 索引必须在补列之后创建，否则旧数据库启动时会因字段不存在而失败。
-	if _, err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at)`); err != nil {
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_idle_expires_at ON sessions(idle_expires_at)`); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("tokens", "uploaded_bytes", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if err := s.addColumnIfMissing(tx, "tokens", "uploaded_bytes", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("tokens", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.addColumnIfMissing(tx, "tokens", "resource_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	for _, statement := range []string{
@@ -284,19 +295,22 @@ CREATE INDEX IF NOT EXISTS idx_upload_leases_expires_at ON upload_leases(expires
 		`CREATE INDEX IF NOT EXISTS idx_upload_leases_session_datetime_v2 ON upload_leases(source, session_id, used_at, datetime(expires_at))`,
 		`CREATE INDEX IF NOT EXISTS idx_upload_leases_token_datetime_v2 ON upload_leases(source, token_id, used_at, datetime(expires_at))`,
 	} {
-		if _, err := s.DB.Exec(statement); err != nil {
+		if _, err := tx.Exec(statement); err != nil {
 			return err
 		}
 	}
-	if err := s.migrateChat(); err != nil {
+	if err := s.migrateChat(tx); err != nil {
 		return err
 	}
-	return nil
+	if err := s.migrateUsers(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (s *Store) addColumnIfMissing(table, column, definition string) error {
+func (s *Store) addColumnIfMissing(tx *sql.Tx, table, column, definition string) error {
 	// SQLite 没有通用的 ADD COLUMN IF NOT EXISTS，先读 PRAGMA table_info 再决定是否 ALTER。
-	rows, err := s.DB.Query(`PRAGMA table_info(` + table + `)`)
+	rows, err := tx.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return err
 	}
@@ -317,7 +331,10 @@ func (s *Store) addColumnIfMissing(table, column, definition string) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
 	return err
 }
 
@@ -335,8 +352,12 @@ func (s *Store) CreateSessionWithIdle(id string, expiresAt, idleExpiresAt time.T
 		idleExpiresAt = expiresAt
 	}
 	storedID := hashSessionID(id)
+	method := "totp"
+	if role == "admin" {
+		method = "admin"
+	}
 	_, err := s.DB.Exec(
-		`INSERT INTO sessions(id, expires_at, idle_expires_at, last_seen_at, created_at, role, name) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions(id, expires_at, idle_expires_at, last_seen_at, created_at, role, name,auth_method) VALUES(?, ?, ?, ?, ?, ?, ?,?)`,
 		storedID,
 		expiresAt,
 		idleExpiresAt,
@@ -344,14 +365,16 @@ func (s *Store) CreateSessionWithIdle(id string, expiresAt, idleExpiresAt time.T
 		now,
 		role,
 		name,
+		method,
 	)
 	return err
 }
 
 func (s *Store) Session(id string) (Session, error) {
 	var sess Session
-	err := s.DB.QueryRow(`SELECT id, expires_at, idle_expires_at, last_seen_at, created_at, role, name FROM sessions WHERE id = ?`, hashSessionID(id)).Scan(
+	err := s.DB.QueryRow(`SELECT s.id, s.expires_at, s.idle_expires_at, s.last_seen_at, s.created_at, s.role, CASE WHEN s.user_id IS NULL THEN s.name ELSE u.display_name END, s.user_id, s.auth_version, s.auth_method, COALESCE(u.username,'') FROM sessions s LEFT JOIN users u ON s.user_id=u.id WHERE s.id = ? AND (s.user_id IS NULL OR (u.status='active' AND u.auth_version=s.auth_version))`, hashSessionID(id)).Scan(
 		&sess.ID, &sess.ExpiresAt, &sess.IdleExpiresAt, &sess.LastSeenAt, &sess.CreatedAt, &sess.Role, &sess.Name,
+		&sess.UserID, &sess.AuthVersion, &sess.AuthMethod, &sess.Username,
 	)
 	return sess, err
 }
@@ -423,8 +446,8 @@ func (s *Store) CreateUploadLease(lease *UploadLease) error {
 		lease.CreatedAt = now
 	}
 	res, err := s.DB.Exec(
-		`INSERT INTO upload_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP,
+		`INSERT INTO upload_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip, user_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP, lease.UserID,
 	)
 	if err != nil {
 		return err
@@ -438,11 +461,16 @@ func (s *Store) CreateUploadLeaseLimited(lease *UploadLease, maxTotal, maxOwner 
 		lease.Source = "session"
 	}
 	return s.createLeaseLimited(lease.Source, lease.SessionID, lease.TokenID, maxTotal, maxOwner, func(tx *sql.Tx) error {
+		owner, err := sessionLeaseOwner(tx, lease.Source, lease.SessionID)
+		if err != nil {
+			return err
+		}
+		lease.UserID = owner
 		now := time.Now()
 		if lease.CreatedAt.IsZero() {
 			lease.CreatedAt = now
 		}
-		res, err := tx.Exec(`INSERT INTO upload_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP)
+		res, err := tx.Exec(`INSERT INTO upload_leases(lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, client_ip,user_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)`, lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.FileName, lease.FileSize, lease.ResourceFingerprint, lease.ExpiresAt, lease.CreatedAt, lease.ClientIP, lease.UserID)
 		if err != nil {
 			return err
 		}
@@ -452,7 +480,7 @@ func (s *Store) CreateUploadLeaseLimited(lease *UploadLease, maxTotal, maxOwner 
 }
 
 func (s *Store) ReserveUploadLease(hash string, now time.Time) (UploadLease, error) {
-	res, err := s.DB.Exec(`UPDATE upload_leases SET used_at = ? WHERE lease_hash = ? AND used_at IS NULL AND datetime(expires_at) > datetime(?)`, now, hash, now)
+	res, err := s.DB.Exec(`UPDATE upload_leases SET used_at = ? WHERE lease_hash = ? AND used_at IS NULL AND datetime(expires_at) > datetime(?) AND (user_id IS NULL OR EXISTS(SELECT 1 FROM users WHERE users.id=upload_leases.user_id AND status='active'))`, now, hash, now)
 	if err != nil {
 		return UploadLease{}, err
 	}
@@ -468,8 +496,9 @@ func (s *Store) ReserveUploadLease(hash string, now time.Time) (UploadLease, err
 
 func (s *Store) UploadLeaseByHash(hash string) (UploadLease, error) {
 	var lease UploadLease
-	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, used_at, client_ip FROM upload_leases WHERE lease_hash = ?`, hash).Scan(
+	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, file_name, file_size, resource_fingerprint, expires_at, created_at, used_at, client_ip,user_id FROM upload_leases WHERE lease_hash = ?`, hash).Scan(
 		&lease.ID, &lease.Hash, &lease.Source, &lease.SessionID, &lease.TokenID, &lease.Role, &lease.DirID, &lease.Path, &lease.FileName, &lease.FileSize, &lease.ResourceFingerprint, &lease.ExpiresAt, &lease.CreatedAt, &lease.UsedAt, &lease.ClientIP,
+		&lease.UserID,
 	)
 	return lease, err
 }
@@ -490,7 +519,7 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 		lease.CreatedAt = now
 	}
 	res, err := s.DB.Exec(
-		`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at,user_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)`,
 		lease.Hash,
 		lease.Source,
 		lease.SessionID,
@@ -504,6 +533,7 @@ func (s *Store) CreateDownloadLease(lease *DownloadLease) error {
 		lease.FileSHA256,
 		lease.ExpiresAt,
 		lease.CreatedAt,
+		lease.UserID,
 	)
 	if err != nil {
 		return err
@@ -524,10 +554,15 @@ func (s *Store) CreateDownloadLeaseLimited(lease *DownloadLease, maxTotal, maxOw
 		sessionID = lease.SessionID.String
 	}
 	return s.createLeaseLimited(lease.Source, sessionID, lease.TokenID, maxTotal, maxOwner, func(tx *sql.Tx) error {
+		owner, err := sessionLeaseOwner(tx, lease.Source, sessionID)
+		if err != nil {
+			return err
+		}
+		lease.UserID = owner
 		if lease.CreatedAt.IsZero() {
 			lease.CreatedAt = time.Now()
 		}
-		res, err := tx.Exec(`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.ResourceFingerprint, lease.FileSize, lease.FileMtime, lease.FileSHA256, lease.ExpiresAt, lease.CreatedAt)
+		res, err := tx.Exec(`INSERT INTO download_leases(lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at,user_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)`, lease.Hash, lease.Source, lease.SessionID, lease.TokenID, lease.Role, lease.DirID, lease.Path, lease.ResourceFingerprint, lease.FileSize, lease.FileMtime, lease.FileSHA256, lease.ExpiresAt, lease.CreatedAt, lease.UserID)
 		if err != nil {
 			return err
 		}
@@ -583,7 +618,7 @@ func (s *Store) createLeaseLimited(source, sessionID string, tokenID sql.NullInt
 
 func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
 	var lease DownloadLease
-	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at, last_used_at FROM download_leases WHERE lease_hash = ?`, hash).Scan(
+	err := s.DB.QueryRow(`SELECT id, lease_hash, source, session_id, token_id, role, dir_id, path, resource_fingerprint, file_size, file_mtime, file_sha256, expires_at, created_at, last_used_at,user_id FROM download_leases WHERE lease_hash = ?`, hash).Scan(
 		&lease.ID,
 		&lease.Hash,
 		&lease.Source,
@@ -599,6 +634,7 @@ func (s *Store) DownloadLeaseByHash(hash string) (DownloadLease, error) {
 		&lease.ExpiresAt,
 		&lease.CreatedAt,
 		&lease.LastUsedAt,
+		&lease.UserID,
 	)
 	return lease, err
 }

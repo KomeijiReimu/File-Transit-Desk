@@ -338,13 +338,13 @@ func NewWithConfigPath(cfg *config.Config, st *store.Store, configPath string) *
 
 func NewWithOptions(cfg *config.Config, st *store.Store, configPath string, options Options) (*fiber.App, error) {
 	if options.DevFrontendPort < 1 || options.DevFrontendPort > 65535 {
-		return nil, fmt.Errorf("dev frontend port must be between 1 and 65535")
+		return nil, fmt.Errorf("开发前端端口必须在 1 至 65535 之间")
 	}
 	if cfg.Accounts.TOTPEnabled && !options.DevMode && cfg.Auth.DevAllowFixedCode && cfg.Auth.TOTPSecret == "" {
 		return nil, fmt.Errorf("空 TOTP 密钥配合 auth.dev_allow_fixed_code 使用时，必须显式启用开发模式")
 	}
 	if cfg.Server.KeepaliveIdleTimeoutSeconds < 1 || cfg.Server.KeepaliveIdleTimeoutSeconds > 86400 {
-		return nil, fmt.Errorf("server keepalive idle timeout must be between 1 and 86400 seconds")
+		return nil, fmt.Errorf("HTTP 长连接空闲超时必须在 1 至 86400 秒之间")
 	}
 	resolver, err := newProxyResolver(cfg.Server)
 	if err != nil {
@@ -492,6 +492,7 @@ func jsonErrorHandler(c *fiber.Ctx, err error) error {
 	} else if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 		message = e.Message
+		message = localizedHTTPError(code, message)
 	}
 	// 非业务错误不直接回传底层 err.Error，避免文件路径、SQL 或系统细节出现在客户端。
 	payload["error"] = message
@@ -499,6 +500,7 @@ func jsonErrorHandler(c *fiber.Ctx, err error) error {
 }
 
 func (s *Server) routes(app *fiber.App) {
+	s.accountRoutes(app)
 	// /api 是登录态接口，/t 是公开分享接口；公开下载也走票据，避免 GET 预览直接消耗次数。
 	app.Get("/api/health/live", s.healthLive)
 	app.Get("/api/health/ready", s.healthReady)
@@ -690,7 +692,7 @@ func (s *Server) auth(next fiber.Handler) fiber.Handler {
 		expectedBinding := strings.TrimSpace(c.Get(sessionBindingHeader))
 		if absoluteValid && expectedBinding != "" && !sessionBindingEqual(expectedBinding, binding) {
 			s.sampledRequestAudit(c, "session_subject_changed", "auth", "会话主体绑定不匹配")
-			return newCodedAPIError(fiber.StatusConflict, "session_subject_changed", "会话主体已变化，请重新确认登录状态。")
+			return newCodedAPIError(fiber.StatusConflict, "session_subject_changed", "登录身份已变化，请重新确认登录状态。")
 		}
 		if idleRecoverable && c.Path() == "/api/auth/heartbeat" {
 			// 只允许心跳在短宽限期内恢复会话，普通业务请求不能借宽限继续访问文件。
@@ -712,6 +714,12 @@ func (s *Server) auth(next fiber.Handler) fiber.Handler {
 		c.Locals("sessionBinding", binding)
 		c.Locals("role", sess.Role)
 		c.Locals("name", sess.Name)
+		c.Locals("authMethod", sess.AuthMethod)
+		c.Locals("authVersion", sess.AuthVersion)
+		c.Locals("username", sess.Username)
+		if sess.UserID.Valid {
+			c.Locals("userID", sess.UserID.Int64)
+		}
 		return next(c)
 	}
 }
@@ -727,6 +735,9 @@ func (s *Server) adminOnly(next fiber.Handler) fiber.Handler {
 }
 
 func (s *Server) login(c *fiber.Ctx) error {
+	if !s.cfg().Accounts.TOTPEnabled {
+		return fiber.NewError(403, "动态验证码登录已关闭。")
+	}
 	ip := s.clientIP(c)
 	if err := s.checkLoginAdmission(c, "user", ip); err != nil {
 		return err
@@ -765,7 +776,7 @@ func (s *Server) login(c *fiber.Ctx) error {
 	}
 	s.setSessionCookie(c, id, expiresAt)
 	s.criticalAudit("login_success", ip, "")
-	return c.JSON(fiber.Map{"authenticated": true, "role": "user", "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt, "sessionBinding": sessionBindingForID(sess.ID)})
+	return c.JSON(fiber.Map{"authenticated": true, "role": "user", "authMethod": "totp", "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt, "sessionBinding": sessionBindingForID(sess.ID)})
 }
 
 func (s *Server) adminLogin(c *fiber.Ctx) error {
@@ -793,7 +804,7 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 	if !valid {
 		s.recordLoginFailure("admin", ip)
 		s.criticalAudit("login_failed", ip, "管理员登录")
-		return fiber.ErrUnauthorized
+		return fiber.NewError(fiber.StatusUnauthorized, "管理员账号或密码不正确。")
 	}
 	s.loginLimiter.reset("admin:" + ip)
 	id, _, err := security.NewToken()
@@ -812,14 +823,14 @@ func (s *Server) adminLogin(c *fiber.Ctx) error {
 	}
 	s.setSessionCookie(c, id, expiresAt)
 	s.criticalAudit("login_success", ip, "管理员登录")
-	return c.JSON(fiber.Map{"authenticated": true, "role": "admin", "name": in.Username, "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt, "sessionBinding": sessionBindingForID(sess.ID)})
+	return c.JSON(fiber.Map{"authenticated": true, "role": "admin", "authMethod": "admin", "name": in.Username, "expiresAt": expiresAt, "idleExpiresAt": idleExpiresAt, "sessionBinding": sessionBindingForID(sess.ID)})
 }
 
 const maxAdminLoginBodyBytes = 4096
 
 func protectAdminLoginBody(c *fiber.Ctx) error {
 	rejectLarge := func() error {
-		return newCodedAPIError(fiber.StatusRequestEntityTooLarge, "auth_request_too_large", "管理员登录请求过大。")
+		return newCodedAPIError(fiber.StatusRequestEntityTooLarge, "auth_request_too_large", "请求内容过大。")
 	}
 	if contentLength := c.Request().Header.ContentLength(); contentLength > maxAdminLoginBodyBytes {
 		return rejectLarge()
@@ -827,7 +838,7 @@ func protectAdminLoginBody(c *fiber.Ctx) error {
 	if stream := c.Request().BodyStream(); stream != nil {
 		body, err := io.ReadAll(io.LimitReader(stream, maxAdminLoginBodyBytes+1))
 		if err != nil {
-			return newCodedAPIError(fiber.StatusBadRequest, "auth_request_invalid", "管理员登录请求无效。")
+			return newCodedAPIError(fiber.StatusBadRequest, "auth_request_invalid", "请求内容无效。")
 		}
 		if len(body) > maxAdminLoginBodyBytes {
 			return rejectLarge()
@@ -843,7 +854,7 @@ func protectAdminLoginBody(c *fiber.Ctx) error {
 
 func newAdminVerifySlots(limit int) chan struct{} {
 	if limit <= 0 {
-		return nil
+		limit = 2
 	}
 	return make(chan struct{}, limit)
 }
@@ -944,6 +955,11 @@ func (s *Server) clearSessionCookie(c *fiber.Ctx) {
 
 func (s *Server) me(c *fiber.Ctx) error {
 	out := fiber.Map{"authenticated": true, "role": c.Locals("role")}
+	out["authMethod"] = c.Locals("authMethod")
+	if id, ok := c.Locals("userID").(int64); ok {
+		out["userId"] = id
+		out["username"] = c.Locals("username")
+	}
 	if binding, ok := c.Locals("sessionBinding").(string); ok && binding != "" {
 		out["sessionBinding"] = binding
 	}
@@ -1830,6 +1846,9 @@ func (s *Server) downloadByLease(c *fiber.Ctx) error {
 	if err != nil {
 		return downloadHashRequestError(c, err)
 	}
+	if err := s.store.AdmitDownloadLease(hash, time.Now()); err != nil {
+		return fiber.ErrUnauthorized
+	}
 	if firstUse {
 		_ = s.store.Audit("download_lease_use", s.clientIP(c), fmt.Sprintf("首次使用%s下载票据，目录 %s，文件 %s", lease.Source, lease.DirID, displayPath(lease.Path)))
 	}
@@ -2073,7 +2092,10 @@ func (s *Server) uploadByLease(c *fiber.Ctx) error {
 	now := time.Now()
 	lease, err := s.store.UploadLeaseByHash(hash)
 	if err != nil {
-		return fiber.ErrUnauthorized
+		if errors.Is(err, sql.ErrNoRows) {
+			return fiber.ErrUnauthorized
+		}
+		return err
 	}
 	if lease.UsedAt.Valid || !now.Before(lease.ExpiresAt) {
 		return fiber.ErrUnauthorized
@@ -2090,24 +2112,28 @@ func (s *Server) uploadByLease(c *fiber.Ctx) error {
 	}
 	if !resourceAuthorizationFingerprintMatches(lease.ResourceFingerprint, dir) {
 		s.criticalAudit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
-		return fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
+		return fiber.NewError(fiber.StatusForbidden, "上传目标已变化，请重新开始上传。")
 	}
-	lease, err = s.store.ReserveUploadLease(hash, now)
+	ownerType, ownerID := uploadLeaseOwner(lease)
+	permitID, permitErr := s.acquireUploadPermit(c, dir.ID, lease.ResourceFingerprint, ownerType, ownerID)
+	if permitErr == nil {
+		defer s.transfers.releaseUploadPermit(permitID)
+	}
+	lease, err = s.store.ReserveUploadLease(hash, time.Now())
 	if err != nil {
-		return fiber.ErrUnauthorized
+		if errors.Is(err, sql.ErrNoRows) {
+			return fiber.ErrUnauthorized
+		}
+		return err
+	}
+	if permitErr != nil {
+		s.criticalAudit("upload_lease_failed", s.clientIP(c), fmt.Sprint(lease.ID))
+		return permitErr
 	}
 	dir, ok = s.cfg().Dir(lease.DirID)
 	if !ok || !dir.AllowUpload || !resourceAuthorizationFingerprintMatches(lease.ResourceFingerprint, dir) {
-		s.criticalAudit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
-		return fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
+		return fiber.ErrForbidden
 	}
-	ownerType, ownerID := uploadLeaseOwner(lease)
-	permitID, err := s.acquireUploadPermit(c, dir.ID, lease.ResourceFingerprint, ownerType, ownerID)
-	if err != nil {
-		s.criticalAudit("upload_lease_failed", s.clientIP(c), fmt.Sprint(lease.ID))
-		return err
-	}
-	defer s.transfers.releaseUploadPermit(permitID)
 	resp, err := s.saveStreamingMultipart(c, streamUploadOptions{dir: dir, rel: lease.Path, source: "upload_lease", ownerType: ownerType, ownerID: ownerID, permitID: permitID, transferID: uploadLeaseTransferID(lease.ID), lease: &lease, fixedFileName: lease.FileName, expectedSize: lease.FileSize, expectedFingerprint: lease.ResourceFingerprint})
 	if err != nil {
 		s.criticalAudit("upload_lease_failed", s.clientIP(c), fmt.Sprint(lease.ID))
@@ -2142,7 +2168,10 @@ func (s *Server) handleRawUploadByLease(c *fiber.Ctx, wantSource string) (upload
 	now := time.Now()
 	lease, err := s.store.UploadLeaseByHash(hash)
 	if err != nil {
-		return uploadResponse{}, fiber.ErrUnauthorized
+		if errors.Is(err, sql.ErrNoRows) {
+			return uploadResponse{}, fiber.ErrUnauthorized
+		}
+		return uploadResponse{}, err
 	}
 	if lease.Source == "" {
 		lease.Source = "session"
@@ -2156,7 +2185,7 @@ func (s *Server) handleRawUploadByLease(c *fiber.Ctx, wantSource string) (upload
 	}
 	if !resourceAuthorizationFingerprintMatches(lease.ResourceFingerprint, dir) {
 		s.criticalAudit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
-		return uploadResponse{}, fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
+		return uploadResponse{}, fiber.NewError(fiber.StatusForbidden, "上传目标已变化，请重新开始上传。")
 	}
 	contentLength := int64(c.Request().Header.ContentLength())
 	if contentLength < 0 {
@@ -2165,25 +2194,29 @@ func (s *Server) handleRawUploadByLease(c *fiber.Ctx, wantSource string) (upload
 	if contentLength != lease.FileSize {
 		return uploadResponse{}, fiber.NewError(fiber.StatusBadRequest, "上传内容大小与票据不一致。")
 	}
-	lease, err = s.store.ReserveUploadLease(hash, now)
-	if err != nil {
-		return uploadResponse{}, fiber.ErrUnauthorized
-	}
-	dir, ok = s.cfg().Dir(lease.DirID)
-	if !ok || !dir.AllowUpload || !resourceAuthorizationFingerprintMatches(lease.ResourceFingerprint, dir) {
-		s.criticalAudit("upload_lease_resource_changed", s.clientIP(c), fmt.Sprintf("票据 #%d，目录 %s", lease.ID, lease.DirID))
-		return uploadResponse{}, fiber.NewError(fiber.StatusForbidden, "上传票据绑定的资源已变化，请重新创建上传票据。")
-	}
 	var reservedToken store.Token
 	publicReserved := false
 	currentDir := dir
 	ownerType, ownerID := uploadLeaseOwner(lease)
-	permitID, err := s.acquireUploadPermit(c, currentDir.ID, lease.ResourceFingerprint, ownerType, ownerID)
+	permitID, permitErr := s.acquireUploadPermit(c, currentDir.ID, lease.ResourceFingerprint, ownerType, ownerID)
+	if permitErr == nil {
+		defer s.transfers.releaseUploadPermit(permitID)
+	}
+	lease, err = s.store.ReserveUploadLease(hash, time.Now())
 	if err != nil {
-		s.criticalAudit("upload_lease_failed", s.clientIP(c), fmt.Sprint(lease.ID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return uploadResponse{}, fiber.ErrUnauthorized
+		}
 		return uploadResponse{}, err
 	}
-	defer s.transfers.releaseUploadPermit(permitID)
+	if permitErr != nil {
+		s.criticalAudit("upload_lease_failed", s.clientIP(c), fmt.Sprint(lease.ID))
+		return uploadResponse{}, permitErr
+	}
+	currentDir, ok = s.cfg().Dir(lease.DirID)
+	if !ok || !currentDir.AllowUpload || !resourceAuthorizationFingerprintMatches(lease.ResourceFingerprint, currentDir) {
+		return uploadResponse{}, fiber.ErrForbidden
+	}
 	if wantSource == "public_token" {
 		if !lease.TokenID.Valid {
 			return uploadResponse{}, fiber.ErrUnauthorized
@@ -2192,7 +2225,7 @@ func (s *Server) handleRawUploadByLease(c *fiber.Ctx, wantSource string) (upload
 		if err != nil {
 			if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
 				s.criticalAudit("token_upload_denied", s.clientIP(c), fmt.Sprintf("上传票据 #%d 公开令牌容量不足", lease.ID))
-				return uploadResponse{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+				return uploadResponse{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "此上传链接的剩余容量不足。")
 			}
 			return uploadResponse{}, fiber.ErrForbidden
 		}
@@ -2218,7 +2251,7 @@ func (s *Server) handleRawUploadByLease(c *fiber.Ctx, wantSource string) (upload
 			s.releaseTokenUse(reservedToken.ID, contentLength, "public raw byte adjustment")
 			if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
 				s.criticalAudit("token_upload_denied", s.clientIP(c), fmt.Sprintf("公开令牌 #%d 容量调整失败", reservedToken.ID))
-				return uploadResponse{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+				return uploadResponse{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "此上传链接的剩余容量不足。")
 			}
 			return uploadResponse{}, err
 		}
@@ -3225,7 +3258,7 @@ func (s *Server) createPublicUploadLease(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("单个文件不能超过 %d MB", s.cfg().Storage.UploadMaxFileMB))
 	}
 	if maxBytes := s.tokenUploadMaxBytes(); maxBytes > 0 && t.UploadedBytes+in.FileSize > maxBytes {
-		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "此上传链接的剩余容量不足。")
 	}
 	name := fsutil.SafeName(in.FileName)
 	if name == "" || !s.extensionAllowed(name) {
@@ -3283,9 +3316,9 @@ func (s *Server) publicDownload(c *fiber.Ctx) error {
 <body>
 <main>
   <h1>确认下载</h1>
-  <p>点击按钮后会兑换短期下载票据并开始下载。这样可以避免链接预览或安全扫描提前消耗一次性下载次数。</p>
+  <p>生成下载链接会计入一次使用次数。</p>
   <button id="download" type="button">开始下载</button>
-  <small id="message">如果你看到此兼容页面，也可以改用前端分享页完成下载。</small>
+  <small id="message"></small>
 </main>
 <script>
 document.getElementById('download').addEventListener('click', async () => {
@@ -3293,15 +3326,17 @@ document.getElementById('download').addEventListener('click', async () => {
   const message = document.getElementById('message');
   button.disabled = true;
   button.textContent = '准备下载…';
+  let failureMessage = '无法获取下载链接，请检查连接后重试。';
   try {
     const response = await fetch(%s, { method: 'POST' });
     const payload = await response.json();
-    if (!response.ok || !payload.url) throw new Error(payload.error || '下载链接创建失败');
+    if (payload && typeof payload.error === 'string' && payload.error.trim()) failureMessage = payload.error;
+    if (!response.ok || !payload || typeof payload.url !== 'string' || !payload.url.trim()) throw new Error();
     window.location.href = payload.url;
-  } catch (err) {
+  } catch {
     button.disabled = false;
     button.textContent = '重试下载';
-    message.textContent = err instanceof Error ? err.message : '下载链接创建失败';
+    message.textContent = failureMessage;
   }
 });
 </script>
@@ -3391,7 +3426,7 @@ func (s *Server) publicUpload(c *fiber.Ctx) error {
 		s.criticalAudit("token_upload_failed", s.clientIP(c), fmt.Sprint(t.ID))
 		if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
 			s.criticalAudit("token_upload_denied", s.clientIP(c), fmt.Sprintf("公开令牌 #%d 容量不足", t.ID))
-			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "此上传链接的剩余容量不足。")
 		}
 		return err
 	}
@@ -3434,7 +3469,7 @@ func (s *Server) reservePublicToken(c *fiber.Ctx, tokenType string, uploadBytes 
 		s.criticalAudit("token_denied", s.clientIP(c), "公开令牌不可用或已超出限制")
 		if errors.Is(err, store.ErrTokenUploadLimitExceeded) {
 			s.criticalAudit("token_upload_denied", s.clientIP(c), fmt.Sprintf("公开令牌 #%d 容量不足", t.ID))
-			return t, config.Dir{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "公开上传令牌剩余容量不足。")
+			return t, config.Dir{}, fiber.NewError(fiber.StatusRequestEntityTooLarge, "此上传链接的剩余容量不足。")
 		}
 		if errors.Is(err, store.ErrTokenNotUsable) {
 			return t, config.Dir{}, fiber.ErrForbidden
@@ -3551,11 +3586,19 @@ func tokenValidity(t store.Token, now time.Time) (bool, string) {
 func actionLabel(action string) string {
 	// 后端统一补充中文动作名，前端无需维护另一份审计动作映射。
 	labels := map[string]string{
+		"account_register":                      "账号注册",
+		"account_create":                        "创建账号",
+		"account_update":                        "更新账号",
+		"account_delete":                        "删除账号",
+		"account_password_change":               "自行修改密码",
+		"account_password_reset":                "重置账号密码",
+		"config_accounts_update":                "修改账号策略",
 		"file_list":                             "文件列表",
 		"dirs":                                  "查看目录",
 		"download":                              "文件下载",
 		"upload":                                "文件上传",
 		"login_success":                         "登录成功",
+		"session_subject_changed":               "登录身份已变化",
 		"login_failed":                          "登录失败",
 		"login_rate_limited":                    "登录限速",
 		"logout":                                "退出登录",
@@ -3566,10 +3609,11 @@ func actionLabel(action string) string {
 		"token_revoke":                          "撤销令牌",
 		"token_delete":                          "删除令牌",
 		"token_use":                             "使用令牌",
-		"token_denied":                          "令牌拒绝",
+		"token_denied":                          "分享访问被拒绝",
 		"csrf_denied":                           "跨站请求拦截",
 		"token_download_failed":                 "令牌下载失败",
 		"token_upload_failed":                   "令牌上传失败",
+		"token_upload_denied":                   "分享上传被拒绝",
 		"download_lease_create":                 "创建下载票据",
 		"public_download_lease_create":          "创建公开下载票据",
 		"download_lease_use":                    "使用下载票据",
@@ -3579,6 +3623,8 @@ func actionLabel(action string) string {
 		"upload_lease_use":                      "使用上传票据",
 		"upload_lease_failed":                   "上传票据失败",
 		"upload_lease_resource_changed":         "上传票据资源变化",
+		"upload_temp_cleanup":                   "清理上传临时文件",
+		"upload_temp_cleanup_failed":            "上传临时文件清理失败",
 		"config_view":                           "查看配置",
 		"config_resource_create":                "新增共享资源",
 		"config_resource_update":                "修改共享资源",
@@ -3586,7 +3632,7 @@ func actionLabel(action string) string {
 		"config_resource_published_sync_failed": "资源配置发布同步失败",
 		"config_upload_policy_update":           "修改上传策略",
 		"file_picker_select":                    "选择服务端路径",
-		"file_picker_denied":                    "文件选择拒绝",
+		"file_picker_denied":                    "文件选择被拒绝",
 		"chat_withdraw":                         "撤回聊天消息",
 		"chat_delete":                           "删除聊天消息",
 		"chat_batch_delete":                     "批量删除聊天消息",
