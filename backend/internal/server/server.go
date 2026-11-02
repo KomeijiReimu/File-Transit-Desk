@@ -544,6 +544,7 @@ func (s *Server) routes(app *fiber.App) {
 	app.Get("/api/config/file-picker/roots", s.adminOnly(s.filePickerRoots))
 	app.Get("/api/config/file-picker/list", s.adminOnly(s.filePickerList))
 	app.Post("/api/config/file-picker/validate", s.adminOnly(s.filePickerValidate))
+	app.Post("/api/config/file-picker/resolve", s.adminOnly(s.filePickerResolve))
 	app.Post("/api/config/resources", s.adminOnly(s.createResource))
 	app.Put("/api/config/resources/:id", s.adminOnly(s.updateResource))
 	app.Delete("/api/config/resources/:id", s.adminOnly(s.deleteResource))
@@ -1483,7 +1484,7 @@ func (s *Server) validateResourceSelection(cfg *config.Config, resource config.D
 	if err := s.validateProtectedResourcePath(cfg, resource); err != nil {
 		return err
 	}
-	if !resourceWithinPickerRoots(cfg.FilePicker.Roots, resource) {
+	if cfg.FilePicker.Mode == "restricted" && !resourceWithinPickerRoots(cfg.FilePicker.Roots, resource) {
 		return newCodedAPIError(fiber.StatusForbidden, "resource_path_outside_allowlist", "资源路径不在服务端允许范围内。")
 	}
 	return nil
@@ -1503,7 +1504,7 @@ func resourceWithinPickerRoots(roots []config.FilePickerRoot, resource config.Di
 }
 
 func (s *Server) resourceRequiresLegacyRestrictions(cfg *config.Config, resource config.Dir) bool {
-	return !resourceWithinPickerRoots(cfg.FilePicker.Roots, resource)
+	return cfg.FilePicker.Mode == "restricted" && !resourceWithinPickerRoots(cfg.FilePicker.Roots, resource)
 }
 
 func validateLegacyResourceUpdate(current, next config.Dir) error {
@@ -1623,6 +1624,9 @@ func canonicalPathsEqual(left, right string) (bool, error) {
 }
 
 func (s *Server) warnLegacyResourcesOutsideAllowlist() {
+	if s.cfg().FilePicker.Mode != "restricted" {
+		return
+	}
 	legacyIDs := make([]string, 0)
 	cfg := s.cfg()
 	for _, resource := range cfg.Resources() {

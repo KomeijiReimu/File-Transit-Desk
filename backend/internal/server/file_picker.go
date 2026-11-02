@@ -91,7 +91,10 @@ type resolvedPickerPath struct {
 }
 
 func (s *Server) filePickerRoots(c *fiber.Ctx) error {
-	roots := s.filePickerRootsForRuntime()
+	roots, err := s.filePickerRootsForRuntime()
+	if err != nil {
+		return fiber.NewError(503, "无法枚举服务端磁盘，请检查运行权限。")
+	}
 	out := make([]filePickerRootDTO, 0, len(roots))
 	for _, root := range roots {
 		out = append(out, filePickerRootDTO{ID: root.ID, Name: root.Name, Path: root.Path, AllowSelectFiles: root.AllowSelectFiles, AllowSelectDirs: root.AllowSelectDirs})
@@ -410,7 +413,10 @@ func (s *Server) resolvePickerPath(rootID, virtualPath string) (resolvedPickerPa
 }
 
 func (s *Server) filePickerRoot(id string) (config.FilePickerRoot, bool) {
-	for _, root := range s.filePickerRootsForRuntime() {
+	if s.cfg().FilePicker.Mode != "restricted" {
+		return systemPickerRoot(id)
+	}
+	for _, root := range s.cfg().FilePicker.Roots {
 		if root.ID == id {
 			return root, true
 		}
@@ -418,8 +424,11 @@ func (s *Server) filePickerRoot(id string) (config.FilePickerRoot, bool) {
 	return config.FilePickerRoot{}, false
 }
 
-func (s *Server) filePickerRootsForRuntime() []config.FilePickerRoot {
-	return append([]config.FilePickerRoot{}, s.cfg().FilePicker.Roots...)
+func (s *Server) filePickerRootsForRuntime() ([]config.FilePickerRoot, error) {
+	if s.cfg().FilePicker.Mode != "restricted" {
+		return systemPickerRoots()
+	}
+	return append([]config.FilePickerRoot{}, s.cfg().FilePicker.Roots...), nil
 }
 
 func cleanPickerVirtualPath(input string) (string, error) {
