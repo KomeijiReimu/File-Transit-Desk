@@ -194,6 +194,12 @@ func (r *transferRegistry) remove(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if rec := r.records[id]; rec != nil {
+		// Downloads expose activity only: request cleanup also runs on send errors,
+		// so it cannot establish successful delivery or fabricate final progress.
+		if rec.Type == "download" {
+			delete(r.records, id)
+			return
+		}
 		now := time.Now()
 		rec.Status = transferCompleted
 		rec.UpdatedAt = now

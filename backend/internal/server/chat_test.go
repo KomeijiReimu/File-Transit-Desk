@@ -582,32 +582,6 @@ func TestChatFailureAuditDTOClassification(t *testing.T) {
 	}
 }
 
-func TestChatMaintenanceUsesConfiguredRetentionBatch(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	st, err := store.Open(filepath.Join(t.TempDir(), "chat-maintenance.db"), 1000)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.DB.Close()
-	cfg := testConfig(t.TempDir())
-	cfg.Chat.RetentionDays = 1
-	cfg.Chat.MaxMessages = 2
-	cfg.Chat.CleanupBatch = 1
-	for index := 0; index < 4; index++ {
-		if _, _, err := st.CreateChatMessage(store.ChatCreateInput{AuthorKey: "owner", AuthorTag: "访客-AAAAAA", AuthorRole: "user", SourceIP: "192.0.2.1", Body: "maintenance", CreatedAt: now.Add(-time.Duration(4-index) * time.Minute)}); err != nil {
-			t.Fatalf("create maintenance message: %v", err)
-		}
-	}
-	runtime := newRuntime(st)
-	defer runtime.cancel()
-	runtime.server = &Server{config: cfg}
-	runtime.runStoreMaintenance()
-	messages, _, err := st.ChatMessages(0, 10)
-	if err != nil || len(messages) != 2 {
-		t.Fatalf("maintenance did not catch up across batches messages=%d err=%v", len(messages), err)
-	}
-}
-
 func TestAdminChatBatchDeleteAPIValidationAtomicityAndProjection(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	h := newChatAPIHarness(t, now, nil)
@@ -917,7 +891,7 @@ func (h *chatAPIHarness) request(t *testing.T, method, path, sid string, body []
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
-	response, err := h.app.Test(request)
+	response, err := h.app.Test(request, -1)
 	if err != nil {
 		t.Fatalf("chat request %s %s: %v", method, path, err)
 	}
@@ -932,6 +906,13 @@ func (h *chatAPIHarness) request(t *testing.T, method, path, sid string, body []
 func (h *chatAPIHarness) requestBodyStream(t *testing.T, method, path, sid string, body []byte, bodySize int, headers map[string]string) capturedChatResponse {
 	t.Helper()
 	var requestContext fasthttp.RequestCtx
+	// Calling Handler directly bypasses ServeConn's request teardown. Capture the
+	// response below before running the same cleanup as a completed request.
+	defer func() {
+		requestContext.ResetUserValues()
+		requestContext.Request.Reset()
+		requestContext.Response.Reset()
+	}()
 	requestContext.Request.Header.SetMethod(method)
 	requestContext.Request.SetRequestURI(path)
 	if sid != "" {

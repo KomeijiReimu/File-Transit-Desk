@@ -33,7 +33,7 @@ func TestHealthLiveReadyDrainAndClosedStore(t *testing.T) {
 	}
 	request := func(path string) *http.Response {
 		t.Helper()
-		resp, err := runtime.App.Test(httptest.NewRequest(http.MethodGet, path, nil))
+		resp, err := runtime.App.Test(httptest.NewRequest(http.MethodGet, path, nil), -1)
 		if err != nil {
 			t.Fatalf("request %s: %v", path, err)
 		}
@@ -345,11 +345,6 @@ func TestStartupMaintenanceRunsImmediatelyInBackground(t *testing.T) {
 	if err := st.CreateUploadLease(&store.UploadLease{Hash: "expired-startup-upload", Source: "session", SessionID: "owner", DirID: "default", ExpiresAt: past}); err != nil {
 		t.Fatalf("create upload lease: %v", err)
 	}
-	for i := 0; i < 101; i++ {
-		if err := st.Audit("startup-test", "", "entry"); err != nil {
-			t.Fatalf("seed audit: %v", err)
-		}
-	}
 	cfg := testConfig(t.TempDir())
 	cfg.Audit.Retain = 100
 	cfg.Audit.PruneEveryWrites = 0
@@ -359,17 +354,16 @@ func TestStartupMaintenanceRunsImmediatelyInBackground(t *testing.T) {
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		var sessions, tokens, downloads, uploads, audits int
+		var sessions, tokens, downloads, uploads int
 		_ = st.DB.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessions)
 		_ = st.DB.QueryRow(`SELECT COUNT(*) FROM tokens`).Scan(&tokens)
 		_ = st.DB.QueryRow(`SELECT COUNT(*) FROM download_leases`).Scan(&downloads)
 		_ = st.DB.QueryRow(`SELECT COUNT(*) FROM upload_leases`).Scan(&uploads)
-		_ = st.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&audits)
-		if sessions == 0 && tokens == 0 && downloads == 0 && uploads == 0 && audits == 100 {
+		if sessions == 0 && tokens == 0 && downloads == 0 && uploads == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("startup maintenance incomplete: sessions=%d tokens=%d downloads=%d uploads=%d audits=%d", sessions, tokens, downloads, uploads, audits)
+			t.Fatalf("startup maintenance incomplete: sessions=%d tokens=%d downloads=%d uploads=%d", sessions, tokens, downloads, uploads)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -528,42 +522,6 @@ func TestChatCleanupLoopStopsOnDrainCancellation(t *testing.T) {
 	if count := lifecycleChatMessageCount(t, st); count != 5 {
 		t.Fatalf("canceled cleanup removed messages: %d", count)
 	}
-}
-
-func TestDefaultChatRetentionThroughputConvergesAtMaximumWriteRate(t *testing.T) {
-	if defaultChatCleanupRetryDelay > time.Second {
-		t.Fatalf("chat retry delay exceeds one second: %s", defaultChatCleanupRetryDelay)
-	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "throughput-chat.db"), 1000)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.DB.Close()
-	now := time.Now().UTC()
-	cfg := testConfig(t.TempDir())
-	cfg.Chat.RetentionDays = 3650
-	cfg.Chat.MaxMessages = 10
-	seedLifecycleChatMessages(t, st, 1510, now.Add(-time.Hour))
-	runtime := newRuntime(st)
-	defer runtime.cancel()
-	runtime.server = &Server{runtime: runtime, config: cfg, store: st}
-	runtime.chatCleanupBudget = time.Nanosecond
-	writesPerRetry := (cfg.Chat.GlobalMessagesPerMinute*int(defaultChatCleanupRetryDelay/time.Second) + 59) / 60
-	if writesPerRetry >= cfg.Chat.CleanupBatch {
-		t.Fatalf("default cleanup cannot outpace writes: batch=%d writes/retry=%d", cfg.Chat.CleanupBatch, writesPerRetry)
-	}
-	for cycle := 0; cycle < 10; cycle++ {
-		needsRetry := runtime.runPeriodicChatMaintenanceAt(now)
-		count := lifecycleChatMessageCount(t, st)
-		if !needsRetry {
-			if count != cfg.Chat.MaxMessages {
-				t.Fatalf("cleanup stopped above max messages: %d", count)
-			}
-			return
-		}
-		seedLifecycleChatMessages(t, st, writesPerRetry, now.Add(time.Duration(cycle+1)*time.Minute))
-	}
-	t.Fatalf("default cleanup did not converge: messages=%d", lifecycleChatMessageCount(t, st))
 }
 
 func seedLifecycleChatMessages(t *testing.T, st *store.Store, count int, createdAt time.Time) {

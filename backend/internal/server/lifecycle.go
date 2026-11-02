@@ -112,14 +112,14 @@ func (r *Runtime) requestAdmission(c *fiber.Ctx) error {
 	}
 	r.active++
 	r.activeMu.Unlock()
-	defer func() {
+	c.Context().SetUserValue(admissionCleanupKey, requestCleanup(func() {
 		r.activeMu.Lock()
 		r.active--
 		if r.active == 0 {
 			r.activeCond.Broadcast()
 		}
 		r.activeMu.Unlock()
-	}()
+	}))
 	return c.Next()
 }
 

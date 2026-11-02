@@ -1739,9 +1739,11 @@ func (s *Server) downloadFile(c *fiber.Ctx) error {
 		return err
 	}
 	s.bestEffortAudit("download", s.clientIP(c), fmt.Sprintf("目录 %s，文件 %s", dir.ID, displayPath(safePath)))
-	done := s.registerDownloadTransfer(c, "session", dir.ID, safePath, info.Size())
-	defer done()
-	return c.Download(full)
+	if err := c.Download(full); err != nil {
+		return err
+	}
+	s.registerDownloadTransfer(c, "session", dir.ID, safePath)
+	return nil
 }
 
 func (s *Server) createDownloadLease(c *fiber.Ctx) error {
@@ -1856,16 +1858,32 @@ func (s *Server) downloadByLease(c *fiber.Ctx) error {
 	if firstUse {
 		_ = s.store.Audit("download_lease_use", s.clientIP(c), fmt.Sprintf("首次使用%s下载票据，目录 %s，文件 %s", lease.Source, lease.DirID, displayPath(lease.Path)))
 	}
-	done := s.registerDownloadTransfer(c, "download_lease", lease.DirID, lease.Path, info.Size())
-	defer done()
-	return c.Download(full)
+	if err := c.Download(full); err != nil {
+		return err
+	}
+	s.registerDownloadTransfer(c, "download_lease", lease.DirID, lease.Path)
+	return nil
 }
 
-func (s *Server) registerDownloadTransfer(c *fiber.Ctx, source, dirID, path string, size int64) func() {
+func (s *Server) registerDownloadTransfer(c *fiber.Ctx, source, dirID, path string) {
+	response := c.Response()
+	if c.Method() == fiber.MethodHead || response.SkipBody || !response.IsBodyStream() ||
+		(response.StatusCode() != fiber.StatusOK && response.StatusCode() != fiber.StatusPartialContent) {
+		return
+	}
+	// SendFile has already resolved Range; Content-Length describes this response,
+	// not the whole file. -1 explicitly denotes an unknown response size.
+	size := int64(response.Header.ContentLength())
+	if size == 0 {
+		return
+	}
+	if size < 0 {
+		size = -1
+	}
 	id, _, _ := security.NewToken()
 	rec := &transferRecord{ID: id, Type: "download", Status: transferActive, Source: source, DirID: dirID, Path: filepath.Dir(path), FileName: filepath.Base(path), TotalBytes: size, StartedAt: time.Now(), UpdatedAt: time.Now(), ClientIP: s.clientIP(c), Cancelable: false, BestEffort: true}
 	s.transfers.add(rec)
-	return func() { s.transfers.remove(id) }
+	c.Context().SetUserValue(downloadCleanupKey, requestCleanup(func() { s.transfers.remove(id) }))
 }
 
 func (s *Server) createLeaseRecord(lease store.DownloadLease) (store.DownloadLease, string, error) {
@@ -2436,7 +2454,7 @@ func (s *Server) cancelTransfer(c *fiber.Ctx) error {
 	if s.transfers.cancel(c.Params("id")) {
 		return c.JSON(fiber.Map{"ok": true})
 	}
-	return fiber.NewError(fiber.StatusConflict, "该传输不可可靠取消或已结束。")
+	return fiber.NewError(fiber.StatusConflict, "无法从此处取消该传输，或传输已结束。")
 }
 
 type streamUploadOptions struct {
