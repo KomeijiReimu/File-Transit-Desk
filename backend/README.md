@@ -1,6 +1,6 @@
 # File Trans Backend
 
-自用临时文件传输后端，基于 Go 1.22、Fiber、SQLite。功能包括 TOTP 登录、HttpOnly Cookie 会话、受控目录浏览/上传/下载、临时令牌、单一全局聊天室、审计日志、静态前端托管。
+文件传输后端，基于 Go、Fiber、SQLite。功能包括账号注册与密码登录、TOTP 登录、用户管理、HttpOnly Cookie 会话、受控文件传输、临时分享、全局聊天室、审计和静态前端托管。Go 版本见 `go.mod`。
 
 ## 快速运行
 
@@ -16,14 +16,16 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1
 ```
 
-脚本默认读取 `backend/config.yaml`，后端端口仍以该配置文件中的 `server.port` 为准，并显式传入 `-dev` 与 `-dev-frontend-port`。直接运行后端默认为生产模式，固定验证码及开发 CORS/CSRF 例外均不会启用。
-如果后端启动失败，一键脚本会显示中文错误、后端日志尾部和日志文件路径。若看到 YAML 格式错误，请优先检查提示行附近的缩进；`file_picker` 是顶层配置，应该与 `storage` 同级，不能写到 `storage.shares` 下面。
+脚本默认读取管理员文件 `backend/config.yaml` 及同目录的 `settings.yaml`。后端端口由服务设置中的 `server.port` 控制。脚本显式传入 `-dev` 与 `-dev-frontend-port`，直接运行后端默认为生产模式。
+启动失败时，脚本显示失败阶段和诊断目录。请查看其中的后端日志，并按错误检查管理员配置或 `settings.yaml`。服务设置的 `file_picker` 与 `storage` 同级。
 
 如只运行后端：
 
 ```bash
+cd backend
 cp config.example.yaml config.yaml
-# 修改 config.yaml 中的 auth.totp_secret、auth.admin、storage.dirs/storage.shares 等配置
+cp settings.example.yaml settings.yaml
+# 在 config.yaml 填写管理员用户名及密码摘要，在 settings.yaml 配置服务
 go run ./cmd/server -config config.yaml
 ```
 
@@ -31,29 +33,29 @@ go run ./cmd/server -config config.yaml
 
 ## 安全默认值
 
-- `config.example.yaml` 默认使用不可启动的占位 TOTP secret 和管理员账号占位符，必须替换后才能启动。
-- `auth.dev_allow_fixed_code` 默认是 `false`。只有显式设置为 `true` 且 `auth.totp_secret` 为空时，才允许开发验证码 `000000`。
-- 启动时会校验 `auth.totp_secret` 是否为有效且长度足够的 Base32 Secret，并拒绝占位符、空密钥和危险 CORS 通配符。
+- `config.example.yaml` 是管理员身份模板，密码摘要需填写有效的 Argon2id PHC；服务设置模板为 `settings.example.yaml`。
+- `auth.dev_allow_fixed_code` 默认是 `false`。只有显式设置为 `true`、`auth.totp_secret` 为空且以 `-dev` 启动时，才允许开发验证码 `000000`。
+- 启用动态验证码登录时，`auth.totp_secret` 必须是有效且长度足够的 Base32 密钥；关闭此登录方式时可留空。示例占位符、无效的非空密钥和危险 CORS 通配符会被拒绝。
 - 登录接口带有内存级失败限速：同一来源短时间内多次失败会被临时拒绝，降低 TOTP 在线猜测风险。
-- 普通 TOTP 登录用户角色为 `user`，可浏览目录/文件、上传下载、使用全局聊天室、退出和查看自身登录状态；临时令牌管理、管理员聊天视图与审计日志只允许 `admin` 角色访问。
+- 普通账号与 TOTP 登录角色为 `user`，可访问开放资源与聊天室；用户管理、临时令牌、管理员聊天视图和审计只允许 `admin` 访问。
 - 管理员通过独立接口登录，优先使用 Argon2id PHC；旧 SHA-256 配置仅保留迁移兼容。用户名使用固定长度常量时间比较，错误用户名也会执行密码验证。
 - Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，`Secure` 由 `auth.cookie_secure` 控制；HTTPS 部署时应启用。服务端数据库只保存会话 ID 哈希，避免数据库只读泄露时直接复用 Cookie 原值。
-- 登录会话默认同时受 86400 秒（24 小时）绝对期限、7200 秒（2 小时）真实活动空闲期限和 30 秒 heartbeat grace 约束。前端只在页面可见且用户真实活动时调用心跳；页面隐藏、静置、普通轮询或长上传本身不会无限续期。已有配置中的显式值不会自动迁移，例如真实 `config.yaml` 仍写着 `idle_timeout_seconds: 1800` 时会继续按 1800 秒生效，管理员需自行改为 7200 并按现有生效规则处理。
+- 登录会话默认同时受 86400 秒（24 小时）绝对期限、7200 秒（2 小时）真实活动空闲期限和 30 秒 heartbeat grace 约束。前端只在页面可见且用户真实活动时调用心跳；页面隐藏、静置、普通轮询或长上传本身不会无限续期。已有配置的显式空闲期限保持生效；新格式在 `settings.yaml` 的 `auth.idle_timeout_seconds` 设置，改为 `7200` 并重启后空闲期限为两小时。
 - 文件下载使用短期下载票据。票据绑定具体目录、路径、文件大小、修改时间，并会按 `downloads.content_hash_max_mb` 对文件内容写入 SHA-256 哈希；页面会话空闲过期后，已兑换票据的长下载和 HTTP Range 续传仍可继续，但文件被替换后旧票据会失效。
 - 管理员撤销或删除公开下载令牌时，会同步清理该令牌已兑换但尚未过期的下载票据，用于应急止血。共享资源路径、类型、权限变更或删除时，会同步撤销相关公开令牌并清理对应目录 ID 的下载票据和上传票据，避免旧授权指向新资源。
 - 对 `/api` 下会改变状态的请求，后端会校验非空 `Origin`，降低 Cookie 凭据接口的跨站请求风险。一键开发模式会额外允许同一主机名的前端开发端口来源，用于默认直连传输；生产或不同域名跨域访问仍必须写入 `cors.allow_origins`。
 - Vite 开发代理会基于入站 socket 地址覆盖 `X-FileTrans-Dev-Client-IP`、`X-Real-IP` 和 `X-Forwarded-For`，不保留或拼接浏览器伪造值。后端仅在显式 `-dev` 且直接 socket peer 为 loopback 时读取这个单值开发头；该例外只影响客户端地址解析，不会把该 peer 当作可信生产代理，也不会影响 forwarded host/proto、`Origin` 或 CSRF 判断。
-- 路径会拒绝绝对路径、NUL、任何 `..` 段；已存在目标会通过 `filepath.EvalSymlinks` 校验真实路径仍在配置目录内；上传创建目录前会校验最近存在父目录没有通过符号链接逃逸。
+- 文件和分享接口使用资源内的相对路径，拒绝绝对路径、NUL 和 `..` 段；已有目标与上传父目录均会检查真实路径，防止符号链接逃逸。管理员文件选择器可使用服务端绝对路径。
 - 临时令牌数据库只保存 SHA-256 哈希，明文只在创建响应中返回一次。
 - 上传默认不覆盖同名文件，会使用原子创建方式自动追加 `-1`、`-2` 等后缀，避免并发同名上传互相覆盖；登录态和公开分享前端默认走原始字节流上传，后端从连接开始直接读取请求体、写临时文件并更新传输进度。旧的 `multipart/form-data` 上传接口仍兼容保留，但不再是前端默认路径；上传还会校验单次文件数量、单文件大小、请求总量、扩展名白/黑名单，以及上传令牌累计容量。
-- 登录态可先创建短期上传票据，再通过不依赖 Cookie 的 `upload-raw-by-lease` 传输。票据只保存哈希，绑定用户、目录、路径、文件名、文件大小、资源授权指纹、过期时间且一次性使用；即使页面会话随后空闲过期或被删除，已创建且未使用的票据仍可完成本次上传。资源路径、类型或权限变化后，旧票据会因指纹不匹配而失效，不能写入同 ID 的新资源路径。上传票据是单次 bearer 授权，泄露即等同本次上传权限，因此前端通过 `Authorization: Bearer` 发送，不放入分享链接或页面 URL。所有 `/t/...` capability 响应以及 token/lease 创建与使用响应都会设置 `no-store`、`no-referrer` 和 `noindex` 等安全头。内置 nginx 会脱敏 `/t/<token>` 并忽略查询参数，但部署在它之前的外部 LB、CDN、WAF 和代理日志仍需独立禁止记录 capability、Referer 与 Authorization。
-- 服务维护内存传输注册表，管理员可查看活跃上传和下载。原始字节流上传的进度、速度与取消是精确能力；下载继续使用 Fiber `c.Download` 极速路径，只做 best-effort 登记，不承诺精确速度或可靠取消。若部署在反向代理后，应关闭上传请求体缓冲，例如 Nginx `proxy_request_buffering off;`，否则代理缓冲会让后端观测滞后。
+- 登录态先创建独立上传票据，再通过不依赖 Cookie 的 `upload-raw-by-lease` 传输。票据只保存哈希，绑定账号、目录、路径、文件名、大小、资源授权指纹和期限，且一次性使用。普通会话过期或退出不撤销票据；账号停用、删除、改密或重置密码会撤销尚未开始的上传授权，已准入连接允许完成。资源路径、类型或权限变化后，旧票据失效。前端通过 `Authorization: Bearer` 发送票据，不放入分享链接或页面 URL。所有 `/t/...` 及票据响应设置 `no-store`、`no-referrer`、`noindex`。内置 nginx 脱敏分享路径并忽略查询参数；外部代理日志也需禁止记录票据、Referer 与 Authorization。
+- 管理员可查看活跃上传和下载。原始字节流上传显示已接收进度、速度，并支持取消；下载保留快速发送路径，记录响应处理期间的活跃连接，不提供可靠进度、速度或取消。反向代理应关闭上传请求体缓冲，例如 Nginx `proxy_request_buffering off;`，否则后端观测会滞后。
 - 上传临时文件写在目标目录内，文件名形如 `.upload-*.tmp`；成功提交最终文件后会立即删除临时文件，失败、超限、客户端断开或管理员取消也会尽量删除。服务启动和定时任务会按配置清理超过保留期且不在活跃注册表中的崩溃残留临时文件。
-- 聊天只对已登录 TOTP 用户和管理员开放，公开 token 访客不可用。普通 DTO 会向所有已登录用户返回 `sourceIP`，但不返回撤回原文、`authorKey`、`deletedBy` 等内部数据；管理员 DTO 可看到撤回消息原文，并且只有管理员接口具有单条删除、批量删除和清空权限。`sourceIP` 表示可信网络边界观察到的客户端地址，不承诺是公网 IP，可能受 NAT、VPN、CDN 或 LB 影响。删除会把当前 `chat_messages.body` 设为 `NULL` 并保留 tombstone，撤回/删除审计不写正文；这不是对 SQLite 历史页、WAL、备份或存储快照的取证级擦除承诺。
+- 普通账号、TOTP 访客和管理员登录后均可使用聊天；公开分享访客不可使用。所有登录用户可见 `sourceIP`，普通响应不包含撤回原文、`authorKey` 或 `deletedBy`；管理员可见撤回原文，并可单删、批删及清空。来源 IP 是后端观察到的地址，受 NAT、VPN、CDN 和代理影响。删除清除应用数据库当前正文，审计不写正文；历史页、WAL、备份和快照需单独处理。
 
 ## 配置说明
 
-见 `config.example.yaml`：
+`config.yaml` 顶层 `admin` 保存管理员用户名和密码摘要，其余设置见 `settings.example.yaml`。新格式的相对路径以管理员文件所在目录为基准。旧单文件配置可继续读取，在线修改前执行 `go run ./cmd/server -config config.yaml -migrate-config`；迁移保留备份并检查目标文件冲突。
 
 - `server.host/port`：监听地址。
 - `server.trust_proxy_headers`：是否启用可信代理头；生产默认和直接运行均为 `false`，不会自动信任私网，修改后必须重启。
@@ -87,10 +89,10 @@ go run ./cmd/server -config config.yaml
 - `downloads.verify_hash_on_every_request`：默认 `false`，有内容哈希的 lease 仅在首次使用时复核一次，后续 Range 只复核普通文件身份、大小和 mtime，以避免每段续传都读取完整文件。若服务器目录可能被不可信本地写者修改，可设为 `true`，让每次请求都复核内容哈希。
 
 上述两个下载哈希配置修改后需要重启。首次使用状态持久化在数据库中；并发首次 Range 会合并为一次实际哈希和一次首次使用审计。超过 `content_hash_max_mb` 而未记录内容哈希的大文件仍会在首次成功复核后标记为已使用。
-- `auth.admin.username`：管理员用户名。
-- `auth.admin.password_hash`：管理员密码的 Argon2id PHC。
-- `auth.admin.password_sha256`：deprecated 旧 SHA-256 摘要；仅在 `password_hash` 为空时使用。
-- `abuse.login.max_concurrent_admin_verifications`：Argon2id 验证并发槽，默认 2；`0` 表示不限制。
+- `config.yaml` 的 `admin.username`：管理员用户名。
+- `config.yaml` 的 `admin.password_hash`：管理员密码的 Argon2id PHC。
+- 旧格式的 `auth.admin.password_sha256` 仅用于迁移兼容；迁移新格式前需提供有效 Argon2id 摘要。
+- `abuse.login.max_concurrent_admin_verifications`：密码计算的共享并发上限，默认 2；`0` 同样使用默认值 2。
 - `abuse.login.global_per_minute` 与 IP 失败窗口参数：分别限制 user/admin 单实例登录总速率，并按可信客户端 IP 隔离失败封禁。
 - `abuse.creation.*`：限制 token/lease 创建速率、活跃 token 数量和未使用/未过期 lease 数量；所有字段设为 `0` 可单独关闭对应限制。
 - `audit.unauthorized_sample_seconds` / `unauthorized_global_per_minute`：仅对认证噪声中的未授权和非管理员 forbidden 按规范客户端 IP 与路由模板采样，默认 60 秒一次并按 action 分别限制为 120 次/分钟；`0` 表示不限制审计写入，而不是关闭审计。CSRF 使用独立 action 全局桶。路径 allowlist、资源策略、登录、配置、token 和 capability 等关键事件始终完整审计。
@@ -112,7 +114,7 @@ go run ./cmd/server -config config.yaml
 - `storage.allowed_extensions` / `storage.blocked_extensions`：上传扩展名白名单与黑名单；白名单非空时只允许列出的扩展名，黑名单优先拒绝。默认黑名单为空，可由管理员配置管理页按需维护。
 - `storage.dirs`：开放目录资源，含 `type: directory`、`allow_download/allow_upload`，可由管理员“配置管理”页维护。
 - `storage.shares`：单文件共享资源，含 `type: file`，只允许下载；也可由管理员“配置管理”页维护。
-- `file_picker.roots`：新增或修改资源路径的唯一允许范围；未配置时不会自动提供系统入口。选择器仅辅助填写共享资源路径，不提供删除、重命名、移动、上传或编辑能力。
+- `file_picker.mode`：默认 `system`，管理员可浏览服务进程可访问的系统位置；`restricted` 限定为 `file_picker.roots`。选择器只提供浏览和选择，文件服务仍受已发布共享资源约束。
 - `file_picker.max_page_size` / `file_picker.deny_names` / `file_picker.deny_patterns`：文件选择器分页上限和可选隐藏规则。
 - `tokens.default_ttl_seconds`：令牌默认有效期。
 - `tokens.max_ttl_seconds`：令牌最长有效期，管理员传入更长的 `expiresAt` 或 `ttlSeconds` 会被夹紧到该上限。
@@ -121,7 +123,7 @@ go run ./cmd/server -config config.yaml
 
 ### 修改端口
 
-后端监听地址由 `config.yaml` 控制：
+后端监听地址由 `settings.yaml` 的 `server` 控制：
 
 ```yaml
 server:
@@ -133,7 +135,7 @@ server:
 
 ```bash
 cd ../frontend
-VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 bun run dev
+VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 VITE_TRANSFER_PORT=9000 bun run dev
 ```
 
 Windows 一键脚本可直接指定端口：
@@ -155,14 +157,14 @@ python3 scripts/generate-totp-secret.py
 
 ## 生成管理员密码摘要
 
-运行脚本后按提示隐藏输入管理员密码。默认 YAML 同时输出 Argon2id PHC 和旧二进制短期回滚所需的 SHA-256，两个摘要来自同一次输入：
+运行脚本后按提示输入并确认密码，生成新管理员文件使用的配置：
 
 ```bash
 cd ..
-python3 scripts/hash-admin-password.py
+python3 scripts/hash-admin-password.py --format bootstrap
 ```
 
-脚本内部以 `shell=False` 调用 `go run ./cmd/hash-admin-password`。自动化环境只能从 Secret Manager 或受保护的标准输入提供密码，不能把密码放入命令行、脚本或日志。`--format phc` 仅输出 PHC，不提供旧二进制回滚字段；`--format legacy-sha256` 仅供单独生成旧格式。迁移时可暂时同时保留 PHC 和旧 SHA-256，但 PHC 非空时绝不降级；回滚必须显式移除 `password_hash` 并重启，稳定后应删除旧值。
+脚本通过标准输入将密码传给后端工具。自动化调用通过受保护的标准输入提供密码，不能把密码放入参数或日志。`--format phc` 仅输出 PHC；旧 YAML 与 `legacy-sha256` 格式用于旧配置兼容。回滚须恢复匹配的程序、数据库与配置备份。
 
 ## API 契约摘要
 
@@ -172,8 +174,17 @@ python3 scripts/hash-admin-password.py
 
 - `POST /api/auth/login`：普通用户 TOTP 登录，JSON `{ "code": "123456" }`，成功返回 `{ "authenticated": true, "role": "user", "expiresAt": "...", "idleExpiresAt": "..." }` 并写入 Cookie。
 - `POST /api/auth/admin-login`：管理员账号登录，JSON `{ "username": "admin", "password": "..." }`，成功后角色为 `admin`。
+- `GET /api/auth/options`：公开登录方式及注册策略。
+- `POST /api/auth/register`：JSON `{ "username": "...", "password": "...", "displayName": "..." }`，返回 `{ "status": "pending" }` 或 `{ "status": "active" }`，不自动登录。
+- `POST /api/auth/account-login`：普通账号密码登录；返回用户 ID、名称、角色和会话绑定。
+- `POST /api/auth/change-password`：JSON `{ "currentPassword": "...", "newPassword": "..." }`；成功后撤销该账号全部会话。
+- `GET/POST /api/admin/users`：分页查询或创建普通账号。
+- `PUT/DELETE /api/admin/users/:id`：修改账号或逻辑删除。
+- `POST /api/admin/users/:id/reset-password`：管理员设置新密码。
+
+账号停用、删除或密码变更会撤销其会话、下载票据及未开始上传票据；已准入连接允许完成。普通会话过期仍不撤销独立传输票据。账号关联保存在票据自身，聊天使用稳定账号身份，旧匿名消息保持原归属。
 - 登录失败过多时返回 `429 Too Many Requests`。
-- Argon2id 管理员验证并发槽已满时返回 `503`、`code=auth_capacity_exhausted` 和 `Retry-After: 1`，不会排队占用请求。
+- 密码计算共享容量已满时返回 `503`、`code=auth_capacity_exhausted` 和 `Retry-After: 1`，不会无限排队。
 - `GET /api/auth/me`：返回 `{ "authenticated": true, "role": "user", "expiresAt": "...", "idleExpiresAt": "..." }` 或管理员信息。
 - `POST /api/auth/heartbeat`：登录后由前端在页面可见且用户活跃时调用，刷新 `idleExpiresAt`；空闲过期后返回 401。
 - `POST /api/auth/logout`：清理服务端会话和 Cookie，返回 `{ "ok": true }`。
@@ -215,7 +226,7 @@ python3 scripts/hash-admin-password.py
 
 ### 全局聊天室
 
-聊天室只有一条全局消息流，仅已登录的 TOTP `user` 与 `admin` 可访问；公开 `/t/...` 和 `/share/:token` 访客没有聊天权限。正文是纯文本，不解析 Markdown/HTML，也没有附件能力。所有聊天响应都带 `Cache-Control: no-store`。
+聊天室只有一条全局消息流，已登录普通账号、TOTP 访客和管理员均可访问；公开分享访客没有聊天权限。正文是纯文本，所有聊天响应都带 `Cache-Control: no-store`。
 
 - `GET /api/chat/capabilities`：普通用户和管理员均可访问，返回当前 `maxMessageChars`、`maxMessageBytes`、固定 `maxRequestBytes: 8192`、`withdrawWindowSeconds` 以及 history/changes 页大小边界。
 - `GET /api/chat/messages?beforeId=&limit=`：普通 history，默认 50、最大 100，使用 keyset 分页；响应同时返回 `generation` 与 `latestChangeSeq`。普通 DTO 在 active、withdrawn 和 deleted tombstone 中都返回 `sourceIP`；撤回和删除消息返回 `body: null`，且不包含撤回原文、`authorKey`、`deletedBy` 等内部字段。
@@ -286,16 +297,18 @@ history 的消息、generation 和高水位来自同一短只读快照。首版�
 
 - `GET /api/config`：返回共享资源、上传策略、令牌策略和下载票据策略摘要。
 - `PUT /api/config/upload-policy`：修改 `storage.allowed_extensions` 与 `storage.blocked_extensions`；后端会统一小写化、补前导点、去重，拒绝 `*`、重叠项和异常字符。
-- `GET /api/config/file-picker/roots`：返回顶层 `file_picker.roots` 明确配置的文件选择器入口；未配置时返回空列表，不会自动暴露 Linux/macOS 系统根目录或 Windows 盘符。
+- `GET /api/config/file-picker/roots`：系统模式返回系统入口，受限模式返回配置的 roots。
+- `POST /api/config/file-picker/resolve`：JSON `{ "path": "绝对路径" }`，返回对应 root 及相对虚拟路径；支持 Windows 盘符和 UNC，保留路径大小写。
+- `PUT /api/config/accounts`：保存注册开关、审批策略和临时码登录开关。
 - `GET /api/config/file-picker/list?rootId=uploads&path=/docs&page=1&pageSize=100&sort=name&order=asc`：列出目录；路径使用 `/` 分隔的相对路径并分页返回，默认目录优先，再按名称排序；`sort` 支持 `name/type/size/modifiedAt`。
 - `POST /api/config/file-picker/validate`：最终选择前校验文件或目录，返回可填入现有资源表单的规范化绝对路径。
 - `POST /api/config/resources`：新增目录或单文件资源，请求示例：`{ "id": "manual", "name": "说明文档", "type": "file", "path": "/data/manual.pdf", "allowDownload": true, "allowUpload": false }`。
 - `PUT /api/config/resources/:id`：修改已有资源。资源 ID 作为配置边界，修改时不允许在表单中变更 ID。
 - `DELETE /api/config/resources/:id`：删除资源。已有令牌不会被删除，但后续会因资源不存在而不可继续使用。
 
-保存资源时后端会校验 ID 字符集、路径是否存在、目录/文件类型是否匹配、读写权限以及危险系统目录；即使路径来自文件选择器，保存资源时也会再次校验。成功后原子写回 `config.yaml`，保留 `config.yaml.bak`，并热更新内存中的资源列表。目录资源写入 `storage.dirs`，单文件资源写入 `storage.shares`。在线保存会重新序列化 YAML，原配置文件注释和手工排版不会保留。
+保存资源时后端校验 ID、实际路径、类型与读写权限；受限模式额外检查 root 范围。成功后原子更新 `settings.yaml`，保留备份并热更新资源列表。目录资源写入 `storage.dirs`，单文件写入 `storage.shares`；管理员身份文件独立保存，服务设置保留未修改字段。
 
-`file_picker` 是与 `storage` 同级的顶层配置，`file_picker.roots` 是文件选择器可以浏览和选择的唯一服务端范围，不要缩进到 `storage.shares` 或其他资源项下。容器部署时，选择器看到的是容器内路径；若要选择宿主机目录，必须先以卷挂载方式暴露给容器。
+`file_picker` 与 `storage` 同属服务设置顶层。`system` 模式允许管理员浏览并发布服务进程可访问的路径，`restricted` 模式按 `roots` 限制。未设置 `mode` 的旧配置也采用 `system`；需要保留原范围时，请显式设置 `restricted`。普通用户和公开分享始终只访问已发布的共享位置。容器内的可选路径由挂载和进程权限决定。
 
 管理员配置页还会调用 `/api/share-origins` 展示“服务访问地址”：浏览器当前 origin 与显式公开 origin 是可复制入口，本机网卡地址仅是候选，listener socket 则只用于诊断后端绑定。网卡/listener 匹配不能证明外部防火墙、NAT、反向代理或 TLS 已打通。
 
@@ -303,7 +316,7 @@ history 的消息、generation 和高水位来自同一短只读快照。首版�
 
 ## Docker
 
-完整且唯一的部署步骤、Compose 命令、端口与挂载权限说明见[仓库根 README 的“部署方式”](../README.md#部署方式)。
+部署步骤、Compose 命令、端口和挂载权限见[仓库根 README 的“部署”](../README.md#部署)。
 
 示例 Compose 的前后端固定加入 `172.28.0.0/24`。使用内置 Nginx 时，后端配置可显式启用 `trust_proxy_headers` 并将该 CIDR 写入 `trusted_proxy_cidrs`，但这表示信任整个 `/24` 网络；网络内若还允许其他工作负载，应该为代理使用更精确的固定地址并优先配置 `/32`。内置 Nginx 会覆盖而不是追加 `X-Real-IP`、`X-Forwarded-For`、`X-Forwarded-Host` 和 `X-Forwarded-Proto`。若 subnet 冲突，必须同时修改 Compose subnet 和可信 CIDR；代理配置修改后重启后端。后端端口必须只对该受信网络开放，直接运行后端时保持 `false` 和空列表。
 
