@@ -23,7 +23,10 @@ const closeRef = ref<HTMLButtonElement | null>(null)
 const rootId = ref('')
 const currentPath = ref('/')
 const addressInput = ref('/')
-const addressOpen = ref(false)
+const addressPending = ref(false)
+const addressError = ref('')
+const addressErrorRef = ref<HTMLElement | null>(null)
+const selectedFilePath = ref('')
 const parentPath = ref('')
 const items = ref<FilePickerItem[]>([])
 const page = ref(1)
@@ -78,6 +81,7 @@ const sortOptions = [
 ]
 const currentRoot = computed(() => roots.value.find((root) => root.id === rootId.value))
 const canSelectCurrentDirectory = computed(() => props.mode === 'directory' && Boolean(currentRoot.value?.allowSelectDirs))
+const selectionBlocked = computed(() => loading.value || validating.value || addressPending.value || Boolean(listError.value) || Boolean(rootError.value))
 const listingSummary = computed(() => {
   if (totalKnown.value && total.value !== null) return items.value.length === total.value ? `${total.value} 项` : `已显示 ${items.value.length} / ${total.value} 项`
   return `已显示 ${items.value.length} 项`
@@ -203,6 +207,9 @@ async function loadPath(path: string, nextPage = 1, append = false, retryRequest
   loading.value = true
   appendError.value = ''
   if (!requestAppend) {
+    addressPending.value = true
+    addressError.value = ''
+    selectedFilePath.value = ''
     items.value = []
     page.value = 1
     hasMore.value = false
@@ -221,6 +228,8 @@ async function loadPath(path: string, nextPage = 1, append = false, retryRequest
     if (requestId !== pathRequestId || targetRootId !== rootId.value || targetSortValue !== sortValue.value) return
     currentPath.value = result.path || '/'
     addressInput.value = displayAddress(currentRoot.value, currentPath.value)
+    addressPending.value = false
+    addressError.value = ''
     parentPath.value = result.parentPath || ''
     const effectiveSortValue = `${result.sort}:${result.order}`
     if (effectiveSortValue !== sortValue.value) {
@@ -298,22 +307,44 @@ async function loadPathInRoot(nextRootId: string, path: string) {
 }
 
 async function jumpToAddress() {
-  if (loading.value || !addressInput.value.trim()) return
+  if (loading.value || validating.value || !addressInput.value.trim()) return
   const requestId = ++pathRequestId
+  addressPending.value = true
+  selectedFilePath.value = ''
+  addressError.value = ''
   actionError.value = ''
   loading.value = true
   try {
     const resolved = await api.resolveFilePickerAddress(addressInput.value.trim())
     if (requestId !== pathRequestId || !props.open) return
+    if (resolved.filePath && props.mode === 'directory') {
+      addressError.value = '该路径是文件，请选择文件夹。'
+      await nextTick()
+      addressErrorRef.value?.focus()
+      return
+    }
     const index = roots.value.findIndex((root) => root.id === resolved.root.id)
     if (index < 0) roots.value.push(resolved.root)
     else roots.value[index] = resolved.root
     await loadPathInRoot(resolved.root.id, resolved.path)
+    if (!props.open) return
+    if (listError.value) {
+      addressError.value = listError.value
+      await nextTick()
+      addressErrorRef.value?.focus()
+      return
+    }
+    if (!addressPending.value && resolved.filePath && props.mode === 'file') {
+      selectedFilePath.value = resolved.filePath
+      liveMessage.value = `已选中文件 ${resolved.filePath.split('/').pop()}，请确认选择。`
+      await nextTick()
+      pickerResultsRef.value?.querySelector('[data-selected="true"]')?.scrollIntoView({ block: 'nearest' })
+    }
   } catch (err) {
     if (requestId !== pathRequestId) return
-    actionError.value = err instanceof ApiError ? err.message : '无法打开此路径，请检查后重试。'
+    addressError.value = err instanceof ApiError ? err.message : '无法打开此路径，请检查后重试。'
     await nextTick()
-    actionErrorRef.value?.focus()
+    addressErrorRef.value?.focus()
   } finally {
     if (requestId === pathRequestId) loading.value = false
   }
@@ -333,6 +364,7 @@ function displayAddress(root: FilePickerRoot | undefined, path: string) {
 
 function enter(item: FilePickerItem) {
   if (!loading.value && itemCanEnter(item)) {
+    addressInput.value = displayAddress(currentRoot.value, item.path)
     void loadPath(item.path, 1, false, undefined, true)
   }
 }
@@ -366,11 +398,13 @@ function itemReasonId(index: number) {
 
 function navigateToPath(path: string) {
   failedPathRequest.value = null
+  addressInput.value = displayAddress(currentRoot.value, path)
   void loadPath(path, 1, false, undefined, true)
 }
 
 function refreshCurrentPath() {
   failedPathRequest.value = null
+  addressInput.value = displayAddress(currentRoot.value, currentPath.value)
   void loadPath(currentPath.value || '/', 1, false, undefined, true)
 }
 
@@ -387,7 +421,7 @@ async function dismissActionError() {
 }
 
 async function selectPath(path: string) {
-  if (loading.value || !rootId.value || validating.value) return
+  if (selectionBlocked.value || !rootId.value) return
   const requestId = ++validationRequestId
   const targetRootId = rootId.value
   validating.value = true
@@ -454,6 +488,9 @@ watch(sortValue, () => {
 
 watch(() => props.open, (open) => {
   if (open) {
+    selectedFilePath.value = ''
+    addressError.value = ''
+    addressPending.value = false
     returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
     releaseModalIsolation?.()
     releaseModalIsolation = acquireModalIsolation()
@@ -504,31 +541,26 @@ onBeforeUnmount(() => {
 
             <template v-if="roots.length">
               <div class="picker-controls">
-                <div class="picker-toolbar">
-                  <label>位置
-                    <GlassSelect v-model="rootId" :options="rootOptions" aria-label="选择服务端文件根目录" />
+                <form class="picker-address" @submit.prevent="jumpToAddress">
+                  <label for="picker-address-input">完整路径
+                    <input id="picker-address-input" v-model="addressInput" autocomplete="off" spellcheck="false" placeholder="粘贴完整路径" :disabled="loading || validating" :aria-invalid="Boolean(addressError)" :aria-describedby="addressError ? 'picker-address-error' : undefined" @focus="selectAddressInput" @input="addressPending = true; addressError = ''; selectedFilePath = ''" />
                   </label>
-                  <label>排序
-                    <GlassSelect v-model="sortValue" :options="sortOptions" aria-label="选择排序方式" />
-                  </label>
-                </div>
-
-                <form v-if="addressOpen" class="picker-address" @submit.prevent="jumpToAddress">
-                  <label>路径
-                    <input v-model.trim="addressInput" autocomplete="off" spellcheck="false" placeholder="输入完整路径" :disabled="loading" @focus="selectAddressInput" />
-                  </label>
-                  <div class="picker-actions">
-                    <button class="ghost-btn" type="button" :disabled="!parentPath || loading" @click="navigateToPath(parentPath || '/')">上级</button>
-                    <button class="ghost-btn" type="button" :disabled="loading" @click="refreshCurrentPath">刷新</button>
-                    <button class="primary-btn" type="submit" :disabled="loading">打开</button>
-                  </div>
+                  <button class="primary-btn" type="submit" :disabled="loading || validating || !addressInput.trim()">{{ loading ? '打开中…' : '打开' }}</button>
+                  <p v-if="addressError" id="picker-address-error" ref="addressErrorRef" class="field-error picker-address-error" role="alert" tabindex="-1">{{ addressError }}</p>
                 </form>
 
+                <div class="picker-toolbar">
+                  <label>位置<GlassSelect v-model="rootId" :options="rootOptions" aria-label="选择服务端文件根目录" /></label>
+                  <label>排序<GlassSelect v-model="sortValue" :options="sortOptions" aria-label="选择排序方式" /></label>
+                </div>
                 <div class="picker-location-tools">
                   <nav class="picker-breadcrumbs" aria-label="当前位置">
                     <button v-for="crumb in breadcrumbs" :key="crumb.path" type="button" :aria-label="crumb.name" :aria-current="crumb.path === currentPath ? 'location' : undefined" :title="crumb.name" :disabled="loading" @click="navigateToPath(crumb.path)">{{ crumb.name }}</button>
                   </nav>
-                  <button class="text-btn" type="button" :aria-expanded="addressOpen" @click="addressOpen = !addressOpen">{{ addressOpen ? '收起路径' : '输入路径' }}</button>
+                  <div class="picker-actions">
+                    <button class="ghost-btn" type="button" :disabled="!parentPath || loading" @click="navigateToPath(parentPath || '/')">上级</button>
+                    <button class="ghost-btn" type="button" :disabled="loading" @click="refreshCurrentPath">刷新</button>
+                  </div>
                 </div>
 
                 <div v-if="actionError" ref="actionErrorRef" class="alert error state-error" role="alert" tabindex="-1">
@@ -541,12 +573,12 @@ onBeforeUnmount(() => {
               </div>
 
               <div ref="pickerResultsRef" class="picker-results" tabindex="-1">
-                <div v-if="listError" ref="listErrorRef" class="alert error state-error picker-list-error" role="alert" tabindex="-1">
+                <div v-if="listError && !addressError" ref="listErrorRef" class="alert error state-error picker-list-error" role="alert" tabindex="-1">
                   <span>{{ listError }}</span>
                   <button class="ghost-btn" type="button" @click="retryLoadPath">重试</button>
                 </div>
 
-                <template v-else>
+                <template v-else-if="!addressError">
                   <p ref="listSummaryRef" class="picker-list-summary muted-text" role="status" tabindex="-1">{{ loading && !items.length ? '正在读取当前路径…' : listingSummary }}</p>
                   <p class="visually-hidden" aria-live="polite">{{ liveMessage }}</p>
 
@@ -554,11 +586,14 @@ onBeforeUnmount(() => {
                     <div class="picker-list-head" role="row">
                       <span role="columnheader">名称</span><span role="columnheader">类型</span><span role="columnheader">大小</span><span role="columnheader">修改时间</span><span role="columnheader">操作</span>
                     </div>
-                    <div v-for="(item, index) in items" :key="item.path" class="picker-row" role="row" :data-muted="!itemCanEnter(item) && !itemCanSelect(item)" @dblclick="enter(item)">
+                    <div v-for="(item, index) in items" :key="item.path" class="picker-row" role="row" :data-selected="selectedFilePath === item.path" :data-muted="!itemCanEnter(item) && !itemCanSelect(item)" @dblclick="enter(item)">
                       <span class="picker-cell picker-name" role="cell" data-label="名称">
                         <button v-if="itemCanEnter(item)" class="picker-name-value" type="button" :disabled="loading" @click="enter(item)">
                           <span class="picker-icon"><AppIcon name="folder" :size="18" /></span>
                           <span>{{ item.name }}</span>
+                        </button>
+                        <button v-else-if="mode === 'file' && itemCanSelect(item)" class="picker-name-value" type="button" :disabled="selectionBlocked" :aria-pressed="selectedFilePath === item.path" @click="selectedFilePath = item.path">
+                          <span class="picker-icon"><AppIcon name="file" :size="18" /></span><span>{{ item.name }}</span>
                         </button>
                         <span v-else class="picker-name-value">
                           <span class="picker-icon" :data-kind="itemVisualKind(item)">
@@ -570,11 +605,12 @@ onBeforeUnmount(() => {
                       </span>
                       <span class="picker-cell" role="cell" data-label="类型">{{ itemTypeLabel(item) }}</span>
                       <span class="picker-cell" role="cell" data-label="大小">{{ item.metadataKnown === false ? '未知' : formatSize(item.size) }}</span>
-                      <span class="picker-cell" role="cell" data-label="修改时间">{{ item.metadataKnown === false ? '未知' : item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : '—' }}</span>
+                      <span class="picker-cell" role="cell" data-label="修改时间">{{ item.metadataKnown === false ? '未知' : item.modifiedAt ? new Date(item.modifiedAt).toLocaleString('zh-CN', { hour12: false }) : '—' }}</span>
                       <span class="picker-cell picker-row-actions" role="cell" data-label="操作">
                         <span class="picker-action-buttons">
                           <button v-if="item.type === 'directory'" class="mini-btn" type="button" :disabled="loading || !itemCanEnter(item)" @click.stop="enter(item)">打开</button>
-                          <button v-if="item.type === mode" class="mini-btn" type="button" :disabled="loading || !itemCanSelect(item) || validating" :aria-describedby="itemUnavailableReason(item) ? itemReasonId(index) : undefined" @click.stop="selectPath(item.path)">选择</button>
+                          <button v-if="mode === 'file' && item.type === 'file'" class="mini-btn" type="button" :disabled="selectionBlocked || !itemCanSelect(item)" :aria-pressed="selectedFilePath === item.path" :aria-describedby="itemUnavailableReason(item) ? itemReasonId(index) : undefined" @click.stop="selectedFilePath = item.path">{{ selectedFilePath === item.path ? '已选' : '选中' }}</button>
+                          <button v-else-if="item.type === mode" class="mini-btn" type="button" :disabled="selectionBlocked || !itemCanSelect(item)" :aria-describedby="itemUnavailableReason(item) ? itemReasonId(index) : undefined" @click.stop="selectPath(item.path)">选择</button>
                         </span>
                         <small v-if="itemUnavailableReason(item)" :id="itemReasonId(index)" class="picker-unavailable-reason">{{ itemUnavailableReason(item) }}</small>
                       </span>
@@ -608,13 +644,14 @@ onBeforeUnmount(() => {
 
           <footer v-if="roots.length" class="picker-footer">
             <div class="picker-current-location">
-              <strong>{{ currentRoot?.name }}</strong>
-              <small>{{ currentPath }}</small>
+              <strong>{{ addressPending ? '待打开' : selectedFilePath ? selectedFilePath.split('/').pop() : '当前文件夹' }}</strong>
+              <small>{{ addressPending ? addressInput : displayAddress(currentRoot, selectedFilePath || currentPath) }}</small>
               <small v-if="currentDirectorySelectionNote">{{ currentDirectorySelectionNote }}</small>
             </div>
             <div class="picker-actions">
               <button class="ghost-btn" type="button" @click="close">取消</button>
-              <button v-if="mode === 'directory'" class="primary-btn" type="button" :disabled="loading || Boolean(listError) || !canSelectCurrentDirectory || validating" :aria-busy="validating" @click="selectPath(currentPath)">{{ validating ? '确认中…' : '选择此文件夹' }}</button>
+              <button v-if="mode === 'directory'" class="primary-btn" type="button" :disabled="selectionBlocked || !canSelectCurrentDirectory" :aria-busy="validating" @click="selectPath(currentPath)">{{ validating ? '确认中…' : '选择此文件夹' }}</button>
+              <button v-else class="primary-btn" type="button" :disabled="selectionBlocked || !selectedFilePath" :aria-busy="validating" @click="selectPath(selectedFilePath)">{{ validating ? '确认中…' : '选择文件' }}</button>
             </div>
           </footer>
         </section>
