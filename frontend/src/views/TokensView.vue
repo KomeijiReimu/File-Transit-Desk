@@ -290,7 +290,7 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="page-stack">
+  <section class="page-stack tokens-page">
     <header class="page-header">
       <h1>分享链接<span class="count-badge">{{ tokens.length }}</span></h1>
       <button class="primary-btn" type="button" @click="createOpen = !createOpen">{{ createOpen ? '收起表单' : '创建分享' }}</button>
@@ -304,8 +304,9 @@ onMounted(load)
     <div v-if="error" class="alert error" role="alert">{{ error }}</div>
     <p class="visually-hidden" aria-live="polite">{{ copyAnnouncement }}</p>
 
-    <div v-if="createOpen && ((!loading && !loadError) || dirs.length || tokens.length)">
-      <form class="panel form-grid" @submit.prevent="createToken">
+    <div class="management-layout" :class="{ 'with-editor': createOpen }">
+    <div v-if="createOpen && ((!loading && !loadError) || dirs.length || tokens.length)" class="management-editor">
+      <form class="panel form-grid token-create-form" @submit.prevent="createToken">
         <h2>创建分享</h2>
         <label>类型
           <GlassSelect v-model="form.type" :options="typeOptions" aria-label="分享用途" />
@@ -409,6 +410,7 @@ onMounted(load)
       <EmptyState v-else-if="!loading && (!loadError || lastSuccessfulAt)" title="还没有分享链接" />
     </div>
 
+    </div>
     <ConfirmDialog
       :open="Boolean(pendingRevoke)"
       title="撤销此分享链接？"

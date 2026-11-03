@@ -379,14 +379,17 @@ onBeforeUnmount(() => {
       <RouterLink v-if="canUpload && selectedDir && !loading" class="primary-btn" :to="{ name: 'upload', query: { dirId: selectedDirId, path: currentPath } }">上传文件</RouterLink>
     </header>
 
-    <div v-if="loading || listError" ref="listStateRef" class="list-state-anchor" :tabindex="listError ? -1 : undefined">
+    <div v-if="!dirs.length && (loading || listError)" ref="listStateRef" class="list-state-anchor" :tabindex="listError ? -1 : undefined">
       <StateBlock :loading="loading" :error="listError" retry-label="重新加载列表" @retry="retryListLoad" />
     </div>
     <p class="visually-hidden" aria-live="polite">{{ liveMessage }}</p>
 
     <EmptyState v-if="!loading && !listError && !dirs.length" title="还没有可用目录" />
 
-    <div v-if="dirs.length" ref="resourceBrowserRef" class="resource-browser" :aria-busy="loading" tabindex="-1" data-motion>
+    <div v-if="dirs.length" class="files-workbench">
+    <aside class="files-locations" aria-label="共享位置">
+      <h2>共享位置</h2>
+    <div ref="resourceBrowserRef" class="resource-browser" :aria-busy="loading" tabindex="-1">
       <button
         v-for="dir in dirs"
         :key="dir.id"
@@ -405,11 +408,17 @@ onBeforeUnmount(() => {
         </span>
       </button>
     </div>
+    </aside>
+
+    <div class="files-pane">
+    <div v-if="loading || listError" ref="listStateRef" class="list-state-anchor" :tabindex="listError ? -1 : undefined">
+      <StateBlock :loading="loading" :error="listError" retry-label="重新加载列表" @retry="retryListLoad" />
+    </div>
 
     <EmptyState v-if="!loading && dirs.length && !selectedDir" title="请选择共享位置" />
 
     <template v-if="selectedDir">
-      <div class="toolbar panel" data-motion>
+      <div class="toolbar files-toolbar">
         <nav class="breadcrumbs" aria-label="面包屑">
           <button v-for="crumb in crumbs" :key="crumb.path || 'root'" type="button" :aria-current="crumb.path === currentPath ? 'location' : undefined" :title="crumb.name" :disabled="loading" @click="navigateToPath(crumb.path)">
             {{ crumb.name }}
@@ -421,10 +430,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="!listError" class="table-card files-list-card" :aria-busy="loading || loadingMore" data-motion>
-        <div class="panel-head">
-          <p ref="listSummaryRef" class="muted-text" role="status" tabindex="-1">{{ loading ? '正在读取当前路径…' : listingSummary }}</p>
-        </div>
+      <div v-if="!listError" class="files-list-card" :aria-busy="loading || loadingMore">
         <div v-if="actionError" ref="actionErrorRef" class="alert error state-error files-action-error" role="alert" tabindex="-1">
           <span>{{ actionError }}</span>
           <button class="ghost-btn" type="button" @click="dismissActionError">关闭提示</button>
@@ -466,6 +472,9 @@ onBeforeUnmount(() => {
         </div>
         <EmptyState v-else-if="!loading && !truncated" title="当前路径为空" />
         <EmptyState v-else-if="!loading && truncated" title="扫描范围内没有可显示项目" />
+        <div class="files-status-bar">
+          <p ref="listSummaryRef" class="muted-text" role="status" tabindex="-1">{{ loading ? '正在读取当前路径…' : listingSummary }}</p>
+        </div>
         <div v-if="showLoadMoreFooter" class="load-more-footer">
           <div v-if="appendError" ref="appendErrorRef" class="alert error state-error" role="alert" tabindex="-1">
             <span>{{ appendError }}</span>
@@ -485,5 +494,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </template>
+    </div>
+    </div>
   </section>
 </template>

@@ -307,7 +307,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page-stack">
+  <section class="page-stack upload-page">
     <header class="page-header split">
       <h1>上传</h1>
       <div class="header-actions">
@@ -322,8 +322,10 @@ onUnmounted(() => {
     <EmptyState v-if="!loading && !error && !dirs.length" title="还没有可用目录" />
 
     <template v-else-if="selectedDir">
-      <div class="panel upload-target-card">
-        <label>保存位置
+      <div class="upload-workbench">
+      <aside class="upload-target-card">
+        <h2>保存位置</h2>
+        <label>共享位置
           <GlassSelect :model-value="selectedDirId" :options="dirOptions" aria-label="选择保存位置" placeholder="选择共享位置" :disabled="uploadBusy" @update:model-value="requestDirectoryChange" />
           <small v-if="selectedDir.description">{{ selectedDir.description }}</small>
         </label>
@@ -332,9 +334,15 @@ onUnmounted(() => {
           <input id="upload-target-path" ref="targetPathInput" v-model="targetPath" placeholder="留空则保存到当前共享位置" :disabled="uploadBusy || uploadQueue.length > 0" />
           <button v-if="uploadQueue.length && !uploading" class="mini-btn" type="button" :disabled="uploadBusy" @click="requestPathUnlock">更改上传路径</button>
         </div>
-      </div>
+        <dl v-if="limits" class="upload-limits">
+          <div><dt>单文件上限</dt><dd>{{ formatBytes(limits.uploadMaxFileBytes) }}</dd></div>
+          <div><dt>单次上传上限</dt><dd>{{ formatBytes(limits.uploadMaxBytes) }}</dd></div>
+        </dl>
+        <p v-if="uploading" class="upload-limit-note" role="status">上传期间请勿关闭页面。</p>
+      </aside>
 
-      <div class="panel upload-panel">
+      <div class="upload-panel">
+        <div class="section-heading"><h2>{{ uploading ? '正在上传' : uploadQueue.length ? '上传队列' : '选择文件' }}<span v-if="uploadQueue.length" class="count-badge">{{ uploadQueue.length }}</span></h2></div>
         <section
           class="dropzone compact"
           :class="{ over: dragOver, 'has-files': uploadQueue.length > 0 }"
@@ -348,11 +356,6 @@ onUnmounted(() => {
           <button class="upload-btn" type="button" :disabled="uploadBusy || !canUpload" @click="chooseFiles">选择文件</button>
           <input ref="fileInput" class="visually-hidden" type="file" multiple :disabled="uploadBusy || !canUpload" @change="onFileChange" />
         </section>
-
-        <div v-if="limits" class="upload-limit-note">
-          每个文件最多 {{ formatBytes(limits.uploadMaxFileBytes) }}，每次上传最多 {{ formatBytes(limits.uploadMaxBytes) }}。
-          <span v-if="uploading">上传期间请勿关闭页面。</span>
-        </div>
 
         <div v-if="uploadQueue.length" class="upload-summary">
           <div>
@@ -383,6 +386,7 @@ onUnmounted(() => {
             </div>
           </li>
         </ul>
+      </div>
       </div>
     </template>
 

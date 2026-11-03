@@ -142,10 +142,12 @@ onMounted(() => load())
 </script>
 
 <template>
-  <section class="page-stack">
+  <section class="page-stack users-page">
     <header class="page-header"><h1 ref="listTitle" tabindex="-1">用户管理<span class="count-badge">{{ total }}</span></h1><button class="primary-btn" type="button" :disabled="saving" @click="formOpen = !formOpen; formError = ''; form.password = ''; nextTick(() => usernameInput?.focus())">{{ formOpen ? '收起' : '创建账号' }}</button></header>
     <div v-if="notice" class="alert success" role="status">{{ notice }}</div>
 
+    <div class="management-layout" :class="{ 'with-editor': formOpen || resetUser }">
+    <div v-if="formOpen || resetUser" class="management-editor">
     <form v-if="formOpen" class="panel form-grid" @submit.prevent="createUser">
       <h2>创建账号</h2>
       <div class="inline-fields">
@@ -163,7 +165,9 @@ onMounted(() => load())
       <div class="form-actions"><button class="ghost-btn" type="button" :disabled="saving" @click="resetUser = null; resetPassword = ''">取消</button><button class="primary-btn" type="submit" :disabled="saving || !resetPassword">重置密码</button></div>
     </form>
 
-    <form class="panel filter-bar" @submit.prevent="searchUsers">
+    </div>
+    <div class="data-workbench">
+    <form class="filter-bar" @submit.prevent="searchUsers">
       <label>搜索用户<input v-model="query" type="search" placeholder="账号或显示名称" :disabled="loading" /></label>
       <label>状态<select v-model="status" :disabled="loading"><option value="">全部用户</option><option value="pending">待批准</option><option value="active">正常</option><option value="disabled">已停用</option></select></label>
       <button class="ghost-btn" type="submit" :disabled="loading">搜索</button>
@@ -189,6 +193,8 @@ onMounted(() => load())
       <EmptyState v-else-if="!loading && !error" title="没有匹配的用户" />
       <footer v-if="total > pageSize" class="pagination-bar"><span>第 {{ page }} / {{ totalPages }} 页</span><div class="row-actions"><button class="mini-btn" type="button" :disabled="loading || page <= 1" @click="load(page - 1)">上一页</button><button class="mini-btn" type="button" :disabled="loading || page >= totalPages" @click="load(page + 1)">下一页</button></div></footer>
     </section>
+    </div>
+    </div>
     <ConfirmDialog :open="Boolean(pending)" :title="dialogTitle" :message="dialogMessage" :detail="pending?.user.username" :error="actionError" :loading="saving" :confirm-label="pending?.kind === 'delete' ? '删除账号' : pending?.kind === 'reset' ? '重置密码' : '停用账号'" danger @cancel="pending = null" @confirm="confirmAction" />
   </section>
 </template>

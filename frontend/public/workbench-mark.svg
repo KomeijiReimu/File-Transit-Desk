@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>文件传输台</title>
+  <path fill="#cce3a2" d="M4 4h56v44a12 12 0 0 1-12 12H4z"/>
+  <path fill="#1c3b30" d="M12 18h16v5H18v8h9v5h-9v11h-6zm18 0h22v5h-8v24h-6V23h-8z"/>
+</svg>

@@ -29,7 +29,7 @@ const uploads = computed(() => transfers.value.filter((item) => item.type === 'u
 const downloads = computed(() => transfers.value.filter((item) => item.type === 'download' && item.status !== 'completed'))
 const refreshStatus = computed(() => {
   if (!lastSuccessfulAt.value) return '尚未成功更新'
-  return `最后更新：${lastSuccessfulAt.value.toLocaleTimeString()}`
+  return `最后更新：${lastSuccessfulAt.value.toLocaleTimeString('zh-CN', { hour12: false })}`
 })
 const cancelDialogMessage = computed(() => pendingCancel.value?.type === 'upload'
   ? '终止后，正在上传的数据会立即中断，发起方需要重新上传未完成的文件。'
@@ -175,18 +175,17 @@ onUnmounted(() => {
 
     <StateBlock :loading="loading && !lastSuccessfulAt" :error="!lastSuccessfulAt ? error : ''" retry-label="重试" @retry="load()" />
     <div v-if="dataStale" class="alert info stale-alert" role="status">
-      <span>刷新失败，当前显示的是 {{ lastSuccessfulAt?.toLocaleTimeString() }} 获取的数据。</span>
+      <span>刷新失败，当前显示的是 {{ lastSuccessfulAt?.toLocaleTimeString('zh-CN', { hour12: false }) }} 获取的数据。</span>
       <button class="ghost-btn" type="button" :disabled="loading" @click="load()">立即重试</button>
-    </div>
-
-    <div v-if="!loading && (lastSuccessfulAt || !error)" class="transfer-overview" data-motion>
-      <span><strong>{{ uploads.length }}</strong>项上传</span>
-      <span><strong>{{ downloads.length }}</strong>项下载</span>
     </div>
 
     <div v-if="!loading && (lastSuccessfulAt || !error)" class="panel table-panel transfer-panel" data-motion>
       <div class="panel-head">
-        <h2>传输任务</h2>
+        <h2 class="visually-hidden">传输任务</h2>
+        <div class="transfer-overview" aria-label="活跃传输数量">
+          <span><strong>{{ uploads.length }}</strong>项上传</span>
+          <span><strong>{{ downloads.length }}</strong>项下载</span>
+        </div>
         <span v-if="!dataStale" class="pill muted">{{ refreshStatus }}</span>
       </div>
       <div v-if="transfers.length" class="transfer-list">

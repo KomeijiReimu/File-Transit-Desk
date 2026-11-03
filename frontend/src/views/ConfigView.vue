@@ -395,10 +395,10 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           <h2>{{ editing ? '编辑共享位置' : '添加共享位置' }}</h2>
           <button class="ghost-btn" type="button" @click="requestResetForm">取消</button>
         </div>
-        <label>类型
-          <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择资源类型" />
-        </label>
-        <div class="inline-fields">
+        <div class="resource-form-fields">
+          <label>类型
+            <GlassSelect v-model="form.type" :options="typeOptions" aria-label="选择资源类型" />
+          </label>
           <label>标识
             <input ref="idInputRef" v-model.trim="form.id" :disabled="editing" placeholder="例如 photos 或 manual" :aria-invalid="Boolean(fieldErrors.id)" aria-describedby="resource-id-help resource-id-error" />
             <small id="resource-id-help">字母、数字、短横线或下划线</small>
@@ -411,12 +411,12 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         </div>
         <label>服务器路径
           <div class="path-picker-line">
-            <input ref="pathInputRef" v-model.trim="form.path" :placeholder="form.type === 'file' ? '/data/manual.pdf' : '/data/photos'" :aria-invalid="Boolean(fieldErrors.path)" aria-describedby="resource-path-help resource-path-error" />
+            <input ref="pathInputRef" v-model.trim="form.path" placeholder="粘贴完整路径" :aria-invalid="Boolean(fieldErrors.path)" aria-describedby="resource-path-error" />
             <button class="ghost-btn" type="button" @click="pickerOpen = true">浏览</button>
           </div>
-          <small id="resource-path-help">{{ form.type === 'file' ? '选择服务器上已有的文件。' : '选择服务器上已有的文件夹。' }}</small>
           <small v-if="fieldErrors.path" id="resource-path-error" class="field-error">{{ fieldErrors.path }}</small>
         </label>
+        <div class="resource-form-footer">
         <fieldset ref="permissionGroupRef" class="permission-fieldset" tabindex="-1" :aria-invalid="Boolean(fieldErrors.permissions)" aria-describedby="resource-permission-error">
           <legend>访问权限</legend>
           <div class="permission-row">
@@ -428,11 +428,15 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         <button class="primary-btn" type="submit" :disabled="saving || !configData?.configWritable">
           {{ saving ? '保存中…' : editing ? '保存修改' : '添加' }}
         </button>
+        </div>
       </form>
     </div>
 
-    <div v-if="configData" class="section-heading"><h2>共享位置<span class="count-badge">{{ resources.length }}</span></h2></div>
-    <section v-if="configData" class="cards-grid" aria-label="共享位置列表">
+    <div v-if="configData" class="settings-sheet">
+    <section class="settings-section">
+    <div class="settings-label"><h2>共享位置<span class="count-badge">{{ resources.length }}</span></h2></div>
+    <div class="settings-content">
+    <section class="resource-register" aria-label="共享位置列表">
       <article v-for="resource in resources" :key="resource.id" class="config-card resource-card">
         <div class="config-icon" :data-type="resourceType(resource)" aria-hidden="true">
           <AppIcon :name="resourceType(resource) === 'file' ? 'file-cog' : 'folder-cog'" :size="28" />
@@ -458,24 +462,14 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
       </article>
     </section>
     <EmptyState v-if="configData && !loading && !loadError && !resources.length" title="还没有共享位置" />
+    </div>
+    </section>
 
-    <details v-if="configData" class="panel disclosure">
-      <summary>传输与分享限制</summary>
-      <div class="policy-grid">
-        <div><span>单次请求</span><strong>{{ storage?.uploadMaxMB }} MB</strong></div>
-        <div><span>单文件</span><strong>{{ storage?.uploadMaxFileMB }} MB</strong></div>
-        <div><span>单次文件数</span><strong>{{ storage?.uploadMaxFiles }}</strong></div>
-        <div><span>令牌默认有效期</span><strong>{{ Math.round((tokens?.defaultTTLSeconds || 0) / 60) }} 分钟</strong></div>
-        <div><span>令牌最长有效期</span><strong>{{ Math.round((tokens?.maxTTLSeconds || 0) / 3600) }} 小时</strong></div>
-        <div><span>下载票据</span><strong>{{ Math.round((downloads?.leaseTTLSeconds || 0) / 60) }} 分钟</strong></div>
-        <div><span>内容哈希阈值</span><strong>{{ downloads?.contentHashMaxMB }} MB</strong></div>
-      </div>
-    </details>
-
-    <section v-if="configData" class="panel policy-panel upload-policy-editor">
+    <section class="settings-section">
+    <div class="settings-label"><h2>上传文件类型</h2></div>
+    <section class="policy-panel settings-content upload-policy-editor">
       <div class="form-title-row">
         <div>
-          <h2>上传文件类型</h2>
           <p v-if="uploadPolicy.allowedText.trim() || uploadPolicy.blockedText.trim()" class="muted-text">允许列表留空时，除禁止类型外均可上传。</p>
         </div>
         <button class="mini-btn" type="button" @click="uploadPolicy.allowedText = ''; uploadPolicy.blockedText = ''">清空</button>
@@ -494,9 +488,11 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         {{ policySaving ? '保存中…' : '保存上传限制' }}
       </button>
     </section>
+    </section>
 
-    <form v-if="configData" class="panel policy-panel" @submit.prevent="saveAccountPolicy">
-      <h2>登录与注册</h2>
+    <section class="settings-section">
+    <div class="settings-label"><h2 id="login-policy-heading">登录与注册</h2></div>
+    <form class="policy-panel settings-content" aria-labelledby="login-policy-heading" @submit.prevent="saveAccountPolicy">
       <div class="settings-switches">
         <label class="switch-line">开放账号注册<input v-model="accountPolicy.registrationEnabled" type="checkbox" :disabled="accountSaving || !configData.configWritable" /></label>
         <label class="switch-line">新注册账号需要管理员批准<input v-model="accountPolicy.registrationApprovalRequired" type="checkbox" :disabled="accountSaving || !configData.configWritable" /></label>
@@ -505,8 +501,27 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
       <div v-if="accountError" class="alert error" role="alert">{{ accountError }}</div>
       <button class="primary-btn" type="submit" :disabled="accountSaving || !accountDirty || !configData.configWritable">{{ accountSaving ? '保存中…' : '保存登录设置' }}</button>
     </form>
+    </section>
 
-    <details class="panel disclosure"><summary>服务访问地址</summary><ServiceAddressesCard /></details>
+    <section class="settings-section settings-secondary">
+      <div class="settings-label"><h2>高级</h2></div>
+      <div class="settings-content">
+        <details class="disclosure">
+          <summary>传输与分享限制</summary>
+          <div class="policy-grid">
+            <div><span>单次上传</span><strong>{{ storage?.uploadMaxMB }} MiB</strong></div>
+            <div><span>单个文件</span><strong>{{ storage?.uploadMaxFileMB }} MiB</strong></div>
+            <div><span>单次文件数</span><strong>{{ storage?.uploadMaxFiles }}</strong></div>
+            <div><span>分享默认有效期</span><strong>{{ Math.round((tokens?.defaultTTLSeconds || 0) / 60) }} 分钟</strong></div>
+            <div><span>分享最长有效期</span><strong>{{ Math.round((tokens?.maxTTLSeconds || 0) / 3600) }} 小时</strong></div>
+            <div><span>下载授权有效期</span><strong>{{ Math.round((downloads?.leaseTTLSeconds || 0) / 60) }} 分钟</strong></div>
+            <div><span>内容校验范围</span><strong>{{ downloads?.contentHashMaxMB === 0 ? '全部文件' : `不大于 ${downloads?.contentHashMaxMB} MiB 的文件` }}</strong></div>
+          </div>
+        </details>
+        <details class="disclosure"><summary>服务访问地址</summary><ServiceAddressesCard /></details>
+      </div>
+    </section>
+    </div>
 
     <ServerFilePicker v-model:open="pickerOpen" :mode="form.type === 'file' ? 'file' : 'directory'" @confirm="handlePick" />
 

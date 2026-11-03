@@ -170,7 +170,8 @@ function statusText(log: AuditLog) {
       <button class="ghost-btn" :disabled="loading" @click="refresh">刷新</button>
     </header>
 
-    <div class="panel filter-bar">
+    <div class="data-workbench">
+    <div class="filter-bar">
       <label>搜索记录<input v-model="keyword" maxlength="200" placeholder="IP、操作代码或详情" /></label>
       <label>状态
         <GlassSelect v-model="status" :options="statusOptions" aria-label="筛选访问记录状态" />
@@ -212,5 +213,6 @@ function statusText(log: AuditLog) {
       v-else-if="displaysCurrentFilter && !loading && !dataStale && (!error || lastSuccessfulAt)"
       :title="hasFilters ? '没有匹配记录' : '暂无访问记录'"
     />
+    </div>
   </section>
 </template>

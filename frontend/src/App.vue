@@ -121,10 +121,14 @@ async function handleLogout() {
         </div>
         <span class="status-dot" title="已登录" />
       </div>
-      <button class="ghost-btn full" type="button" :disabled="!protectedSubjectReady" @click="handleLogout">退出登录</button>
+      <button class="ghost-btn full sidebar-logout" type="button" :disabled="!protectedSubjectReady" @click="handleLogout">退出登录</button>
     </aside>
 
     <main id="main-content" class="content" tabindex="-1" data-route-focus>
+      <div class="workspace-topline">
+        <strong>文件传输台</strong>
+        <div class="workspace-session"><span class="status-dot" aria-hidden="true" /><span :title="displayName">{{ displayName }}</span><small>{{ roleLabel }}</small></div>
+      </div>
       <RouterView
         v-if="protectedSubjectReady"
         :key="protectedSessionBinding"

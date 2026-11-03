@@ -39,8 +39,9 @@ async function changePassword() {
 <template>
   <section class="page-stack account-layout">
     <header class="page-header"><h1>账号设置</h1></header>
-    <div class="panel account-identity"><span class="avatar">{{ (authState.user?.name || authState.user?.username || '我').slice(0, 1) }}</span><div><h2>{{ authState.user?.name || authState.user?.username }}</h2><p v-if="authState.user?.name && authState.user.name !== authState.user.username">{{ authState.user?.username }}</p></div></div>
-    <form v-if="authState.user?.authMethod === 'account'" class="panel form-grid" @submit.prevent="changePassword">
+    <div class="account-sheet">
+    <aside class="account-identity"><span class="avatar">{{ (authState.user?.name || authState.user?.username || '我').slice(0, 1) }}</span><div><h2>{{ authState.user?.name || authState.user?.username }}</h2><p v-if="authState.user?.name && authState.user.name !== authState.user.username">{{ authState.user?.username }}</p></div></aside>
+    <form v-if="authState.user?.authMethod === 'account'" class="form-grid" @submit.prevent="changePassword">
       <h2>修改密码</h2>
       <label>当前密码<input v-model="currentPassword" type="password" autocomplete="current-password" required :disabled="saving" /></label>
       <label>新密码<input v-model="newPassword" type="password" autocomplete="new-password" required :disabled="saving" /></label>
@@ -50,5 +51,6 @@ async function changePassword() {
       <div class="form-actions"><button class="primary-btn" type="submit" :disabled="saving">{{ saving ? '保存中…' : '修改密码并退出' }}</button></div>
     </form>
     <div v-else class="alert info">当前登录方式不支持在此修改密码。</div>
+    </div>
   </section>
 </template>
