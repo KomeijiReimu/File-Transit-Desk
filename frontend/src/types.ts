@@ -144,6 +144,7 @@ export interface FilePickerRoot {
 export interface FilePickerResolveResponse {
   root: FilePickerRoot
   path: string
+  filePath?: string
 }
 
 export interface FilePickerItem {
