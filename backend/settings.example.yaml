@@ -81,10 +81,10 @@ cors:
   # 生产默认同源；仅显式跨域部署时填写。-dev 会单独允许指定的开发前端端口。
   allow_origins: []
 storage:
-  # 整个请求体上限；后端 Fiber BodyLimit 也使用该值。
-  upload_max_mb: 5120
-  # 单个文件上限，必须小于等于 upload_max_mb。
-  upload_max_file_mb: 5120
+  # 整个请求体上限，默认 100 GiB（102400 MiB）；后端 Fiber BodyLimit 也使用该值。
+  upload_max_mb: 102400
+  # 单个文件上限，默认 100 GiB，必须小于等于 upload_max_mb。
+  upload_max_file_mb: 102400
   # 单次 multipart 请求最多允许的文件数量。
   upload_max_files: 20
   # 崩溃或取消后残留的 .upload-*.tmp 临时文件保留时间。
@@ -135,8 +135,8 @@ tokens:
   default_ttl_seconds: 3600
   # 管理员创建令牌时允许的最长有效期，防止误创建长期公开链接。
   max_ttl_seconds: 86400
-  # 单个上传令牌的累计上传容量；0 表示不限制。
-  upload_max_mb: 5120
+  # 单个上传令牌的累计上传容量，默认 100 GiB（102400 MiB）；0 表示不限制。
+  upload_max_mb: 102400
 audit:
   retain: 1000
   # 0 表示不按时间抑制，事件仍会写审计。

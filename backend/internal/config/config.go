@@ -365,8 +365,8 @@ func Default() *Config {
 	c.Downloads.LeaseMaxTTLSeconds = int64((6 * time.Hour) / time.Second)
 	c.Downloads.ContentHashMaxMB = 64
 	c.Downloads.MaxConcurrentHashes = 2
-	c.Storage.UploadMaxMB = 5120
-	c.Storage.UploadMaxFileMB = 5120
+	c.Storage.UploadMaxMB = 102400
+	c.Storage.UploadMaxFileMB = 102400
 	c.Storage.UploadMaxFiles = 20
 	c.Storage.UploadTempRetentionSeconds = 86400
 	c.Storage.UploadTempCleanupIntervalSeconds = 3600
@@ -378,7 +378,7 @@ func Default() *Config {
 	c.FilePicker.MaxPageSize = 200
 	c.Tokens.DefaultTTLSeconds = 3600
 	c.Tokens.MaxTTLSeconds = int64((24 * time.Hour) / time.Second)
-	c.Tokens.UploadMaxMB = 5120
+	c.Tokens.UploadMaxMB = 102400
 	c.Audit.Retain = 1000
 	c.Audit.UnauthorizedSampleSeconds = 60
 	c.Audit.UnauthorizedGlobalPerMinute = 120

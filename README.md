@@ -46,6 +46,8 @@ python3 scripts/hash-admin-password.py --format bootstrap
 python3 scripts/generate-totp-secret.py
 ```
 
+默认单文件、单次上传请求及每个上传分享的累计额度均为 100 GiB（102400 MiB）；已有显式限制保持不变。
+
 ### 2. 启动
 
 Linux / macOS：
@@ -157,7 +159,7 @@ cp settings.example.yaml config/settings.yaml
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
-默认访问 `http://服务器地址:17878`。前端 nginx 代理后端，上传上限为 10G，并关闭请求体缓冲。
+默认访问 `http://服务器地址:17878`。前端 nginx 代理后端，上传请求上限为 100 GiB，并关闭请求体缓冲。
 
 配置目录整体挂载到 `/app/config`，以支持原子保存。容器以非 root 用户运行，配置、数据库及上传目录需具有相应权限。新增宿主机共享目录时，将该目录挂载进后端容器后再选择容器内路径。
 
