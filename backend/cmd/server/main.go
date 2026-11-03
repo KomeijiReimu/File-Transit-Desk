@@ -52,7 +52,7 @@ func realMain() int {
 		return 1
 	}
 	if created {
-		log.Printf("已生成首次启动配置：%s 和同目录 settings.yaml。请填写管理员用户名和密码摘要后重新启动。密码工具支持 --format bootstrap；如需启用动态验证码登录，请在 settings.yaml 配置 auth.totp_secret 并启用 accounts.totp_enabled。", abs)
+		log.Printf("已生成首次启动配置：%s 和同目录 settings.yaml。请填写管理员用户名和密码摘要，密码工具支持 --format bootstrap。动态验证码登录默认开启；请从仓库根目录运行 python3 scripts/generate-totp-secret.py，将生成的密钥填入 settings.yaml 的 auth.totp_secret 后重新启动。", abs)
 		return 1
 	}
 

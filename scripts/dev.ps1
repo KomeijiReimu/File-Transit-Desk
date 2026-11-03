@@ -32,6 +32,8 @@ if (-not (Test-Path -LiteralPath $BackendConfigPath -PathType Leaf)) {
   Write-Host "服务设置（保留已有文件）：$SettingsPath"
   Write-Host '请设置 admin.username/password_hash，并检查 settings.yaml。生成密码块：'
   Write-Host ("  python `"{0}`" --format bootstrap" -f (Join-Path $PSScriptRoot 'hash-admin-password.py'))
+  Write-Host '动态验证码登录默认开启；请将生成的密钥填入 settings.yaml 的 auth.totp_secret：'
+  Write-Host ("  python `"{0}`"" -f (Join-Path $PSScriptRoot 'generate-totp-secret.py'))
   Write-Host '配置完成后，请使用本次相同的启动参数重新运行。'
   exit 1
 }

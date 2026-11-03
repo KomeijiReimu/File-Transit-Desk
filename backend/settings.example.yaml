@@ -2,7 +2,8 @@
 accounts:
   registration_enabled: true
   registration_approval_required: true
-  totp_enabled: false
+  # 动态验证码登录默认开启；首次启动前须填写 auth.totp_secret。
+  totp_enabled: true
 server:
   host: "0.0.0.0"
   port: 17878
@@ -14,7 +15,7 @@ server:
 database:
   path: "./data/filetrans.db"
 auth:
-  # 启用动态验证码登录前，填写自己的 Base32 TOTP secret。
+  # 从仓库根目录运行 python3 scripts/generate-totp-secret.py，将生成的独立 Base32 密钥填入此处。
   totp_secret: ""
   # 仅本地开发可改为 true；还必须以 -dev 启动，且 totp_secret 为空时才接受 000000。
   dev_allow_fixed_code: false

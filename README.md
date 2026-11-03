@@ -40,7 +40,7 @@ python3 scripts/hash-admin-password.py --format bootstrap
 
 工具隐藏输入并要求确认。将输出填入 `backend/config.yaml`。自动化调用通过受保护的标准输入提供密码，不要将密码写进命令行参数。
 
-`settings.yaml` 保存服务、共享资源、注册策略和传输限制。新模板默认使用账号登录，管理员登录后可维护共享位置和常用策略。需要临时码登录时，先生成密钥填写 `auth.totp_secret`，再启用 `accounts.totp_enabled`；已有配置的临时码设置保持不变：
+`settings.yaml` 保存服务、共享资源、注册策略和传输限制。新模板默认同时启用账号登录和 TOTP 动态验证码登录（`accounts.totp_enabled: true`）。首次启动前生成独立密钥，填入 `settings.yaml` 的 `auth.totp_secret` 并导入手机验证器；已有配置的显式临时码设置保持不变：
 
 ```bash
 python3 scripts/generate-totp-secret.py
@@ -62,7 +62,7 @@ Windows PowerShell：
 pwsh -File scripts/dev.ps1
 ```
 
-也可以从其他工作目录通过脚本的完整路径调用。首次缺少配置时，脚本生成模板并退出；填写管理员凭据后再次运行，其他设置可按需调整。
+也可以从其他工作目录通过脚本的完整路径调用。首次缺少配置时，脚本生成模板并退出；填写管理员凭据及 TOTP 密钥后再次运行，其他设置可按需调整。
 
 默认入口：
 
@@ -153,7 +153,7 @@ cp config.example.yaml config/config.yaml
 cp settings.example.yaml config/settings.yaml
 ```
 
-填写管理员凭据，并在 `config/settings.yaml` 中使用容器内路径：数据库为 `/app/data/filetrans.db`，默认上传目录为 `/app/uploads`。
+填写管理员凭据及 `config/settings.yaml` 的 `auth.totp_secret`，并使用容器内路径：数据库为 `/app/data/filetrans.db`，默认上传目录为 `/app/uploads`。
 
 ```bash
 docker compose -f docker-compose.example.yml up -d --build

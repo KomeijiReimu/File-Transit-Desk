@@ -25,7 +25,7 @@ pwsh -File scripts/dev.ps1
 cd backend
 cp config.example.yaml config.yaml
 cp settings.example.yaml settings.yaml
-# 在 config.yaml 填写管理员用户名及密码摘要，在 settings.yaml 配置服务
+# 在 config.yaml 填写管理员用户名及密码摘要，在 settings.yaml 填写独立 auth.totp_secret 并配置服务
 go run ./cmd/server -config config.yaml
 ```
 
@@ -35,7 +35,7 @@ go run ./cmd/server -config config.yaml
 
 - `config.example.yaml` 是管理员身份模板，密码摘要需填写有效的 Argon2id PHC；服务设置模板为 `settings.example.yaml`。
 - `auth.dev_allow_fixed_code` 默认是 `false`。只有显式设置为 `true`、`auth.totp_secret` 为空且以 `-dev` 启动时，才允许开发验证码 `000000`。
-- 启用动态验证码登录时，`auth.totp_secret` 必须是有效且长度足够的 Base32 密钥；关闭此登录方式时可留空。示例占位符、无效的非空密钥和危险 CORS 通配符会被拒绝。
+- 动态验证码登录默认开启（`accounts.totp_enabled: true`），首次启动前须从仓库根目录运行 `python3 scripts/generate-totp-secret.py`，将独立密钥填入 `settings.yaml` 的 `auth.totp_secret` 并导入手机验证器。密钥必须是有效且长度足够的 Base32；显式关闭此登录方式时可留空。示例占位符、无效的非空密钥和危险 CORS 通配符会被拒绝。
 - 登录接口带有内存级失败限速：同一来源短时间内多次失败会被临时拒绝，降低 TOTP 在线猜测风险。
 - 普通账号与 TOTP 登录角色为 `user`，可访问开放资源与聊天室；用户管理、临时令牌、管理员聊天视图和审计只允许 `admin` 访问。
 - 管理员通过独立接口登录，优先使用 Argon2id PHC；旧 SHA-256 配置仅保留迁移兼容。用户名使用固定长度常量时间比较，错误用户名也会执行密码验证。

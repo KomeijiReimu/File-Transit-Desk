@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"filetrans-backend/internal/security"
+	"gopkg.in/yaml.v3"
 )
 
 func TestPrepareAtomicCommitAndAbort(t *testing.T) {
@@ -283,13 +284,29 @@ func TestConfigValidatesDownloadContentHashLimit(t *testing.T) {
 }
 
 func TestConfigAllowsLargeLANUploadLimit(t *testing.T) {
-	// 局域网传输可能需要 10GB 以上的大文件上传；只保留极高防误配上限，不把 50GB 这类常见私有传输场景挡掉。
+	// 默认与模板同时支持 100 GiB，仍保留原有上传容量校验上限。
 	c := validTestConfig()
-	c.Storage.UploadMaxMB = 51200
-	c.Storage.UploadMaxFileMB = 51200
-	c.Tokens.UploadMaxMB = 51200
+	example, err := os.ReadFile("../../settings.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := Default()
+	if err := yaml.Unmarshal(example, template); err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []*Config{c, template} {
+		if cfg.Storage.UploadMaxMB != 102400 || cfg.Storage.UploadMaxFileMB != 102400 || cfg.Tokens.UploadMaxMB != 102400 || !cfg.Accounts.TOTPEnabled {
+			t.Fatal("defaults and example must allow 100 GiB and enable TOTP")
+		}
+	}
+	if template.Auth.TOTPSecret != "" || template.Auth.DevAllowFixedCode {
+		t.Fatal("example must require an independent TOTP secret without a development bypass")
+	}
+	if err := template.validate(); err == nil || !strings.Contains(err.Error(), "auth.totp_secret") {
+		t.Fatalf("expected missing TOTP secret to prevent first startup: %v", err)
+	}
 	if err := c.validate(); err != nil {
-		t.Fatalf("expected 50GB upload limit to pass validation: %v", err)
+		t.Fatalf("expected default 100 GiB upload limit to pass validation: %v", err)
 	}
 
 	c.Storage.UploadMaxMB = maxUploadLimitMB + 1
