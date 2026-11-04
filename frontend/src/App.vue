@@ -55,7 +55,7 @@ async function handleLogout() {
   <div v-else class="app-shell">
     <aside class="sidebar" @keydown.esc="mobileNavOpen = false">
       <RouterLink class="brand" to="/files" aria-label="回到文件浏览">
-        <span class="brand-mark">FT</span>
+        <img class="brand-mark" src="/workbench-mark.svg" width="40" height="40" alt="" aria-hidden="true" />
         <strong>文件传输台</strong>
       </RouterLink>
 

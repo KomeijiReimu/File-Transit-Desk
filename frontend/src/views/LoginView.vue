@@ -176,7 +176,7 @@ onMounted(loadOptions)
   <main id="main-content" class="login-page" tabindex="-1" data-route-focus>
     <div class="login-layout">
       <header class="login-identity">
-        <div class="brand"><span class="brand-mark">FT</span><strong>文件传输台</strong></div>
+        <div class="brand"><img class="brand-mark" src="/workbench-mark.svg" width="40" height="40" alt="" aria-hidden="true" /><strong>文件传输台</strong></div>
         <div class="login-wordmark" aria-hidden="true">文件<br />传输台<span class="login-wordmark-rule" /></div>
         <div class="login-document-mark" aria-hidden="true"><span /><span /><span /></div>
       </header>

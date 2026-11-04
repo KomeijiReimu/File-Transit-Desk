@@ -64,7 +64,7 @@ code { font: 12px/1.65 'Cascadia Code', 'SFMono-Regular', 'Liberation Mono', mon
 .app-shell { display: grid; grid-template-columns: 88px minmax(0, 1fr); min-height: 100dvh; }
 .sidebar { position: sticky; top: 0; height: 100dvh; display: flex; flex-direction: column; gap: 14px; padding: 20px 10px 12px; background: var(--rail); color: #e5edde; }
 .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.brand-mark { display: grid; place-items: center; width: 38px; height: 40px; flex: 0 0 auto; background: var(--accent-2); color: var(--rail); border-radius: 3px 3px 10px 3px; font: 750 17px/1 'Cascadia Code', ui-monospace, monospace; letter-spacing: -1px; }
+.brand-mark { display: block; width: 38px; height: 40px; flex: 0 0 auto; object-fit: contain; }
 .brand strong { font-size: 14px; font-weight: 600; white-space: nowrap; }
 .sidebar > .brand { justify-content: center; padding-bottom: 8px; }
 .sidebar > .brand strong { display: none; }
@@ -630,7 +630,7 @@ button.picker-name-value:hover { color: var(--accent); }
   .sidebar { position: sticky; z-index: 80; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0; height: auto; padding: 12px 18px; }
   .sidebar > .brand { justify-content: start; padding: 0; }
   .sidebar > .brand strong { display: inline; color: #e9f0e0; font-size: 13px; }
-  .brand-mark { width: 34px; height: 36px; font-size: 15px; }
+  .brand-mark { width: 34px; height: 36px; }
   .mobile-nav-toggle.ghost-btn { display: inline-flex; width: 40px; height: 40px; min-height: 40px; padding: 8px; border-color: #65816b; color: #d7e5cf; background: transparent; }
   .mobile-nav-toggle > span { display: none; }
   .nav-list { display: none; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; max-height: calc(100dvh - 150px); padding-top: 16px; overflow: auto; }
